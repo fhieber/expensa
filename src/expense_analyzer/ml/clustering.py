@@ -61,7 +61,7 @@ def cluster_all(
     labels = clusterer.fit_predict(reduced)
 
     # Persist back to expenses
-    payload = [(int(label), int(eid)) for eid, label in zip(df.index, labels)]
+    payload = [(int(label), int(eid)) for eid, label in zip(df.index, labels, strict=True)]
     conn.executemany("UPDATE expenses SET cluster_id = ? WHERE id = ?", payload)
     n_clusters = int(len({lbl for lbl in labels if lbl != -1}))
     n_outliers = int((labels == -1).sum())

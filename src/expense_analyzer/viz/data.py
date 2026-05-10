@@ -12,7 +12,6 @@ from datetime import date
 
 import pandas as pd
 
-
 _LATEST_LABEL_CTE = """
 WITH latest_label AS (
     SELECT l.expense_id, l.category_id

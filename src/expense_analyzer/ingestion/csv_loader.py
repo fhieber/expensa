@@ -151,7 +151,7 @@ def parse_csv(path: Path) -> list[ParsedRow]:
         # Pad short rows so dict mapping doesn't fail.
         if len(raw_row) < len(headers):
             raw_row = raw_row + [""] * (len(headers) - len(raw_row))
-        rec = dict(zip(headers, raw_row))
+        rec = dict(zip(headers, raw_row, strict=False))
         try:
             out.append(
                 ParsedRow(

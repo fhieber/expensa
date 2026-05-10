@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 from abc import ABC, abstractmethod
-from typing import Iterable
+from collections.abc import Iterable
 
 import numpy as np
 
@@ -151,7 +151,7 @@ def store_embeddings(
     vectors = embedder.encode([t for _, t in pending])
     payloads = [
         (eid, embedder.model_name, embedder.dim, vec.tobytes())
-        for (eid, _), vec in zip(pending, vectors)
+        for (eid, _), vec in zip(pending, vectors, strict=True)
     ]
     conn.executemany(
         "INSERT OR REPLACE INTO embeddings(expense_id, model_name, dim, vector) VALUES (?, ?, ?, ?)",

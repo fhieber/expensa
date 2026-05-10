@@ -81,7 +81,13 @@ target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "UP", "B", "SIM"]
-ignore = ["E501"]  # line length handled by formatter
+ignore = [
+    "E501",   # line length handled by formatter
+    "N806",   # ML uses uppercase X / X_cache by convention
+    "N818",   # Exception suffix not required for our domain types
+    "SIM102", # nested-if rewrites hurt readability of Streamlit forms
+    "SIM105", # try/except/pass is clearer than contextlib.suppress here
+]
 
 [tool.black]
 line-length = 100

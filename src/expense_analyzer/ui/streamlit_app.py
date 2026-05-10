@@ -45,7 +45,6 @@ from expense_analyzer.viz import (
     trend_lines,
 )
 
-
 # --- Boot --------------------------------------------------------------------
 
 st.set_page_config(page_title="expense-analyzer-de", layout="wide")

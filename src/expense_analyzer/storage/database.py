@@ -4,12 +4,11 @@ the dependency surface small and the SQL transparent."""
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import date, datetime
 from importlib import resources
 from pathlib import Path
-from typing import Iterator
-
 
 SCHEMA_RESOURCE = ("expense_analyzer.storage", "schema.sql")
 

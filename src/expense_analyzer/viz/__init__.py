@@ -16,7 +16,6 @@ from expense_analyzer.viz.data import (
 )
 from expense_analyzer.viz.exporter import save_figure
 
-
 CHART_BUILDERS = {
     "pie": (spend_by_category, pie_chart),
     "histogram": (amount_distribution, histogram_amounts),

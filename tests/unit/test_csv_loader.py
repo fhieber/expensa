@@ -10,10 +10,10 @@ import pytest
 
 from expense_analyzer.ingestion.csv_loader import (
     CsvParseError,
-    parse_csv,
+    _normalize_header,
     _parse_amount,
     _parse_date,
-    _normalize_header,
+    parse_csv,
 )
 
 

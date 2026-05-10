@@ -11,11 +11,9 @@ Each stage emits a Prediction or yields to the next.
 
 from __future__ import annotations
 
-import io
-import json
 import sqlite3
-from dataclasses import dataclass, field
-from typing import Sequence
+from collections.abc import Sequence
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -139,10 +137,10 @@ class CategorizationCascade:
     # ---- training -------------------------------------------------------
 
     def fit(self) -> FitReport:
-        from sklearn.linear_model import LogisticRegression
         from sklearn.ensemble import RandomForestClassifier
-        from sklearn.preprocessing import StandardScaler
+        from sklearn.linear_model import LogisticRegression
         from sklearn.pipeline import Pipeline
+        from sklearn.preprocessing import StandardScaler
 
         labels = labeled_ids_with_categories(self.conn, source="user")
         if len(labels) < 2:
@@ -163,8 +161,6 @@ class CategorizationCascade:
         keep_mask = np.array([eid in df.index for eid in ids])
         y = y[keep_mask]
         assert emb is not None
-        # Reorder embeddings to df.index
-        id_to_pos = {eid: i for i, eid in enumerate(ids) if keep_mask[i]}
         # build_full_features already aligned emb with df.index, so just use as-is
         X = _build_x(df, emb)
 
@@ -236,7 +232,7 @@ class CategorizationCascade:
         # Lazy-build the X matrix only if we actually need the classifier.
         X_cache = None
 
-        for i, eid in enumerate(expense_ids):
+        for eid in expense_ids:
             if eid not in df.index:
                 out.append(
                     Prediction(eid, None, 0.0, "unknown", notes="not found / no features")
@@ -329,7 +325,7 @@ class CategorizationCascade:
                     "zero-shot-classification",
                     model=self.cfg.zeroshot_model,
                 )
-            except Exception as e:
+            except Exception:
                 # Network or HF cache unreachable; skip silently.
                 self._zs = lambda *_a, **_kw: None  # type: ignore
                 return None, 0.0

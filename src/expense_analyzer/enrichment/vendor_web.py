@@ -18,7 +18,6 @@ from datetime import datetime, timedelta, timezone
 
 from expense_analyzer.config import VendorLookupConfig
 
-
 _INDUSTRY_HINTS: list[tuple[tuple[str, ...], str]] = [
     (("supermarkt", "lebensmittel", "rewe", "edeka", "aldi", "lidl", "penny", "netto", "kaufland"),
      "supermarket"),
@@ -106,9 +105,9 @@ def _ddg_search(query: str, max_results: int = 3) -> str:
 
 def _searxng_search(base_url: str, query: str, max_results: int = 3) -> str:
     """Send `query` to a SearxNG instance. Only `query` leaves the machine."""
+    import json as _json
     import urllib.parse
     import urllib.request
-    import json as _json
 
     if not base_url:
         return ""

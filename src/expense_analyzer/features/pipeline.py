@@ -7,8 +7,9 @@ proxies, embeddings) are materialized here on demand.
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Sequence
 from datetime import date
-from typing import Sequence
+from decimal import Decimal
 
 import numpy as np
 import pandas as pd
@@ -22,8 +23,6 @@ from expense_analyzer.features.temporal import (
     days_since_prev_to_same_counterparty,
     is_likely_recurring,
 )
-from decimal import Decimal
-
 
 _BASE_COLUMNS = [
     "id",

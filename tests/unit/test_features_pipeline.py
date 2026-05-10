@@ -20,7 +20,6 @@ from expense_analyzer.features.pipeline import (
 from expense_analyzer.features.similarity import best_fuzzy_match_known_vendor
 from expense_analyzer.features.temporal import (
     basic_calendar_features,
-    days_since_prev_to_same_counterparty,
     is_likely_recurring,
 )
 from expense_analyzer.ingestion import ingest_csv

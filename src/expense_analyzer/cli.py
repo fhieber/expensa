@@ -11,7 +11,6 @@ import os
 import shutil
 import sqlite3
 import subprocess
-import sys
 from datetime import date
 from pathlib import Path
 
@@ -24,7 +23,6 @@ from expense_analyzer.config import (
     packaged_default_categories,
 )
 from expense_analyzer.utils.logging import configure_logging
-
 
 _CTX_KEY = "ea_state"
 
