@@ -118,3 +118,92 @@ def test_vendor_lookup_disabled_message(tmp_path: Path) -> None:
     r = runner.invoke(cli, ["vendor-lookup", "REWE"], env=_runner_env(tmp_path))
     assert r.exit_code != 0
     assert "enabled is False" in r.output
+
+
+def test_categories_remove_unused(tmp_path: Path) -> None:
+    runner = CliRunner()
+    runner.invoke(cli, ["init"], env=_runner_env(tmp_path))
+    runner.invoke(cli, ["categories", "add", "ToRemove"], env=_runner_env(tmp_path))
+    r = runner.invoke(
+        cli, ["categories", "remove", "ToRemove", "--yes"], env=_runner_env(tmp_path)
+    )
+    assert r.exit_code == 0, r.output
+    assert "removed ToRemove" in r.output
+
+
+def test_categories_remove_missing_returns_error(tmp_path: Path) -> None:
+    runner = CliRunner()
+    runner.invoke(cli, ["init"], env=_runner_env(tmp_path))
+    r = runner.invoke(
+        cli, ["categories", "remove", "Ghost", "--yes"], env=_runner_env(tmp_path)
+    )
+    assert r.exit_code != 0
+    assert "no such category" in r.output
+
+
+def test_categories_remove_refuses_when_labels_exist(
+    tmp_path: Path, fixtures_dir: Path
+) -> None:
+    runner = CliRunner()
+    runner.invoke(cli, ["init"], env=_runner_env(tmp_path))
+    runner.invoke(
+        cli, ["ingest", str(fixtures_dir / "sample_de.csv")], env=_runner_env(tmp_path)
+    )
+    # Manually attach a label to category #1.
+    import sqlite3
+
+    conn = sqlite3.connect(str(tmp_path / "db.sqlite"))
+    conn.execute("INSERT INTO labels(expense_id, category_id, source) VALUES (1, 1, 'user')")
+    conn.commit()
+    name = conn.execute("SELECT name FROM categories WHERE id=1").fetchone()[0]
+    conn.close()
+
+    r = runner.invoke(
+        cli, ["categories", "remove", name, "--yes"], env=_runner_env(tmp_path)
+    )
+    assert r.exit_code != 0
+    assert "refusing" in r.output
+
+    r2 = runner.invoke(
+        cli,
+        ["categories", "remove", name, "--force", "--yes"],
+        env=_runner_env(tmp_path),
+    )
+    assert r2.exit_code == 0, r2.output
+    assert "1 label(s) cascaded" in r2.output
+
+
+def test_reset_clears_data_keeps_categories(tmp_path: Path, fixtures_dir: Path) -> None:
+    runner = CliRunner()
+    runner.invoke(cli, ["init"], env=_runner_env(tmp_path))
+    runner.invoke(
+        cli, ["ingest", str(fixtures_dir / "sample_de.csv")], env=_runner_env(tmp_path)
+    )
+    r = runner.invoke(cli, ["reset", "--yes"], env=_runner_env(tmp_path))
+    assert r.exit_code == 0, r.output
+    s = runner.invoke(cli, ["status"], env=_runner_env(tmp_path))
+    assert "expenses:     0" in s.output
+    assert "categories:   17" in s.output  # default cats kept
+
+
+def test_reset_all_wipes_categories_too(tmp_path: Path, fixtures_dir: Path) -> None:
+    runner = CliRunner()
+    runner.invoke(cli, ["init"], env=_runner_env(tmp_path))
+    runner.invoke(
+        cli, ["ingest", str(fixtures_dir / "sample_de.csv")], env=_runner_env(tmp_path)
+    )
+    r = runner.invoke(cli, ["reset", "--all", "--yes"], env=_runner_env(tmp_path))
+    assert r.exit_code == 0, r.output
+    s = runner.invoke(cli, ["status"], env=_runner_env(tmp_path))
+    assert "expenses:     0" in s.output
+    assert "categories:   0" in s.output
+
+
+def test_reset_on_empty_db_says_so(tmp_path: Path) -> None:
+    runner = CliRunner()
+    runner.invoke(cli, ["init"], env=_runner_env(tmp_path))
+    # init installed 17 categories — wipe with --all so nothing's left.
+    runner.invoke(cli, ["reset", "--all", "--yes"], env=_runner_env(tmp_path))
+    r = runner.invoke(cli, ["reset", "--all", "--yes"], env=_runner_env(tmp_path))
+    assert r.exit_code == 0
+    assert "already empty" in r.output

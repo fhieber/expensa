@@ -306,6 +306,13 @@ with tabs[4]:
 
 # Settings -------------------------------------------------------------------
 with tabs[5]:
+    from expense_analyzer.storage.admin import (
+        category_removal_impact,
+        remove_category,
+        reset_all,
+        reset_data,
+    )
+
     st.header("Settings")
     st.subheader("Categories")
     cats = list_categories(conn)
@@ -323,6 +330,37 @@ with tabs[5]:
                 st.success(f"saved {name}")
                 st.rerun()
 
+    with st.expander("Remove a category", expanded=False):
+        if not cats:
+            st.caption("no categories yet")
+        else:
+            to_remove = st.selectbox(
+                "Category to remove",
+                ["—"] + [c.name for c in cats],
+                key="remove_cat_pick",
+            )
+            cascade = st.checkbox(
+                "Force-delete even if labels reference this category",
+                value=False,
+                key="remove_cat_cascade",
+            )
+            if to_remove != "—":
+                impact = category_removal_impact(conn, to_remove)
+                if impact.n_labels > 0:
+                    st.warning(
+                        f"{impact.n_labels} label(s) reference {to_remove!r}. "
+                        f"Removing it will also delete those labels."
+                    )
+                if st.button(f"Remove {to_remove}", type="secondary"):
+                    if impact.n_labels > 0 and not cascade:
+                        st.error("Tick the force-delete box first.")
+                    else:
+                        result = remove_category(conn, to_remove)
+                        st.success(
+                            f"removed {result.name}; {result.n_labels_deleted} label(s) cascaded"
+                        )
+                        st.rerun()
+
     st.subheader("Privacy")
     st.write(f"Vendor web lookup enabled: **{cfg.vendor_lookup.enabled}**")
     if cfg.vendor_lookup.enabled:
@@ -337,3 +375,36 @@ with tabs[5]:
     st.write(f"Embedding model: `{cfg.embedding_model}`")
     st.write(f"Zero-shot model: `{cfg.zeroshot_model}`")
     st.write(f"Device: `{cfg.device}`")
+
+    st.subheader(":red[Danger zone — clear data]")
+    with st.expander("Clear ingested expenses + ML state", expanded=False):
+        st.write(
+            "Deletes every row in `expenses`, `labels`, `notes`, `embeddings`, "
+            "`vendor_cache` and `model_versions`. Categories and own-IBANs are kept."
+        )
+        confirm_data = st.text_input(
+            "Type `clear data` to confirm", key="confirm_reset_data"
+        )
+        if st.button("Clear ingested data"):
+            if confirm_data.strip().lower() == "clear data":
+                report = reset_data(conn)
+                st.success(f"deleted {report.total} row(s) across {len(report.table_counts)} table(s)")
+                st.rerun()
+            else:
+                st.error("type the confirmation phrase exactly")
+
+    with st.expander("Factory reset (everything, incl. categories)", expanded=False):
+        st.write(
+            "Wipes every table including categories and own-IBANs. The DB schema "
+            "stays so you can immediately re-`init`."
+        )
+        confirm_all = st.text_input(
+            "Type `factory reset` to confirm", key="confirm_reset_all"
+        )
+        if st.button("Factory reset"):
+            if confirm_all.strip().lower() == "factory reset":
+                report = reset_all(conn)
+                st.success(f"deleted {report.total} row(s) across {len(report.table_counts)} table(s)")
+                st.rerun()
+            else:
+                st.error("type the confirmation phrase exactly")

@@ -152,6 +152,90 @@ def categories_add(ctx: click.Context, name: str, description: str, color: str) 
         conn.close()
 
 
+@categories.command("remove")
+@click.argument("name")
+@click.option("--force", is_flag=True,
+              help="Delete even if labels reference this category (cascades).")
+@click.option("--yes", "yes", is_flag=True, help="Skip the confirmation prompt.")
+@click.pass_context
+def categories_remove(ctx: click.Context, name: str, force: bool, yes: bool) -> None:
+    """Remove a category. Refuses if labels reference it unless --force."""
+    cfg: Config = ctx.obj[_CTX_KEY]["config"]
+    conn = _connect(cfg)
+    try:
+        from expense_analyzer.storage.admin import (
+            category_removal_impact,
+            remove_category,
+        )
+
+        impact = category_removal_impact(conn, name)
+        if not impact.exists:
+            click.echo(f"no such category: {name!r}", err=True)
+            ctx.exit(2)
+        if impact.n_labels > 0 and not force:
+            click.echo(
+                f"refusing: {impact.n_labels} label(s) reference {name!r}. "
+                "Re-run with --force to cascade-delete those labels.",
+                err=True,
+            )
+            ctx.exit(3)
+        if not yes:
+            msg = f"Remove category {name!r}"
+            if impact.n_labels > 0:
+                msg += f" and cascade-delete {impact.n_labels} label(s)"
+            msg += "?"
+            click.confirm(msg, abort=True)
+        result = remove_category(conn, name)
+        click.echo(
+            f"removed {result.name}; {result.n_labels_deleted} label(s) cascaded"
+        )
+    finally:
+        conn.close()
+
+
+# --- reset -------------------------------------------------------------------
+
+@cli.command()
+@click.option("--all", "wipe_all", is_flag=True,
+              help="Also wipe categories and own_ibans (default keeps them).")
+@click.option("--yes", "yes", is_flag=True, help="Skip the confirmation prompt.")
+@click.pass_context
+def reset(ctx: click.Context, wipe_all: bool, yes: bool) -> None:
+    """Wipe all ingested expenses and ML state. **Destructive.**
+
+    Default: clears expenses + labels + notes + embeddings + vendor_cache +
+    model_versions, but keeps categories and own_ibans.
+
+    With --all: also clears categories and own_ibans (full factory reset).
+    """
+    cfg: Config = ctx.obj[_CTX_KEY]["config"]
+    conn = _connect(cfg)
+    try:
+        from expense_analyzer.storage.admin import (
+            _CONFIG_TABLES,
+            _DATA_TABLES,
+            _row_counts,
+            reset_all,
+            reset_data,
+        )
+
+        tables = _DATA_TABLES + (_CONFIG_TABLES if wipe_all else ())
+        counts = _row_counts(conn, tables)
+        if sum(counts.values()) == 0:
+            click.echo("nothing to delete; database is already empty.")
+            return
+        click.echo("Will delete:")
+        for t, n in counts.items():
+            if n:
+                click.echo(f"  {t:<16} {n} row(s)")
+        if not yes:
+            click.confirm("Proceed?", abort=True)
+        report = (reset_all if wipe_all else reset_data)(conn)
+        click.echo(f"deleted {report.total} row(s) across {len(report.table_counts)} table(s)")
+    finally:
+        conn.close()
+
+
 # --- ingest ------------------------------------------------------------------
 
 @cli.command()
