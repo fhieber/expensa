@@ -37,12 +37,20 @@ def _read_schema() -> str:
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
-    """Open a connection with sane defaults: foreign keys, row factory, WAL."""
+    """Open a connection with sane defaults: foreign keys, row factory, WAL.
+
+    `check_same_thread=False` is intentional: Streamlit reruns the script on
+    different worker threads, and the CLI ships a single-user, single-process
+    application. SQLite itself is built in serialized threading mode, and
+    Streamlit serializes reruns within a session, so sharing one connection
+    across threads is safe here.
+    """
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(
         str(db_path),
         detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
         isolation_level=None,  # autocommit; explicit BEGIN where needed
+        check_same_thread=False,
     )
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON;")
