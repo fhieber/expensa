@@ -532,7 +532,15 @@ def export(ctx: click.Context, fmt: str, out: Path | None) -> None:
 @cli.command()
 @click.pass_context
 def ui(ctx: click.Context) -> None:
-    """Launch the local Streamlit UI (binds to 127.0.0.1)."""
+    """Launch the local Streamlit UI (binds to 127.0.0.1).
+
+    On Ctrl+C, gives Streamlit up to 5 seconds to shut down cleanly,
+    then force-kills it. This works around a known Tornado/asyncio issue
+    on Windows where the event loop deadlocks during shutdown if a TCP
+    connection arrives mid-stop.
+    """
+    import signal
+
     cfg: Config = ctx.obj[_CTX_KEY]["config"]
     # Invoke streamlit via the same Python interpreter that's running this
     # CLI -- this works whether or not the venv's Scripts/bin dir is on PATH.
@@ -552,7 +560,29 @@ def ui(ctx: click.Context) -> None:
         "--browser.gatherUsageStats", "false",
     ]
     click.echo(" ".join(args))
-    subprocess.run(args, env=env, check=False)
+
+    # On Windows, put streamlit in its own process group so the terminal's
+    # Ctrl+C only fires our handler -- otherwise both processes race on it
+    # and streamlit's hung shutdown blocks our cleanup.
+    is_windows = sys.platform == "win32"
+    creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if is_windows else 0
+    proc = subprocess.Popen(args, env=env, creationflags=creationflags)
+    try:
+        proc.wait()
+    except KeyboardInterrupt:
+        click.echo("\nstopping streamlit...")
+        try:
+            proc.send_signal(
+                signal.CTRL_BREAK_EVENT if is_windows else signal.SIGTERM
+            )
+        except Exception:
+            proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            click.echo("streamlit did not exit cleanly in 5s; killing.")
+            proc.kill()
+            proc.wait()
 
 
 # --- entrypoint --------------------------------------------------------------
