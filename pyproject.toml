@@ -1,0 +1,94 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "expense-analyzer-de"
+version = "0.1.0"
+description = "Local German expense analysis: ingest CSVs, dedup, cluster and categorize on-device with Hugging Face models. No cloud LLMs."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "Felix Hieber" }]
+keywords = ["expenses", "german", "banking", "categorization", "embeddings", "huggingface"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Natural Language :: German",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Office/Business :: Financial :: Accounting",
+]
+
+dependencies = [
+    "pandas>=2.0",
+    "numpy>=1.24",
+    "scikit-learn>=1.3",
+    "umap-learn>=0.5.5",
+    "hdbscan>=0.8.33",
+    "rapidfuzz>=3.5",
+    "schwifty>=2024.1.0",
+    "python-dateutil>=2.8",
+    "click>=8.1",
+    "plotly>=5.18",
+    "matplotlib>=3.8",
+    "kaleido>=0.2.1",
+    "pyyaml>=6.0",
+    "pydantic>=2.5",
+    "sqlalchemy>=2.0",
+    "sentence-transformers>=2.6",
+    "transformers>=4.40",
+    "torch>=2.2",
+    "streamlit>=1.32",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=4.1",
+    "ruff>=0.4",
+    "black>=24.1",
+    "mypy>=1.8",
+    "pre-commit>=3.6",
+]
+vendor-lookup = [
+    "duckduckgo-search>=5.0",
+]
+
+[project.scripts]
+expense = "expense_analyzer.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+expense_analyzer = ["../config/*.yaml", "storage/*.sql"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: tests that download HF models or take >5s (deselect with -m 'not slow')",
+]
+addopts = "-ra --strict-markers"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "SIM"]
+ignore = ["E501"]  # line length handled by formatter
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true

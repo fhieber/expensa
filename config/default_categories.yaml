@@ -1,0 +1,56 @@
+# Initial expense categories (in German). Edit freely.
+# Each category has a name, optional description (used by zero-shot classifier as hypothesis),
+# and a color for visualizations.
+
+categories:
+  - name: Lebensmittel
+    description: Einkäufe in Supermärkten und Lebensmittelgeschäften (REWE, Edeka, Aldi, Lidl, dm).
+    color: "#4caf50"
+  - name: Restaurant
+    description: Restaurants, Cafés, Lieferdienste, Bars.
+    color: "#ff7043"
+  - name: Miete
+    description: Monatliche Miete oder Wohnungsnebenkosten.
+    color: "#5e35b1"
+  - name: Nebenkosten
+    description: Strom, Gas, Wasser, Müllgebühren.
+    color: "#7e57c2"
+  - name: Internet & Mobilfunk
+    description: Internet- und Mobilfunkverträge (Telekom, Vodafone, O2, 1&1).
+    color: "#26a69a"
+  - name: Versicherung
+    description: Krankenversicherung, KFZ, Haftpflicht, sonstige Versicherungen.
+    color: "#789262"
+  - name: Transport
+    description: Deutsche Bahn, ÖPNV, Tankstellen, Parkgebühren, Carsharing.
+    color: "#42a5f5"
+  - name: Reisen
+    description: Hotels, Flüge, Mietwagen, Urlaubsausgaben.
+    color: "#26c6da"
+  - name: Online-Shopping
+    description: Amazon, eBay, Onlinehändler.
+    color: "#ec407a"
+  - name: Abos & Streaming
+    description: Netflix, Spotify, Apple, Cloud-Abos, Zeitungen.
+    color: "#ab47bc"
+  - name: Gesundheit
+    description: Arzt, Apotheke, Zuzahlungen, Fitnessstudio.
+    color: "#ef5350"
+  - name: Bildung
+    description: Bücher, Kurse, Studiengebühren, Fortbildung.
+    color: "#8d6e63"
+  - name: Freizeit
+    description: Kino, Sport, Hobbys, Eintritte.
+    color: "#ffa726"
+  - name: Bargeld
+    description: Geldautomatenabhebungen.
+    color: "#90a4ae"
+  - name: Einkommen
+    description: Gehalt, Lohn, Erstattungen, sonstige Einnahmen.
+    color: "#66bb6a"
+  - name: Umbuchung
+    description: Eigene Umbuchungen zwischen eigenen Konten.
+    color: "#bdbdbd"
+  - name: Sonstiges
+    description: Nicht klar zuordenbare Ausgaben.
+    color: "#9e9e9e"

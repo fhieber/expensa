@@ -1,0 +1,56 @@
+# expense-analyzer-de default configuration
+# Copy to ~/.expense-analyzer/config.yaml and edit, or pass --config <path>.
+
+data_dir: ~/.expense-analyzer
+db_filename: db.sqlite
+
+# --- ML models (all run locally; no cloud calls) ---
+embedding_model: T-Systems-onsite/cross-en-de-roberta-sentence-transformer
+zeroshot_model: MoritzLaurer/mDeBERTa-v3-base-mnli-xnli
+embedding_batch_size: 32
+device: auto  # auto | cpu | cuda
+
+# --- Categorization cascade ---
+classifier:
+  type: logistic_regression  # logistic_regression | random_forest
+  rf_switch_threshold: 200   # switch to RF once we have this many labels
+  confidence_threshold: 0.7  # below this → flagged for review
+  retrain_after_n_new_labels: 10
+
+vendor_exact_match:
+  enabled: true
+  agreement_min: 0.8         # ≥80% past labels for the vendor must agree
+
+knn:
+  enabled: true
+  k: 5
+  agreement_min: 4           # ≥4/5 neighbors must agree
+
+zeroshot:
+  enabled: true
+  use_when_confidence_below: 0.5
+
+# --- Clustering ---
+clustering:
+  umap_n_components: 10
+  umap_n_neighbors: 15
+  hdbscan_min_cluster_size: 5
+
+# --- Active learning ---
+active_learning:
+  default_batch_size: 10
+  default_strategy: uncertainty  # uncertainty | diverse | outliers | mixed
+
+# --- Privacy: vendor web lookup is OFF by default ---
+vendor_lookup:
+  enabled: false
+  backend: duckduckgo        # duckduckgo | searxng
+  searxng_url: ""            # only used if backend=searxng
+  cache_ttl_days: 90
+  # SAFETY: only counterparty_normalized is ever sent. Hard-coded; do not add fields here.
+
+# --- Streamlit ---
+streamlit:
+  host: 127.0.0.1
+  port: 8501
+  headless: true
