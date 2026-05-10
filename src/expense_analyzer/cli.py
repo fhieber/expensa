@@ -35,14 +35,19 @@ def _connect(cfg: Config) -> sqlite3.Connection:
     return get_or_create_database(cfg.db_path)
 
 
-def _embedder(cfg: Config):
-    """Build the configured SentenceTransformerEmbedder. Heavy import."""
+def _embedder(cfg: Config, verbose: bool = True):
+    """Build the configured SentenceTransformerEmbedder. Heavy import.
+
+    `verbose=True` (the default for CLI use) makes large encode() calls
+    show a tqdm progress bar.
+    """
     from expense_analyzer.features.embeddings import SentenceTransformerEmbedder
 
     return SentenceTransformerEmbedder(
         model_name=cfg.embedding_model,
         device=cfg.device,
         batch_size=cfg.embedding_batch_size,
+        verbose=verbose,
     )
 
 
@@ -288,17 +293,22 @@ def label(ctx: click.Context, n: int | None, strategy: str | None) -> None:
             click.echo("No categories yet. Run `expense init` or `expense categories add ...`.", err=True)
             ctx.exit(2)
 
+        click.echo(f"loading embedding model `{cfg.embedding_model}`...")
         emb = _embedder(cfg)
         # Make sure embeddings exist for all expenses (they're needed by k-NN
         # and the diverse strategy).
         rows = conn.execute("SELECT id, combined_text FROM expenses").fetchall()
-        store_embeddings(conn, emb, [(r["id"], r["combined_text"]) for r in rows])
+        click.echo(f"computing embeddings for {len(rows)} expense(s)...")
+        n_added = store_embeddings(conn, emb, [(r["id"], r["combined_text"]) for r in rows])
+        click.echo(f"  {n_added} new, {len(rows) - n_added} cached")
 
         cascade = CategorizationCascade(conn, cfg, emb)
+        click.echo("training cascade on existing labels...")
         try:
             cascade.fit()
         except Exception:
             pass  # may not have enough labels yet
+        click.echo(f"selecting {n or cfg.active_learning.default_batch_size} candidates...")
         ids = pick_candidates(conn, cfg, emb, cascade, n=n, strategy=strategy)
         if not ids:
             click.echo("Nothing to label — every expense already has a user label.")
@@ -350,8 +360,10 @@ def train(ctx: click.Context) -> None:
     try:
         from expense_analyzer.ml.classifier import CategorizationCascade
 
+        click.echo(f"loading embedding model `{cfg.embedding_model}`...")
         emb = _embedder(cfg)
         cascade = CategorizationCascade(conn, cfg, emb)
+        click.echo("training on user labels (embeddings will be computed/cached)...")
         report = cascade.fit()
         click.echo(
             f"trained {report.classifier_type}: "
@@ -379,8 +391,10 @@ def predict(ctx: click.Context, threshold: float | None, dry_run: bool) -> None:
         from expense_analyzer.ml.classifier import CategorizationCascade
         from expense_analyzer.storage.categories import add_label
 
+        click.echo(f"loading embedding model `{cfg.embedding_model}`...")
         emb = _embedder(cfg)
         cascade = CategorizationCascade(conn, cfg, emb)
+        click.echo("training on user labels...")
         cascade.fit()  # tolerant if too few labels
         rows = conn.execute(
             """
@@ -392,6 +406,7 @@ def predict(ctx: click.Context, threshold: float | None, dry_run: bool) -> None:
         if not ids:
             click.echo("nothing to predict — every expense already has a user label")
             return
+        click.echo(f"computing embeddings + predicting for {len(ids)} expense(s)...")
         preds = cascade.predict_batch(ids)
         from collections import Counter
 
@@ -422,7 +437,9 @@ def cluster(ctx: click.Context) -> None:
     try:
         from expense_analyzer.ml.clustering import cluster_all
 
+        click.echo(f"loading embedding model `{cfg.embedding_model}`...")
         emb = _embedder(cfg)
+        click.echo("computing embeddings + UMAP + HDBSCAN (this may take a minute)...")
         report = cluster_all(conn, cfg, emb)
         click.echo(
             f"clusters={report.n_clusters} outliers={report.n_outliers} of {report.n_points} points"

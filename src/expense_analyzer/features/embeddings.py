@@ -73,10 +73,12 @@ class SentenceTransformerEmbedder(Embedder):
         model_name: str = "T-Systems-onsite/cross-en-de-roberta-sentence-transformer",
         device: str = "auto",
         batch_size: int = 32,
+        verbose: bool = False,
     ) -> None:
         self._model_name = model_name
         self._batch_size = batch_size
         self._device_pref = device
+        self._verbose = verbose
         self._model = None
         self._dim: int | None = None
 
@@ -113,10 +115,12 @@ class SentenceTransformerEmbedder(Embedder):
         if self._model is None:
             self._load()
         assert self._model is not None
+        # Show tqdm only when there's enough work to be worth a bar.
+        show_bar = self._verbose and len(texts) >= max(self._batch_size, 16)
         v = self._model.encode(
             texts,
             batch_size=self._batch_size,
-            show_progress_bar=False,
+            show_progress_bar=show_bar,
             convert_to_numpy=True,
             normalize_embeddings=True,
         )
