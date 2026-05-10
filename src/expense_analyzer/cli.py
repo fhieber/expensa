@@ -530,9 +530,14 @@ def export(ctx: click.Context, fmt: str, out: Path | None) -> None:
 # --- ui ----------------------------------------------------------------------
 
 @cli.command()
+@click.option("--no-browser", is_flag=True,
+              help="Don't auto-open the system browser when the UI is ready.")
 @click.pass_context
-def ui(ctx: click.Context) -> None:
+def ui(ctx: click.Context, no_browser: bool) -> None:
     """Launch the local Streamlit UI (binds to 127.0.0.1).
+
+    By default, opens the UI in the system browser as soon as Streamlit
+    is accepting connections. Pass `--no-browser` to suppress that.
 
     On Ctrl+C, gives Streamlit up to 5 seconds to shut down cleanly,
     then force-kills it. This works around a known Tornado/asyncio issue
@@ -540,6 +545,10 @@ def ui(ctx: click.Context) -> None:
     connection arrives mid-stop.
     """
     import signal
+    import socket
+    import threading
+    import time
+    import webbrowser
 
     cfg: Config = ctx.obj[_CTX_KEY]["config"]
     # Invoke streamlit via the same Python interpreter that's running this
@@ -552,14 +561,32 @@ def ui(ctx: click.Context) -> None:
     app = Path(__file__).parent / "ui" / "streamlit_app.py"
     env = os.environ.copy()
     env["EXPENSE_ANALYZER_HOME"] = str(cfg.data_dir)
+    # Force --server.headless=true: we open the browser ourselves once the
+    # port is actually accepting connections, which avoids the race where
+    # streamlit pops a tab pointing at a not-yet-bound URL.
     args = [
         sys.executable, "-m", "streamlit", "run", str(app),
         "--server.address", cfg.streamlit.host,
         "--server.port", str(cfg.streamlit.port),
-        "--server.headless", "true" if cfg.streamlit.headless else "false",
+        "--server.headless", "true",
         "--browser.gatherUsageStats", "false",
     ]
+    url = f"http://{cfg.streamlit.host}:{cfg.streamlit.port}"
     click.echo(" ".join(args))
+    click.echo(f"-> {url}")
+
+    def _open_when_ready() -> None:
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            try:
+                with socket.create_connection((cfg.streamlit.host, cfg.streamlit.port), timeout=0.5):
+                    webbrowser.open(url)
+                    return
+            except OSError:
+                time.sleep(0.3)
+
+    if not no_browser:
+        threading.Thread(target=_open_when_ready, daemon=True).start()
 
     # On Windows, put streamlit in its own process group so the terminal's
     # Ctrl+C only fires our handler -- otherwise both processes race on it
