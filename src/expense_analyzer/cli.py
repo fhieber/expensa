@@ -8,9 +8,9 @@ to inside the commands that need them, so `expense --help` stays snappy.
 from __future__ import annotations
 
 import os
-import shutil
 import sqlite3
 import subprocess
+import sys
 from datetime import date
 from pathlib import Path
 
@@ -450,15 +450,18 @@ def export(ctx: click.Context, fmt: str, out: Path | None) -> None:
 def ui(ctx: click.Context) -> None:
     """Launch the local Streamlit UI (binds to 127.0.0.1)."""
     cfg: Config = ctx.obj[_CTX_KEY]["config"]
-    streamlit_cmd = shutil.which("streamlit")
-    if streamlit_cmd is None:
-        click.echo("streamlit not found in PATH (pip install streamlit)", err=True)
+    # Invoke streamlit via the same Python interpreter that's running this
+    # CLI -- this works whether or not the venv's Scripts/bin dir is on PATH.
+    try:
+        import streamlit  # noqa: F401
+    except ImportError:
+        click.echo("streamlit is not installed in this environment (pip install streamlit)", err=True)
         ctx.exit(2)
     app = Path(__file__).parent / "ui" / "streamlit_app.py"
     env = os.environ.copy()
     env["EXPENSE_ANALYZER_HOME"] = str(cfg.data_dir)
     args = [
-        streamlit_cmd, "run", str(app),
+        sys.executable, "-m", "streamlit", "run", str(app),
         "--server.address", cfg.streamlit.host,
         "--server.port", str(cfg.streamlit.port),
         "--server.headless", "true" if cfg.streamlit.headless else "false",
