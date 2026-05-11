@@ -1,17 +1,20 @@
-"""Streamlit UI. Local-only — binds to 127.0.0.1 via the CLI launcher.
+"""Streamlit UI — local-only (binds to 127.0.0.1 via the CLI launcher).
 
-Tabs:
-  * Dashboard — interactive charts.
-  * Label — active-learning queue.
-  * Review — low-confidence model labels.
-  * Clusters — HDBSCAN cluster browser.
-  * Notes — per-expense free-form notes.
-  * Settings — categories + vendor-lookup toggle (read-only summary).
+Tabs, in order:
+  1. Dashboard  — overview stats.
+  2. Categories — types table with per-category stats, add/remove.
+  3. Import     — upload CSV → inspect new rows → auto-label → accept/review.
+  4. Data       — sortable/filterable table; row drawer for full record + notes.
+  5. Clusters   — HDBSCAN exploration.
+  6. Settings   — model info, privacy, danger zone.
+
+No sidebar by design — everything lives in tabs.
 """
 
 from __future__ import annotations
 
 import sqlite3
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -19,20 +22,26 @@ import streamlit as st
 from expense_analyzer.config import Config, load_config
 from expense_analyzer.enrichment.notes import get_note, set_note
 from expense_analyzer.features.embeddings import (
+    Embedder,
     HashEmbedder,
     SentenceTransformerEmbedder,
-    store_embeddings,
 )
-from expense_analyzer.ingestion import ingest_csv
-from expense_analyzer.ml.active_learning import pick_candidates
-from expense_analyzer.ml.classifier import CategorizationCascade
+from expense_analyzer.ingestion import IngestReport, ingest_csv
+from expense_analyzer.ml.classifier import CategorizationCascade, Prediction
 from expense_analyzer.ml.clustering import cluster_all
+from expense_analyzer.storage.admin import (
+    category_removal_impact,
+    remove_category,
+    reset_all,
+    reset_data,
+)
 from expense_analyzer.storage.categories import (
     add_label,
     list_categories,
     upsert_category,
 )
 from expense_analyzer.storage.database import get_or_create_database
+from expense_analyzer.storage.stats import category_stats, uncategorized_stat
 from expense_analyzer.viz import (
     amount_distribution,
     bar_top_counterparties,
@@ -44,10 +53,18 @@ from expense_analyzer.viz import (
     top_counterparties,
     trend_lines,
 )
+from expense_analyzer.viz.charts import calendar_heatmap
 
-# --- Boot --------------------------------------------------------------------
+# Higher threshold for one-click "accept all confident" predictions
+# (the cfg.classifier.confidence_threshold is for review queues).
+ACCEPT_CONFIDENT_THRESHOLD = 0.85
 
-st.set_page_config(page_title="expense-analyzer-de", layout="wide")
+
+# ---------------------------------------------------------------------------
+# Boot
+# ---------------------------------------------------------------------------
+
+st.set_page_config(page_title="expense-analyzer-de", layout="wide", page_icon="💶")
 
 
 @st.cache_resource
@@ -57,309 +74,652 @@ def _load_config_cached() -> Config:
 
 @st.cache_resource
 def _connect_cached(db_path_str: str) -> sqlite3.Connection:
-    return get_or_create_database(__import__("pathlib").Path(db_path_str))
+    return get_or_create_database(Path(db_path_str))
 
 
 @st.cache_resource
-def _embedder_cached(model_name: str, device: str, batch_size: int, use_hash: bool):
-    if use_hash:
-        return HashEmbedder(dim=64)
+def _real_embedder(model_name: str, device: str, batch_size: int) -> Embedder:
     return SentenceTransformerEmbedder(
-        model_name=model_name, device=device, batch_size=batch_size
+        model_name=model_name, device=device, batch_size=batch_size, verbose=False
     )
+
+
+@st.cache_resource
+def _hash_embedder(dim: int = 64) -> Embedder:
+    return HashEmbedder(dim=dim)
 
 
 cfg = _load_config_cached()
 conn = _connect_cached(str(cfg.db_path))
 
 
-# --- Sidebar -----------------------------------------------------------------
+def _embedder() -> Embedder:
+    """Pick between real and hash based on the toggle in Settings."""
+    if st.session_state.get("use_hash_embedder", False):
+        return _hash_embedder()
+    return _real_embedder(cfg.embedding_model, cfg.device, cfg.embedding_batch_size)
 
-with st.sidebar:
-    st.title("expense-analyzer-de")
-    st.caption(f"DB: `{cfg.db_path}`")
 
-    # Quick stats
+# ---------------------------------------------------------------------------
+# Top header bar (replaces the old sidebar)
+# ---------------------------------------------------------------------------
+
+def _render_header() -> None:
     try:
         n_exp = conn.execute("SELECT COUNT(*) AS n FROM expenses").fetchone()["n"]
         n_lab = conn.execute(
             "SELECT COUNT(DISTINCT expense_id) AS n FROM labels WHERE source='user'"
         ).fetchone()["n"]
+        n_cat = conn.execute("SELECT COUNT(*) AS n FROM categories").fetchone()["n"]
     except sqlite3.OperationalError:
-        n_exp = n_lab = 0
-    st.metric("Expenses", n_exp)
-    st.metric("User-labeled", n_lab)
-
+        n_exp = n_lab = n_cat = 0
+    bar = st.container()
+    with bar:
+        c1, c2, c3, c4, c5 = st.columns([1, 1, 1, 1, 3])
+        with c1:
+            st.metric("Expenses", n_exp)
+        with c2:
+            st.metric("User-labeled", n_lab)
+        with c3:
+            st.metric("Categories", n_cat)
+        with c4:
+            st.metric("Model", "Hash (dev)" if st.session_state.get("use_hash_embedder") else "HF")
+        with c5:
+            st.caption(f"DB · `{cfg.db_path}`")
     st.divider()
-    st.subheader("Ingest CSV")
-    uploaded = st.file_uploader("Upload one or more bank-export CSVs", accept_multiple_files=True)
-    if uploaded:
-        import tempfile
-        from pathlib import Path
 
-        for f in uploaded:
-            with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tmp:
-                tmp.write(f.read())
-                p = Path(tmp.name)
-            r = ingest_csv(conn, p)
-            st.success(f"{f.name}: parsed={r.parsed} new={r.inserted} duplicate={r.duplicates}")
-        st.rerun()
 
-    st.divider()
-    use_hash_for_dev = st.checkbox(
-        "Use hash-based dummy embedder (skip HF download)",
-        value=False,
-        help="Useful for very fast iteration. Quality will be much lower than the real model.",
-    )
+_render_header()
 
-embedder = _embedder_cached(
-    cfg.embedding_model, cfg.device, cfg.embedding_batch_size, use_hash_for_dev
+tab_dash, tab_cats, tab_import, tab_data, tab_clusters, tab_settings = st.tabs(
+    ["Dashboard", "Categories", "Import", "Data", "Clusters", "Settings"]
 )
 
 
-# --- Tabs --------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Helpers used by multiple tabs
+# ---------------------------------------------------------------------------
 
-tabs = st.tabs(["Dashboard", "Label", "Review", "Clusters", "Notes", "Settings"])
+def _category_options(include_unlabeled: bool = True) -> list[tuple[int | None, str]]:
+    """[(category_id, name), ...] for dropdowns. `None` represents 'unlabeled'."""
+    out: list[tuple[int | None, str]] = []
+    for c in list_categories(conn):
+        out.append((c.id, c.name))
+    if include_unlabeled:
+        out.append((None, "(unkategorisiert)"))
+    return out
 
 
-# Dashboard ------------------------------------------------------------------
-with tabs[0]:
+def _set_user_label(expense_id: int, category_id: int) -> None:
+    add_label(conn, expense_id, category_id, "user")
+
+
+def _format_eur(cents: int) -> str:
+    return f"{cents / 100:>9,.2f} €"
+
+
+# ---------------------------------------------------------------------------
+# Tab 1: Dashboard
+# ---------------------------------------------------------------------------
+
+with tab_dash:
     st.header("Dashboard")
+    n_exp = conn.execute("SELECT COUNT(*) AS n FROM expenses").fetchone()["n"]
     if n_exp == 0:
-        st.info("Ingest a CSV to see charts.")
+        st.info("Import a CSV from the **Import** tab to get started.")
     else:
         c1, c2 = st.columns(2)
         with c1:
-            st.plotly_chart(pie_chart(spend_by_category(conn)), use_container_width=True)
+            st.plotly_chart(pie_chart(spend_by_category(conn)), width="stretch")
         with c2:
             st.plotly_chart(
                 bar_top_counterparties(top_counterparties(conn, n=15)),
-                use_container_width=True,
+                width="stretch",
             )
-        st.plotly_chart(
-            trend_lines(monthly_flow_by_category(conn)), use_container_width=True
-        )
+        st.plotly_chart(trend_lines(monthly_flow_by_category(conn)), width="stretch")
         c3, c4 = st.columns(2)
         with c3:
-            st.plotly_chart(
-                histogram_amounts(amount_distribution(conn)), use_container_width=True
-            )
+            st.plotly_chart(histogram_amounts(amount_distribution(conn)), width="stretch")
         with c4:
-            st.plotly_chart(
-                __import__("expense_analyzer.viz", fromlist=["calendar_heatmap"]).calendar_heatmap(
-                    daily_calendar(conn)
-                ),
-                use_container_width=True,
+            st.plotly_chart(calendar_heatmap(daily_calendar(conn)), width="stretch")
+
+
+# ---------------------------------------------------------------------------
+# Tab 2: Categories
+# ---------------------------------------------------------------------------
+
+with tab_cats:
+    st.header("Categories")
+    stats = category_stats(conn)
+    uncat = uncategorized_stat(conn)
+    rows = [
+        {
+            "name": s.name,
+            "description": s.description,
+            "color": s.color,
+            "n_expenses": s.n_expenses,
+            "total_€": round(s.total_eur, 2),
+            "abs_total_€": round(s.abs_total_eur, 2),
+            "last_seen": s.last_seen or "",
+        }
+        for s in stats
+    ]
+    rows.append(
+        {
+            "name": uncat.name,
+            "description": uncat.description,
+            "color": uncat.color,
+            "n_expenses": uncat.n_expenses,
+            "total_€": round(uncat.total_eur, 2),
+            "abs_total_€": round(uncat.abs_total_eur, 2),
+            "last_seen": uncat.last_seen or "",
+        }
+    )
+    st.dataframe(
+        pd.DataFrame(rows),
+        width="stretch",
+        hide_index=True,
+    )
+
+    with st.expander("Add category", expanded=False), st.form("add_cat", clear_on_submit=True):
+        name = st.text_input("Name")
+        desc = st.text_input("Description (used as zero-shot hypothesis)")
+        color = st.color_picker("Color", value="#888888")
+        if st.form_submit_button("Save"):
+            if name.strip():
+                upsert_category(conn, name.strip(), desc.strip(), color)
+                st.success(f"saved {name}")
+                st.rerun()
+            else:
+                st.error("name is required")
+
+    with st.expander("Remove category", expanded=False):
+        cat_names = [s.name for s in stats]
+        if not cat_names:
+            st.caption("nothing to remove")
+        else:
+            pick = st.selectbox("Category", ["—"] + cat_names, key="rm_cat_pick")
+            force = st.checkbox(
+                "Force-delete even if labels reference it (cascades)",
+                key="rm_cat_force",
+            )
+            if pick != "—":
+                impact = category_removal_impact(conn, pick)
+                if impact.n_labels > 0:
+                    st.warning(
+                        f"{impact.n_labels} label(s) reference {pick!r}. "
+                        "Removing will cascade-delete those labels."
+                    )
+                if st.button(f"Remove {pick}", type="secondary"):
+                    if impact.n_labels > 0 and not force:
+                        st.error("tick the force-delete box first")
+                    else:
+                        r = remove_category(conn, pick)
+                        st.success(f"removed {r.name}; {r.n_labels_deleted} label(s) cascaded")
+                        st.rerun()
+
+
+# ---------------------------------------------------------------------------
+# Tab 3: Import
+# ---------------------------------------------------------------------------
+
+if "import_step" not in st.session_state:
+    st.session_state.import_step = "upload"
+    st.session_state.import_new_ids = []
+    st.session_state.import_predictions = {}  # expense_id -> Prediction
+    st.session_state.import_overrides = {}    # expense_id -> category_id
+
+
+def _reset_import_state() -> None:
+    st.session_state.import_step = "upload"
+    st.session_state.import_new_ids = []
+    st.session_state.import_predictions = {}
+    st.session_state.import_overrides = {}
+
+
+with tab_import:
+    st.header("Import")
+
+    if st.session_state.import_step == "upload":
+        st.write("Upload one or more German bank-export CSVs (`;` separator, comma decimal).")
+        files = st.file_uploader(
+            "CSV file(s)", accept_multiple_files=True, type=["csv"]
+        )
+        cols = st.columns(2)
+        with cols[0]:
+            ingest_clicked = st.button(
+                "Ingest", type="primary", disabled=not files
+            )
+        with cols[1]:
+            st.caption(
+                "Features (text, IBAN, numeric, embedding) are computed at import "
+                "time, so subsequent steps are fast."
             )
 
+        if ingest_clicked and files:
+            import tempfile
 
-# Label ----------------------------------------------------------------------
-with tabs[1]:
-    st.header("Label")
-    cats = list_categories(conn)
-    if not cats:
-        st.warning("Define some categories first (Settings tab).")
-    elif n_exp == 0:
-        st.info("No expenses yet.")
-    else:
-        col_n, col_strat = st.columns(2)
-        with col_n:
-            n = st.number_input("How many candidates", min_value=1, max_value=50, value=10)
-        with col_strat:
-            strategy = st.selectbox(
-                "Strategy", ["uncertainty", "diverse", "outliers", "mixed"], index=0
-            )
-        if st.button("Surface candidates"):
-            # Embeddings are needed for kNN + diverse.
-            rows = conn.execute("SELECT id, combined_text FROM expenses").fetchall()
-            store_embeddings(conn, embedder, [(r["id"], r["combined_text"]) for r in rows])
-            cascade = CategorizationCascade(conn, cfg, embedder)
-            try:
-                cascade.fit()
-            except Exception:
-                pass
-            ids = pick_candidates(conn, cfg, embedder, cascade, n=int(n), strategy=strategy)
-            st.session_state["label_ids"] = ids
+            emb = _embedder()
+            reports: list[IngestReport] = []
+            new_ids: list[int] = []
+            with st.status("Importing…", expanded=True) as status:
+                for f in files:
+                    status.write(f"parsing {f.name}…")
+                    with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tmp:
+                        tmp.write(f.read())
+                        p = Path(tmp.name)
+                    status.write(f"ingesting + embedding {f.name}…")
+                    r = ingest_csv(conn, p, embedder=emb)
+                    reports.append(r)
+                    new_ids.extend(r.new_ids)
+                    status.write(
+                        f"{f.name}: parsed={r.parsed} new={r.inserted} "
+                        f"duplicate={r.duplicates} embedded={r.embedded}"
+                    )
+                status.update(label=f"Imported {sum(r.inserted for r in reports)} new row(s).", state="complete")
+            st.session_state.import_new_ids = new_ids
+            if new_ids:
+                st.session_state.import_step = "review"
+                st.rerun()
+            else:
+                st.info("Nothing new — all records were duplicates.")
 
-        ids = st.session_state.get("label_ids", [])
-        for eid in ids:
-            row = conn.execute(
-                "SELECT id, buchungsdatum, betrag_cents, counterparty, verwendungszweck "
-                "FROM expenses WHERE id = ?",
-                (eid,),
-            ).fetchone()
-            if row is None:
-                continue
-            with st.container(border=True):
-                st.write(
-                    f"**{row['buchungsdatum']}** — "
-                    f"{row['betrag_cents'] / 100:.2f} € — "
-                    f"**{row['counterparty']}**"
+    else:  # review step
+        new_ids = st.session_state.import_new_ids
+        if not new_ids:
+            _reset_import_state()
+            st.rerun()
+
+        st.write(f"**{len(new_ids)} new record(s)** ingested. Review and label below.")
+
+        ph = ",".join("?" * len(new_ids))
+        df = pd.read_sql_query(
+            f"""
+            SELECT id, buchungsdatum, counterparty, verwendungszweck,
+                   betrag_cents,
+                   amount_bucket, iban_country, iban_is_foreign,
+                   has_glaeubiger_id, mandatsreferenz_present,
+                   umsatztyp
+            FROM expenses
+            WHERE id IN ({ph})
+            ORDER BY buchungsdatum, id
+            """,
+            conn,
+            params=new_ids,
+        )
+        df["betrag_€"] = df["betrag_cents"] / 100
+        extended = st.toggle("Extended columns", value=False, key="import_extended")
+        if extended:
+            show_cols = ["id", "buchungsdatum", "counterparty", "verwendungszweck",
+                         "betrag_€", "amount_bucket", "umsatztyp",
+                         "iban_country", "iban_is_foreign",
+                         "has_glaeubiger_id", "mandatsreferenz_present"]
+        else:
+            show_cols = ["id", "buchungsdatum", "counterparty",
+                         "verwendungszweck", "betrag_€"]
+        st.dataframe(df[show_cols], width="stretch", hide_index=True)
+
+        # --- Auto-label controls --------------------------------------------
+        st.subheader("Auto-label")
+        c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
+        run_auto = c1.button("Auto-label", type="primary")
+        accept_confident = c2.button(
+            f"Accept all ≥ {int(ACCEPT_CONFIDENT_THRESHOLD * 100)}%",
+            disabled=not st.session_state.import_predictions,
+        )
+        accept_all = c3.button("Accept all", disabled=not st.session_state.import_predictions)
+        done = c4.button("Done", help="Leave any not-yet-confirmed predictions as model-labels.")
+
+        if run_auto:
+            emb = _embedder()
+            cascade = CategorizationCascade(conn, cfg, emb)
+            with st.status("Predicting…", expanded=False):
+                try:
+                    cascade.fit()
+                except Exception:
+                    pass
+                preds = cascade.predict_batch(new_ids)
+                st.session_state.import_predictions = {p.expense_id: p for p in preds}
+                # Persist model labels for the predictions that fired.
+                for p in preds:
+                    if p.category_id is not None:
+                        add_label(conn, p.expense_id, p.category_id, "model",
+                                  confidence=p.confidence)
+            st.rerun()
+
+        if accept_confident:
+            n_promoted = 0
+            for eid, p in st.session_state.import_predictions.items():
+                override = st.session_state.import_overrides.get(eid)
+                final_cat = override if override is not None else p.category_id
+                final_conf = (
+                    1.0 if override is not None
+                    else p.confidence
                 )
-                if row["verwendungszweck"]:
-                    st.caption(row["verwendungszweck"])
-                cols = st.columns([3, 1])
-                with cols[0]:
+                if final_cat is not None and final_conf >= ACCEPT_CONFIDENT_THRESHOLD:
+                    add_label(conn, eid, final_cat, "user")
+                    n_promoted += 1
+            st.success(f"promoted {n_promoted} prediction(s) to user labels")
+
+        if accept_all:
+            n_promoted = 0
+            for eid, p in st.session_state.import_predictions.items():
+                override = st.session_state.import_overrides.get(eid)
+                final_cat = override if override is not None else p.category_id
+                if final_cat is not None:
+                    add_label(conn, eid, final_cat, "user")
+                    n_promoted += 1
+            st.success(f"promoted {n_promoted} prediction(s) to user labels")
+
+        if done:
+            _reset_import_state()
+            st.rerun()
+
+        # --- Per-row review --------------------------------------------------
+        preds: dict[int, Prediction] = st.session_state.import_predictions
+        if preds:
+            st.subheader("Per-row review")
+            cat_opts = _category_options(include_unlabeled=False)
+            id_to_idx = {cid: i for i, (cid, _) in enumerate(cat_opts)}
+            for eid in new_ids:
+                p = preds.get(eid)
+                row = conn.execute(
+                    "SELECT buchungsdatum, betrag_cents, counterparty, verwendungszweck "
+                    "FROM expenses WHERE id = ?",
+                    (eid,),
+                ).fetchone()
+                stage_color = {
+                    "vendor_exact_match": "🟢",
+                    "knn": "🟢",
+                    "classifier": "🟡",
+                    "zeroshot": "🟡",
+                    "unknown": "⚪",
+                }
+                with st.container(border=True):
+                    head_cols = st.columns([1, 1, 2, 1])
+                    head_cols[0].write(f"**{row['buchungsdatum']}**")
+                    head_cols[1].write(_format_eur(row['betrag_cents']))
+                    head_cols[2].write(f"**{row['counterparty']}**")
+                    if p is not None:
+                        head_cols[3].write(
+                            f"{stage_color.get(p.stage, '⚪')} {p.stage} · "
+                            f"{p.confidence:.2f}"
+                        )
+                    if row["verwendungszweck"]:
+                        st.caption(row["verwendungszweck"])
+                    default_cid = (
+                        st.session_state.import_overrides.get(eid)
+                        or (p.category_id if p else None)
+                    )
+                    default_idx = id_to_idx.get(default_cid, 0) if default_cid is not None else 0
                     pick = st.selectbox(
                         "Category",
-                        ["—"] + [c.name for c in cats],
-                        key=f"label_pick_{eid}",
+                        options=[name for _, name in cat_opts],
+                        index=default_idx,
+                        key=f"import_pick_{eid}",
                     )
-                with cols[1]:
-                    if st.button("Save", key=f"label_save_{eid}"):
-                        if pick != "—":
-                            cid = next(c.id for c in cats if c.name == pick)
-                            add_label(conn, int(eid), cid, "user")
-                            st.success(f"labeled #{eid} -> {pick}")
+                    chosen_cid = next(cid for cid, name in cat_opts if name == pick)
+                    if chosen_cid != default_cid:
+                        st.session_state.import_overrides[eid] = chosen_cid
+                    if st.button("Save as user label", key=f"import_save_{eid}"):
+                        add_label(conn, eid, chosen_cid, "user")
+                        st.success(f"saved → {pick}")
 
 
-# Review ---------------------------------------------------------------------
-with tabs[2]:
-    st.header("Review low-confidence model labels")
-    rows = conn.execute(
+# ---------------------------------------------------------------------------
+# Tab 4: Data
+# ---------------------------------------------------------------------------
+
+def _build_data_query(
+    date_from, date_to, cats: list[str], source: str,
+    search: str, amount_min: float, amount_max: float,
+    include_income: bool,
+) -> tuple[str, list]:
+    """Return (SQL, params) for the Data table given filter widgets."""
+    parts: list[str] = []
+    params: list = []
+    if date_from is not None:
+        parts.append("e.buchungsdatum >= ?")
+        params.append(date_from.isoformat())
+    if date_to is not None:
+        parts.append("e.buchungsdatum <= ?")
+        params.append(date_to.isoformat())
+    if not include_income:
+        parts.append("e.is_income = 0")
+    if amount_min is not None:
+        parts.append("ABS(e.betrag_cents) >= ?")
+        params.append(int(amount_min * 100))
+    if amount_max is not None:
+        parts.append("ABS(e.betrag_cents) <= ?")
+        params.append(int(amount_max * 100))
+    if search:
+        like = f"%{search.lower()}%"
+        parts.append(
+            "(LOWER(e.counterparty) LIKE ? OR LOWER(e.verwendungszweck) LIKE ?)"
+        )
+        params.extend([like, like])
+    if cats:
+        unlabeled_picked = "(unkategorisiert)" in cats
+        named = [c for c in cats if c != "(unkategorisiert)"]
+        cat_conds = []
+        if named:
+            ph = ",".join("?" * len(named))
+            cat_conds.append(f"c.name IN ({ph})")
+            params.extend(named)
+        if unlabeled_picked:
+            cat_conds.append("c.id IS NULL")
+        parts.append("(" + " OR ".join(cat_conds) + ")")
+    if source == "user":
+        parts.append("ll.source = 'user'")
+    elif source == "model":
+        parts.append("ll.source = 'model'")
+    elif source == "unlabeled":
+        parts.append("ll.expense_id IS NULL")
+
+    where = (" WHERE " + " AND ".join(parts)) if parts else ""
+    sql = (
         """
-        SELECT e.id, e.buchungsdatum, e.betrag_cents, e.counterparty, e.verwendungszweck,
-               c.name AS predicted, l.confidence
+        WITH latest_label AS (
+            SELECT l.expense_id, l.category_id, l.source, l.confidence
+            FROM labels l
+            JOIN (
+                SELECT expense_id, MAX(id) AS max_id
+                FROM labels GROUP BY expense_id
+            ) m ON l.id = m.max_id
+        )
+        SELECT
+            e.id, e.buchungsdatum, e.counterparty, e.verwendungszweck,
+            e.betrag_cents / 100.0 AS "betrag_€",
+            c.name AS category, ll.source AS label_source, ll.confidence,
+            e.umsatztyp, e.iban_country, e.iban_is_foreign,
+            e.cluster_id,
+            e.has_glaeubiger_id, e.mandatsreferenz_present
         FROM expenses e
-        JOIN labels l ON l.id = (
-            SELECT MAX(id) FROM labels WHERE expense_id = e.id
-        )
-        JOIN categories c ON c.id = l.category_id
-        WHERE l.source = 'model' AND l.confidence < ?
-        ORDER BY l.confidence ASC
-        LIMIT 100
-        """,
-        (cfg.classifier.confidence_threshold,),
-    ).fetchall()
-    if not rows:
-        st.info("Nothing flagged for review (run `expense predict` first).")
-    else:
-        cats = list_categories(conn)
-        for r in rows:
-            with st.container(border=True):
-                st.write(
-                    f"**{r['buchungsdatum']}** — {r['betrag_cents']/100:.2f} € — **{r['counterparty']}** — "
-                    f"predicted **{r['predicted']}** (conf {r['confidence']:.2f})"
-                )
-                if r["verwendungszweck"]:
-                    st.caption(r["verwendungszweck"])
+        LEFT JOIN latest_label ll ON ll.expense_id = e.id
+        LEFT JOIN categories c ON c.id = ll.category_id
+        """
+        + where
+        + " ORDER BY e.buchungsdatum DESC, e.id DESC"
+    )
+    return sql, params
+
+
+with tab_data:
+    st.header("Data")
+    cat_options = [s.name for s in category_stats(conn)] + ["(unkategorisiert)"]
+
+    with st.expander("Filters", expanded=True):
+        fc1, fc2, fc3 = st.columns(3)
+        with fc1:
+            date_from = st.date_input("From", value=None, key="data_from")
+            date_to = st.date_input("To", value=None, key="data_to")
+            include_income = st.checkbox("Include income (positive amounts)", value=False)
+        with fc2:
+            picked_cats = st.multiselect(
+                "Categories", options=cat_options, default=[], key="data_cats"
+            )
+            source = st.selectbox(
+                "Label source", ["all", "user", "model", "unlabeled"], index=0
+            )
+        with fc3:
+            search = st.text_input("Search counterparty / Verwendungszweck", value="")
+            amount_min = st.number_input("Min |amount| €", value=0.0, step=10.0, min_value=0.0)
+            amount_max_raw = st.number_input("Max |amount| €", value=0.0, step=10.0, min_value=0.0,
+                                             help="0 = no upper limit")
+            amount_max = amount_max_raw if amount_max_raw > 0 else None
+
+    extended = st.toggle("Extended columns", value=False, key="data_extended")
+    sql, params = _build_data_query(
+        date_from or None, date_to or None,
+        picked_cats, source, search.strip(),
+        amount_min if amount_min > 0 else None, amount_max,
+        include_income,
+    )
+    df = pd.read_sql_query(sql, conn, params=params)
+    if not df.empty:
+        df["category"] = df["category"].fillna("(unkategorisiert)")
+        df["confidence"] = df["confidence"].fillna("")
+        df["label_source"] = df["label_source"].fillna("")
+    base_cols = ["id", "buchungsdatum", "counterparty", "verwendungszweck",
+                 "betrag_€", "category"]
+    ext_cols = base_cols + ["label_source", "confidence", "umsatztyp",
+                            "iban_country", "iban_is_foreign", "cluster_id",
+                            "has_glaeubiger_id", "mandatsreferenz_present"]
+    show_cols = ext_cols if extended else base_cols
+
+    st.caption(f"{len(df)} record(s) match the filters")
+    event = st.dataframe(
+        df[show_cols] if not df.empty else pd.DataFrame(columns=show_cols),
+        width="stretch",
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        height=420,
+    )
+
+    # Row drawer
+    sel_rows = event.selection.rows if event and event.selection else []
+    if sel_rows:
+        row_idx = sel_rows[0]
+        eid = int(df.iloc[row_idx]["id"])
+        with st.container(border=True):
+            full = conn.execute(
+                "SELECT * FROM expenses WHERE id = ?", (eid,)
+            ).fetchone()
+            full_dict = dict(full) if full else {}
+            st.subheader(f"Record #{eid}")
+            head = st.columns(3)
+            head[0].write(f"**Date:** {full_dict.get('buchungsdatum')}")
+            head[1].write(f"**Amount:** {full_dict.get('betrag_cents', 0) / 100:.2f} €")
+            head[2].write(f"**Counterparty:** {full_dict.get('counterparty')}")
+            if full_dict.get("verwendungszweck"):
+                st.caption(full_dict["verwendungszweck"])
+
+            edit_cols = st.columns([2, 1])
+            with edit_cols[0]:
+                opts = _category_options(include_unlabeled=False)
+                current = conn.execute(
+                    """
+                    SELECT l.category_id FROM labels l
+                    WHERE l.expense_id = ?
+                    ORDER BY l.id DESC LIMIT 1
+                    """,
+                    (eid,),
+                ).fetchone()
+                current_cid = int(current["category_id"]) if current else None
+                idx = 0
+                for i, (cid, _) in enumerate(opts):
+                    if cid == current_cid:
+                        idx = i
+                        break
                 pick = st.selectbox(
-                    "Confirm/correct",
-                    [c.name for c in cats],
-                    index=[c.name for c in cats].index(r["predicted"]),
-                    key=f"review_{r['id']}",
+                    "Category", [name for _, name in opts], index=idx,
+                    key=f"drawer_cat_{eid}",
                 )
-                if st.button("Save as user label", key=f"review_save_{r['id']}"):
-                    cid = next(c.id for c in cats if c.name == pick)
-                    add_label(conn, int(r["id"]), cid, "user")
-                    st.success("saved")
+                if st.button("Save category", key=f"drawer_save_cat_{eid}"):
+                    chosen_cid = next(cid for cid, name in opts if name == pick)
+                    add_label(conn, eid, chosen_cid, "user")
+                    st.success(f"saved → {pick}")
+                    st.rerun()
+            with edit_cols[1]:
+                st.write("**Cluster:**", full_dict.get("cluster_id"))
+                st.write("**Source file:**", full_dict.get("source_file") or "—")
+                st.write("**IBAN:**", full_dict.get("iban") or "—")
+
+            note = get_note(conn, eid) or ""
+            new_note = st.text_area("Note", value=note, key=f"drawer_note_{eid}")
+            if st.button("Save note", key=f"drawer_save_note_{eid}"):
+                set_note(conn, eid, new_note)
+                st.success("note saved")
+
+            with st.expander("All fields"):
+                st.json(
+                    {k: (v if not isinstance(v, bytes) else f"<{len(v)} bytes>") for k, v in full_dict.items()}
+                )
 
 
-# Clusters -------------------------------------------------------------------
-with tabs[3]:
+# ---------------------------------------------------------------------------
+# Tab 5: Clusters
+# ---------------------------------------------------------------------------
+
+with tab_clusters:
     st.header("Clusters")
+    st.caption(
+        "Unsupervised grouping (UMAP → HDBSCAN) over the same embeddings the "
+        "classifier uses. Useful for **outlier surfacing** (`cluster_id = -1` "
+        "are records that don't look like anything else) and **vendor-group "
+        "discovery** when you have several similar merchants. Less useful "
+        "once your categories are stable."
+    )
     if st.button("(Re-)compute clusters"):
-        report = cluster_all(conn, cfg, embedder)
-        st.success(
-            f"{report.n_clusters} clusters, {report.n_outliers} outliers of {report.n_points} points"
-        )
+        with st.status("clustering…", expanded=True) as status:
+            emb = _embedder()
+            status.write("computing embeddings (cached)…")
+            report = cluster_all(conn, cfg, emb)
+            status.update(
+                label=f"{report.n_clusters} clusters, {report.n_outliers} outliers of {report.n_points} points",
+                state="complete",
+            )
+
     df = pd.read_sql_query(
         """
-        SELECT cluster_id, COUNT(*) AS n,
+        SELECT cluster_id,
+               COUNT(*) AS n,
                GROUP_CONCAT(DISTINCT counterparty_normalized) AS sample_vendors
         FROM expenses
+        WHERE cluster_id IS NOT NULL
         GROUP BY cluster_id
         ORDER BY n DESC
         """,
         conn,
     )
     if df.empty:
-        st.info("Run clustering first.")
+        st.info("No clusters computed yet.")
     else:
-        st.dataframe(df, use_container_width=True)
+        st.dataframe(df, width="stretch", hide_index=True)
 
 
-# Notes ----------------------------------------------------------------------
-with tabs[4]:
-    st.header("Notes")
-    eid = st.number_input("Expense id", min_value=1, value=1, step=1)
-    row = conn.execute(
-        "SELECT buchungsdatum, betrag_cents, counterparty, verwendungszweck "
-        "FROM expenses WHERE id = ?",
-        (int(eid),),
-    ).fetchone()
-    if row is None:
-        st.info("No expense with this id.")
-    else:
-        st.write(
-            f"**{row['buchungsdatum']}** — {row['betrag_cents']/100:.2f} € — "
-            f"**{row['counterparty']}**"
-        )
-        if row["verwendungszweck"]:
-            st.caption(row["verwendungszweck"])
-        existing = get_note(conn, int(eid)) or ""
-        new_text = st.text_area("Note", value=existing, key=f"note_{eid}")
-        if st.button("Save note"):
-            set_note(conn, int(eid), new_text)
-            st.success("saved")
+# ---------------------------------------------------------------------------
+# Tab 6: Settings
+# ---------------------------------------------------------------------------
 
-
-# Settings -------------------------------------------------------------------
-with tabs[5]:
-    from expense_analyzer.storage.admin import (
-        category_removal_impact,
-        remove_category,
-        reset_all,
-        reset_data,
-    )
-
+with tab_settings:
     st.header("Settings")
-    st.subheader("Categories")
-    cats = list_categories(conn)
-    st.dataframe(
-        pd.DataFrame([{"id": c.id, "name": c.name, "description": c.description, "color": c.color} for c in cats]),
-        use_container_width=True,
-    )
-    with st.form("add_cat"):
-        name = st.text_input("Add category — name")
-        desc = st.text_input("Description")
-        color = st.text_input("Color (hex)", value="#888")
-        if st.form_submit_button("Add / update"):
-            if name.strip():
-                upsert_category(conn, name.strip(), desc.strip(), color.strip() or "#888")
-                st.success(f"saved {name}")
-                st.rerun()
 
-    with st.expander("Remove a category", expanded=False):
-        if not cats:
-            st.caption("no categories yet")
-        else:
-            to_remove = st.selectbox(
-                "Category to remove",
-                ["—"] + [c.name for c in cats],
-                key="remove_cat_pick",
-            )
-            cascade = st.checkbox(
-                "Force-delete even if labels reference this category",
-                value=False,
-                key="remove_cat_cascade",
-            )
-            if to_remove != "—":
-                impact = category_removal_impact(conn, to_remove)
-                if impact.n_labels > 0:
-                    st.warning(
-                        f"{impact.n_labels} label(s) reference {to_remove!r}. "
-                        f"Removing it will also delete those labels."
-                    )
-                if st.button(f"Remove {to_remove}", type="secondary"):
-                    if impact.n_labels > 0 and not cascade:
-                        st.error("Tick the force-delete box first.")
-                    else:
-                        result = remove_category(conn, to_remove)
-                        st.success(
-                            f"removed {result.name}; {result.n_labels_deleted} label(s) cascaded"
-                        )
-                        st.rerun()
+    st.subheader("Models")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.write(f"Embedding model: `{cfg.embedding_model}`")
+        st.write(f"Zero-shot model: `{cfg.zeroshot_model}`")
+        st.write(f"Device: `{cfg.device}`")
+    with c2:
+        st.checkbox(
+            "Use hash-based dummy embedder (dev / fast iteration)",
+            value=st.session_state.get("use_hash_embedder", False),
+            key="use_hash_embedder",
+            help="Skip the HF model and use a deterministic hash embedder. "
+            "Quality drops sharply; only useful for clicking through the UI.",
+        )
 
     st.subheader("Privacy")
     st.write(f"Vendor web lookup enabled: **{cfg.vendor_lookup.enabled}**")
@@ -370,11 +730,6 @@ with tabs[5]:
         )
     else:
         st.info("Vendor lookup is OFF. Set `vendor_lookup.enabled: true` in your config to enable.")
-
-    st.subheader("Models")
-    st.write(f"Embedding model: `{cfg.embedding_model}`")
-    st.write(f"Zero-shot model: `{cfg.zeroshot_model}`")
-    st.write(f"Device: `{cfg.device}`")
 
     st.subheader(":red[Danger zone — clear data]")
     with st.expander("Clear ingested expenses + ML state", expanded=False):
@@ -388,7 +743,9 @@ with tabs[5]:
         if st.button("Clear ingested data"):
             if confirm_data.strip().lower() == "clear data":
                 report = reset_data(conn)
-                st.success(f"deleted {report.total} row(s) across {len(report.table_counts)} table(s)")
+                st.success(
+                    f"deleted {report.total} row(s) across {len(report.table_counts)} table(s)"
+                )
                 st.rerun()
             else:
                 st.error("type the confirmation phrase exactly")
@@ -396,7 +753,7 @@ with tabs[5]:
     with st.expander("Factory reset (everything, incl. categories)", expanded=False):
         st.write(
             "Wipes every table including categories and own-IBANs. The DB schema "
-            "stays so you can immediately re-`init`."
+            "stays so you can immediately re-init."
         )
         confirm_all = st.text_input(
             "Type `factory reset` to confirm", key="confirm_reset_all"
@@ -404,7 +761,9 @@ with tabs[5]:
         if st.button("Factory reset"):
             if confirm_all.strip().lower() == "factory reset":
                 report = reset_all(conn)
-                st.success(f"deleted {report.total} row(s) across {len(report.table_counts)} table(s)")
+                st.success(
+                    f"deleted {report.total} row(s) across {len(report.table_counts)} table(s)"
+                )
                 st.rerun()
             else:
                 st.error("type the confirmation phrase exactly")
