@@ -1,0 +1,11 @@
+# GPU-enabled torch wheel for NVIDIA Blackwell (RTX 50-series, sm_120).
+# Install via:
+#   pip install -r requirements-cuda.txt --index-url https://download.pytorch.org/whl/cu128
+#
+# Requires a recent NVIDIA driver supporting CUDA >= 12.8. Check with:
+#   nvidia-smi
+#
+# The PyTorch wheel bundles its own CUDA runtime; the system CUDA toolkit
+# is NOT required.
+
+torch

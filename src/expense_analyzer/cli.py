@@ -559,68 +559,110 @@ def export(ctx: click.Context, fmt: str, out: Path | None) -> None:
 
 # --- ui ----------------------------------------------------------------------
 
-@cli.command()
-@click.option("--no-browser", is_flag=True,
-              help="Don't auto-open the system browser when the UI is ready.")
-@click.pass_context
-def ui(ctx: click.Context, no_browser: bool) -> None:
-    """Launch the local Streamlit UI (binds to 127.0.0.1).
+def _build_streamlit_args(cfg: Config) -> list[str]:
+    app = Path(__file__).parent / "ui" / "streamlit_app.py"
+    return [
+        sys.executable, "-m", "streamlit", "run", str(app),
+        "--server.address", cfg.streamlit.host,
+        "--server.port", str(cfg.streamlit.port),
+        "--server.headless", "true",
+        "--server.runOnSave", "true",         # auto-reload on file change
+        "--server.fileWatcherType", "auto",
+        "--browser.gatherUsageStats", "false",
+    ]
 
-    By default, opens the UI in the system browser as soon as Streamlit
-    is accepting connections. Pass `--no-browser` to suppress that.
 
-    On Ctrl+C, gives Streamlit up to 5 seconds to shut down cleanly,
-    then force-kills it. This works around a known Tornado/asyncio issue
-    on Windows where the event loop deadlocks during shutdown if a TCP
-    connection arrives mid-stop.
-    """
-    import signal
+def _open_browser_when_ready(host: str, port: int, timeout: float = 30.0) -> None:
     import socket
     import threading
     import time
     import webbrowser
 
+    def worker() -> None:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                with socket.create_connection((host, port), timeout=0.5):
+                    webbrowser.open(f"http://{host}:{port}")
+                    return
+            except OSError:
+                time.sleep(0.3)
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
+@cli.command()
+@click.option("--foreground", is_flag=True,
+              help="Run streamlit attached to this terminal instead of detaching.")
+@click.option("--no-browser", is_flag=True,
+              help="Don't auto-open the system browser when the UI is ready.")
+@click.pass_context
+def ui(ctx: click.Context, foreground: bool, no_browser: bool) -> None:
+    """Launch the local Streamlit UI (binds to 127.0.0.1).
+
+    Default: spawns streamlit *detached* — your terminal returns
+    immediately. Stop it later with `expense ui-stop`. The Streamlit
+    server has `--server.runOnSave true`, so editing source files
+    triggers an automatic rerun; just refresh the browser.
+
+    With `--foreground`, the server runs attached to this terminal
+    and Ctrl+C stops it (clean shutdown with a 5 s force-kill
+    fallback for the Tornado/asyncio Windows shutdown bug).
+    """
+    from expense_analyzer.ui.process import (
+        UiProcessInfo,
+        is_alive,
+        read_pid_file,
+        spawn_detached,
+        write_pid_file,
+    )
+
     cfg: Config = ctx.obj[_CTX_KEY]["config"]
-    # Invoke streamlit via the same Python interpreter that's running this
-    # CLI -- this works whether or not the venv's Scripts/bin dir is on PATH.
     try:
         import streamlit  # noqa: F401
     except ImportError:
         click.echo("streamlit is not installed in this environment (pip install streamlit)", err=True)
         ctx.exit(2)
-    app = Path(__file__).parent / "ui" / "streamlit_app.py"
+
+    # Refuse to start a second instance.
+    existing = read_pid_file(cfg.data_dir)
+    if existing is not None and is_alive(existing.pid):
+        click.echo(
+            f"UI already running (pid {existing.pid}, http://{existing.host}:{existing.port}). "
+            "Use `expense ui-stop` first.",
+            err=True,
+        )
+        ctx.exit(2)
+
+    args = _build_streamlit_args(cfg)
     env = os.environ.copy()
     env["EXPENSE_ANALYZER_HOME"] = str(cfg.data_dir)
-    # Force --server.headless=true: we open the browser ourselves once the
-    # port is actually accepting connections, which avoids the race where
-    # streamlit pops a tab pointing at a not-yet-bound URL.
-    args = [
-        sys.executable, "-m", "streamlit", "run", str(app),
-        "--server.address", cfg.streamlit.host,
-        "--server.port", str(cfg.streamlit.port),
-        "--server.headless", "true",
-        "--browser.gatherUsageStats", "false",
-    ]
     url = f"http://{cfg.streamlit.host}:{cfg.streamlit.port}"
-    click.echo(" ".join(args))
     click.echo(f"-> {url}")
 
-    def _open_when_ready() -> None:
-        deadline = time.time() + 30
-        while time.time() < deadline:
-            try:
-                with socket.create_connection((cfg.streamlit.host, cfg.streamlit.port), timeout=0.5):
-                    webbrowser.open(url)
-                    return
-            except OSError:
-                time.sleep(0.3)
-
     if not no_browser:
-        threading.Thread(target=_open_when_ready, daemon=True).start()
+        _open_browser_when_ready(cfg.streamlit.host, cfg.streamlit.port)
 
-    # On Windows, put streamlit in its own process group so the terminal's
-    # Ctrl+C only fires our handler -- otherwise both processes race on it
-    # and streamlit's hung shutdown blocks our cleanup.
+    if foreground:
+        _run_foreground(args, env)
+        return
+
+    log_path = cfg.data_dir / "ui.log"
+    pid = spawn_detached(args, env=env, log_path=log_path)
+    info = UiProcessInfo(
+        pid=pid,
+        port=cfg.streamlit.port,
+        host=cfg.streamlit.host,
+        started_at=__import__("time").time(),
+    )
+    write_pid_file(cfg.data_dir, info)
+    click.echo(f"streamlit detached as pid {pid} (logs: {log_path})")
+    click.echo("stop with: expense ui-stop")
+
+
+def _run_foreground(args: list[str], env: dict) -> None:
+    import signal
+
     is_windows = sys.platform == "win32"
     creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if is_windows else 0
     proc = subprocess.Popen(args, env=env, creationflags=creationflags)
@@ -640,6 +682,66 @@ def ui(ctx: click.Context, no_browser: bool) -> None:
             click.echo("streamlit did not exit cleanly in 5s; killing.")
             proc.kill()
             proc.wait()
+
+
+@cli.command("ui-stop")
+@click.pass_context
+def ui_stop(ctx: click.Context) -> None:
+    """Stop the detached Streamlit UI."""
+    from expense_analyzer.ui.process import (
+        clear_pid_file,
+        graceful_stop,
+        is_alive,
+        read_pid_file,
+    )
+
+    cfg: Config = ctx.obj[_CTX_KEY]["config"]
+    info = read_pid_file(cfg.data_dir)
+    if info is None:
+        click.echo("no UI pid file found.")
+        return
+    if not is_alive(info.pid):
+        click.echo(f"pid {info.pid} not running; clearing stale pid file.")
+        clear_pid_file(cfg.data_dir)
+        return
+    click.echo(f"stopping UI (pid {info.pid})...")
+    if graceful_stop(info.pid):
+        click.echo("stopped.")
+    else:
+        click.echo("could not confirm process exit; check Task Manager.", err=True)
+    clear_pid_file(cfg.data_dir)
+
+
+@cli.command("ui-status")
+@click.pass_context
+def ui_status(ctx: click.Context) -> None:
+    """Show whether the detached Streamlit UI is running."""
+    from expense_analyzer.ui.process import (
+        clear_pid_file,
+        is_alive,
+        read_pid_file,
+    )
+
+    cfg: Config = ctx.obj[_CTX_KEY]["config"]
+    info = read_pid_file(cfg.data_dir)
+    if info is None:
+        click.echo("UI is not running.")
+        return
+    if not is_alive(info.pid):
+        click.echo(f"UI is not running (pid {info.pid} is dead; clearing stale pid file).")
+        clear_pid_file(cfg.data_dir)
+        return
+    click.echo(f"running: pid={info.pid} http://{info.host}:{info.port}")
+
+
+@cli.command("ui-restart")
+@click.option("--no-browser", is_flag=True)
+@click.pass_context
+def ui_restart(ctx: click.Context, no_browser: bool) -> None:
+    """Stop the running UI (if any) and start a fresh one."""
+    # Call ui-stop then ui in sequence.
+    ctx.invoke(ui_stop)
+    ctx.invoke(ui, foreground=False, no_browser=no_browser)
 
 
 # --- entrypoint --------------------------------------------------------------
