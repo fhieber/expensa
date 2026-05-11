@@ -1,11 +1,19 @@
-"""Ingestion: parse, normalize, dedup, persist."""
+"""Ingestion: parse, normalize, dedup, persist.
+
+Heavy feature work happens at ingest time: text normalization, IBAN
+classification, numeric flags, dedup hash, and (if an embedder is
+passed) the sentence-transformer embedding. After ingest_csv returns,
+querying / labeling / predicting against the new rows is cheap because
+everything is precomputed.
+"""
 
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
+from expense_analyzer.features.embeddings import Embedder, store_embeddings
 from expense_analyzer.features.iban import classify_iban
 from expense_analyzer.features.numeric import (
     amount_bucket,
@@ -29,7 +37,9 @@ class IngestReport:
     parsed: int
     inserted: int
     duplicates: int
+    embedded: int = 0
     errors: int = 0
+    new_ids: list[int] = field(default_factory=list)
 
 
 _INSERT_SQL = """
@@ -98,21 +108,53 @@ def _load_own_ibans(conn: sqlite3.Connection) -> set[str]:
     return {r["iban"] for r in rows}
 
 
-def ingest_csv(conn: sqlite3.Connection, path: Path) -> IngestReport:
-    """Parse one CSV and insert rows. Returns counts of new vs. duplicate."""
+def ingest_csv(
+    conn: sqlite3.Connection,
+    path: Path,
+    embedder: Embedder | None = None,
+) -> IngestReport:
+    """Parse one CSV, insert rows, and (if an embedder is passed) immediately
+    compute and persist their sentence-transformer embeddings.
+
+    Returns counts of new vs. duplicate, plus the list of new expense IDs so
+    callers can show "rows just imported" tables without re-querying.
+    """
     parsed = parse_csv(path)
     own_ibans = _load_own_ibans(conn)
-    inserted = 0
+    new_ids: list[int] = []
     for row in parsed:
         params = _row_to_params(row, own_ibans)
         cur = conn.execute(_INSERT_SQL, params)
         if cur.rowcount > 0:
-            inserted += 1
+            new_ids.append(int(cur.lastrowid))
+    inserted = len(new_ids)
     duplicates = len(parsed) - inserted
+
+    embedded = 0
+    if embedder is not None and new_ids:
+        # Look up combined_text just for the rows we inserted -- we don't want
+        # to embed pre-existing rows again.
+        ph = ",".join("?" * len(new_ids))
+        rows = conn.execute(
+            f"SELECT id, combined_text FROM expenses WHERE id IN ({ph})", new_ids
+        ).fetchall()
+        embedded = store_embeddings(
+            conn, embedder, [(r["id"], r["combined_text"] or "") for r in rows]
+        )
+
     return IngestReport(
-        file=path.name, parsed=len(parsed), inserted=inserted, duplicates=duplicates
+        file=path.name,
+        parsed=len(parsed),
+        inserted=inserted,
+        duplicates=duplicates,
+        embedded=embedded,
+        new_ids=new_ids,
     )
 
 
-def ingest_many(conn: sqlite3.Connection, paths: list[Path]) -> list[IngestReport]:
-    return [ingest_csv(conn, p) for p in paths]
+def ingest_many(
+    conn: sqlite3.Connection,
+    paths: list[Path],
+    embedder: Embedder | None = None,
+) -> list[IngestReport]:
+    return [ingest_csv(conn, p, embedder=embedder) for p in paths]

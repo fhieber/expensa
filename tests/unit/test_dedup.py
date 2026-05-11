@@ -28,7 +28,28 @@ def test_ingest_inserts_all_new(tmp_db: sqlite3.Connection, fixtures_dir: Path) 
     assert report.parsed == 50
     assert report.inserted == 50
     assert report.duplicates == 0
+    assert report.embedded == 0  # no embedder passed -> no embeddings computed
+    assert len(report.new_ids) == 50
     n = tmp_db.execute("SELECT COUNT(*) AS n FROM expenses").fetchone()["n"]
+    assert n == 50
+
+
+def test_ingest_with_embedder_computes_embeddings(
+    tmp_db: sqlite3.Connection, fixtures_dir: Path
+) -> None:
+    from expense_analyzer.features.embeddings import HashEmbedder
+
+    emb = HashEmbedder(dim=64)
+    report = ingest_csv(tmp_db, fixtures_dir / "sample_de.csv", embedder=emb)
+    assert report.embedded == 50
+    # Re-ingesting the same file yields 0 new rows AND 0 new embeddings.
+    report2 = ingest_csv(tmp_db, fixtures_dir / "sample_de.csv", embedder=emb)
+    assert report2.inserted == 0
+    assert report2.embedded == 0
+    # Embeddings table is populated.
+    n = tmp_db.execute(
+        "SELECT COUNT(*) AS n FROM embeddings WHERE model_name = ?", (emb.model_name,)
+    ).fetchone()["n"]
     assert n == 50
 
 

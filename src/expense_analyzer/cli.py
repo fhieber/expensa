@@ -245,9 +245,15 @@ def reset(ctx: click.Context, wipe_all: bool, yes: bool) -> None:
 
 @cli.command()
 @click.argument("csvs", nargs=-1, type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--no-embed", is_flag=True,
+              help="Skip computing embeddings for new rows. They'll be computed lazily later.")
 @click.pass_context
-def ingest(ctx: click.Context, csvs: tuple[Path, ...]) -> None:
-    """Ingest one or more German bank-export CSVs (dedup-aware)."""
+def ingest(ctx: click.Context, csvs: tuple[Path, ...], no_embed: bool) -> None:
+    """Ingest one or more German bank-export CSVs (dedup-aware).
+
+    By default also computes sentence-transformer embeddings for every newly
+    inserted row, so downstream label/predict/cluster commands are fast.
+    """
     if not csvs:
         click.echo("no files given", err=True)
         ctx.exit(2)
@@ -256,10 +262,17 @@ def ingest(ctx: click.Context, csvs: tuple[Path, ...]) -> None:
     try:
         from expense_analyzer.ingestion import ingest_csv
 
+        emb = None
+        if not no_embed:
+            click.echo(f"loading embedding model `{cfg.embedding_model}`...")
+            emb = _embedder(cfg)
+
         for path in csvs:
-            r = ingest_csv(conn, path)
+            click.echo(f"ingesting {path.name}...")
+            r = ingest_csv(conn, path, embedder=emb)
             click.echo(
-                f"{r.file:<40} parsed={r.parsed:>4}  new={r.inserted:>4}  duplicate={r.duplicates:>4}"
+                f"{r.file:<40} parsed={r.parsed:>4}  new={r.inserted:>4}  "
+                f"duplicate={r.duplicates:>4}  embedded={r.embedded:>4}"
             )
     finally:
         conn.close()

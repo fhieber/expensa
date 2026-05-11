@@ -39,12 +39,12 @@ def test_ingest_reports_counts(tmp_path: Path, fixtures_dir: Path) -> None:
     runner = CliRunner()
     runner.invoke(cli, ["init"], env=_runner_env(tmp_path))
     r = runner.invoke(
-        cli, ["ingest", str(fixtures_dir / "sample_de.csv")], env=_runner_env(tmp_path)
+        cli, ["ingest", "--no-embed", str(fixtures_dir / "sample_de.csv")], env=_runner_env(tmp_path)
     )
     assert r.exit_code == 0, r.output
     assert "new=  50" in r.output
     r2 = runner.invoke(
-        cli, ["ingest", str(fixtures_dir / "sample_overlap.csv")], env=_runner_env(tmp_path)
+        cli, ["ingest", "--no-embed", str(fixtures_dir / "sample_overlap.csv")], env=_runner_env(tmp_path)
     )
     assert "new=   7" in r2.output
     assert "duplicate=   6" in r2.output
@@ -54,7 +54,7 @@ def test_status_after_ingest(tmp_path: Path, fixtures_dir: Path) -> None:
     runner = CliRunner()
     runner.invoke(cli, ["init"], env=_runner_env(tmp_path))
     runner.invoke(
-        cli, ["ingest", str(fixtures_dir / "sample_de.csv")], env=_runner_env(tmp_path)
+        cli, ["ingest", "--no-embed", str(fixtures_dir / "sample_de.csv")], env=_runner_env(tmp_path)
     )
     r = runner.invoke(cli, ["status"], env=_runner_env(tmp_path))
     assert r.exit_code == 0
@@ -65,7 +65,7 @@ def test_viz_writes_html(tmp_path: Path, fixtures_dir: Path) -> None:
     runner = CliRunner()
     runner.invoke(cli, ["init"], env=_runner_env(tmp_path))
     runner.invoke(
-        cli, ["ingest", str(fixtures_dir / "sample_de.csv")], env=_runner_env(tmp_path)
+        cli, ["ingest", "--no-embed", str(fixtures_dir / "sample_de.csv")], env=_runner_env(tmp_path)
     )
     out = tmp_path / "pie.html"
     r = runner.invoke(cli, ["viz", "pie", "--out", str(out)], env=_runner_env(tmp_path))
@@ -77,7 +77,7 @@ def test_export_csv(tmp_path: Path, fixtures_dir: Path) -> None:
     runner = CliRunner()
     runner.invoke(cli, ["init"], env=_runner_env(tmp_path))
     runner.invoke(
-        cli, ["ingest", str(fixtures_dir / "sample_de.csv")], env=_runner_env(tmp_path)
+        cli, ["ingest", "--no-embed", str(fixtures_dir / "sample_de.csv")], env=_runner_env(tmp_path)
     )
     out = tmp_path / "out.csv"
     r = runner.invoke(cli, ["export", "--format", "csv", "--out", str(out)], env=_runner_env(tmp_path))
@@ -92,7 +92,7 @@ def test_train_with_mocked_embedder(tmp_path: Path, fixtures_dir: Path) -> None:
     runner = CliRunner()
     runner.invoke(cli, ["init"], env=_runner_env(tmp_path))
     runner.invoke(
-        cli, ["ingest", str(fixtures_dir / "sample_de.csv")], env=_runner_env(tmp_path)
+        cli, ["ingest", "--no-embed", str(fixtures_dir / "sample_de.csv")], env=_runner_env(tmp_path)
     )
     # Add a couple of labels.
     runner.invoke(cli, ["categories", "add", "TestA"], env=_runner_env(tmp_path))
@@ -147,7 +147,7 @@ def test_categories_remove_refuses_when_labels_exist(
     runner = CliRunner()
     runner.invoke(cli, ["init"], env=_runner_env(tmp_path))
     runner.invoke(
-        cli, ["ingest", str(fixtures_dir / "sample_de.csv")], env=_runner_env(tmp_path)
+        cli, ["ingest", "--no-embed", str(fixtures_dir / "sample_de.csv")], env=_runner_env(tmp_path)
     )
     # Manually attach a label to category #1.
     import sqlite3
@@ -177,7 +177,7 @@ def test_reset_clears_data_keeps_categories(tmp_path: Path, fixtures_dir: Path) 
     runner = CliRunner()
     runner.invoke(cli, ["init"], env=_runner_env(tmp_path))
     runner.invoke(
-        cli, ["ingest", str(fixtures_dir / "sample_de.csv")], env=_runner_env(tmp_path)
+        cli, ["ingest", "--no-embed", str(fixtures_dir / "sample_de.csv")], env=_runner_env(tmp_path)
     )
     r = runner.invoke(cli, ["reset", "--yes"], env=_runner_env(tmp_path))
     assert r.exit_code == 0, r.output
@@ -190,7 +190,7 @@ def test_reset_all_wipes_categories_too(tmp_path: Path, fixtures_dir: Path) -> N
     runner = CliRunner()
     runner.invoke(cli, ["init"], env=_runner_env(tmp_path))
     runner.invoke(
-        cli, ["ingest", str(fixtures_dir / "sample_de.csv")], env=_runner_env(tmp_path)
+        cli, ["ingest", "--no-embed", str(fixtures_dir / "sample_de.csv")], env=_runner_env(tmp_path)
     )
     r = runner.invoke(cli, ["reset", "--all", "--yes"], env=_runner_env(tmp_path))
     assert r.exit_code == 0, r.output
