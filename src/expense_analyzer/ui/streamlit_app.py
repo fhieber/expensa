@@ -632,7 +632,8 @@ def _build_data_query(
         SELECT
             e.id, e.buchungsdatum, e.counterparty, e.verwendungszweck,
             e.betrag_cents / 100.0 AS "betrag_€",
-            c.name AS category, ll.source AS label_source, ll.confidence,
+            c.name AS category, ll.category_id AS category_id,
+            ll.source AS label_source, ll.confidence,
             e.umsatztyp, e.iban_country, e.iban_is_foreign,
             e.cluster_id,
             e.has_glaeubiger_id, e.mandatsreferenz_present
@@ -678,6 +679,25 @@ with tab_data:
         include_income,
     )
     df = pd.read_sql_query(sql, conn, params=params)
+
+    # Counts BEFORE the fillna pass below, so we can use NaN semantics.
+    def _to_conf(v) -> float:
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return 0.0
+
+    n_unlabeled = int(df["label_source"].isna().sum()) if not df.empty else 0
+    if not df.empty:
+        n_confident_model = int(
+            (
+                (df["label_source"] == "model")
+                & df["confidence"].apply(_to_conf).ge(ACCEPT_CONFIDENT_THRESHOLD)
+            ).sum()
+        )
+    else:
+        n_confident_model = 0
+
     if not df.empty:
         df["category"] = df["category"].fillna("(unkategorisiert)")
         df["confidence"] = df["confidence"].fillna("")
@@ -688,6 +708,75 @@ with tab_data:
                             "iban_country", "iban_is_foreign", "cluster_id",
                             "has_glaeubiger_id", "mandatsreferenz_present"]
     show_cols = ext_cols if extended else base_cols
+
+    # --- Batch actions (respect current filters) ---------------------------
+    if n_unlabeled > 0 or n_confident_model > 0:
+        action_cols = st.columns([2, 2, 3])
+        with action_cols[0]:
+            if n_unlabeled > 0 and st.button(
+                f"Auto-label {n_unlabeled} uncategorized",
+                type="primary",
+                key="data_auto_label_btn",
+            ):
+                unlabeled_ids = [
+                    int(x) for x in df.loc[df["label_source"] == "", "id"].tolist()
+                ]
+                with st.status(
+                    f"auto-labeling {len(unlabeled_ids)} record(s)…", expanded=True
+                ) as status:
+                    status.write(f"loading embedding model `{cfg.embedding_model}`…")
+                    emb = _embedder()
+                    cascade = CategorizationCascade(conn, cfg, emb)
+                    status.write("fitting cascade on existing user labels…")
+                    try:
+                        cascade.fit()
+                    except Exception as e:
+                        status.write(f"  fit skipped: {e}")
+                    status.write(f"predicting {len(unlabeled_ids)} record(s)…")
+                    preds = cascade.predict_batch(unlabeled_ids)
+                    n_persisted = 0
+                    for p in preds:
+                        if p.category_id is not None:
+                            add_label(
+                                conn, p.expense_id, p.category_id, "model",
+                                confidence=p.confidence,
+                            )
+                            n_persisted += 1
+                    from collections import Counter
+
+                    stages = Counter(p.stage for p in preds)
+                    status.update(
+                        label=(
+                            f"labeled {n_persisted}/{len(preds)} record(s) · "
+                            + ", ".join(f"{k}={v}" for k, v in stages.items())
+                        ),
+                        state="complete",
+                    )
+                st.rerun()
+        with action_cols[1]:
+            if n_confident_model > 0 and st.button(
+                f"Accept {n_confident_model} ≥ {int(ACCEPT_CONFIDENT_THRESHOLD * 100)}% as user labels",
+                key="data_accept_btn",
+            ):
+                confident_rows = df[
+                    (df["label_source"] == "model")
+                    & df["confidence"].apply(_to_conf).ge(ACCEPT_CONFIDENT_THRESHOLD)
+                ]
+                n_promoted = 0
+                for _, r in confident_rows.iterrows():
+                    cid = r.get("category_id")
+                    if pd.isna(cid):
+                        continue
+                    add_label(conn, int(r["id"]), int(cid), "user")
+                    n_promoted += 1
+                st.success(f"promoted {n_promoted} prediction(s) to user labels")
+                st.rerun()
+        with action_cols[2]:
+            st.caption(
+                "Both actions apply to the rows that match the **current filters**. "
+                "Auto-label respects the cascade's confidence thresholds; the accept "
+                f"button only promotes predictions at or above {int(ACCEPT_CONFIDENT_THRESHOLD * 100)}%."
+            )
 
     st.caption(f"{len(df)} record(s) match the filters")
     event = st.dataframe(
