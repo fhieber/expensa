@@ -30,7 +30,6 @@ from expense_analyzer.ingestion import IngestReport, ingest_csv
 from expense_analyzer.ml.classifier import CategorizationCascade, Prediction
 from expense_analyzer.ml.clustering import cluster_all
 from expense_analyzer.storage.admin import (
-    category_removal_impact,
     remove_category,
     reset_all,
     reset_data,
@@ -190,10 +189,18 @@ with tab_dash:
 
 with tab_cats:
     st.header("Categories")
+    st.caption(
+        "Edit the table directly: rename, change description, change color (hex), "
+        "add a new row at the bottom, or delete a row with the trash icon. "
+        "Click **Save changes** when done. Stats columns are read-only."
+    )
     stats = category_stats(conn)
-    uncat = uncategorized_stat(conn)
-    rows = [
+
+    # Build the editable DataFrame. The 'id' column is the source of truth
+    # for matching edits/deletes back to existing rows; new rows have id=NaN.
+    orig_rows = [
         {
+            "id": s.id,
             "name": s.name,
             "description": s.description,
             "color": s.color,
@@ -204,59 +211,139 @@ with tab_cats:
         }
         for s in stats
     ]
-    rows.append(
-        {
-            "name": uncat.name,
-            "description": uncat.description,
-            "color": uncat.color,
-            "n_expenses": uncat.n_expenses,
-            "total_€": round(uncat.total_eur, 2),
-            "abs_total_€": round(uncat.abs_total_eur, 2),
-            "last_seen": uncat.last_seen or "",
-        }
-    )
-    st.dataframe(
-        pd.DataFrame(rows),
+    orig_df = pd.DataFrame(orig_rows)
+    if orig_df.empty:
+        orig_df = pd.DataFrame(
+            columns=["id", "name", "description", "color",
+                     "n_expenses", "total_€", "abs_total_€", "last_seen"]
+        )
+
+    edited = st.data_editor(
+        orig_df,
         width="stretch",
         hide_index=True,
+        num_rows="dynamic",
+        column_config={
+            "id": st.column_config.NumberColumn("ID", disabled=True, width="small"),
+            "name": st.column_config.TextColumn("Name", required=True),
+            "description": st.column_config.TextColumn(
+                "Description",
+                help="Used as the zero-shot NLI hypothesis when the cascade falls back.",
+            ),
+            "color": st.column_config.TextColumn(
+                "Color (hex)", help="Edit visually with the picker below the table.",
+                max_chars=7,
+            ),
+            "n_expenses": st.column_config.NumberColumn("# Records", disabled=True),
+            "total_€": st.column_config.NumberColumn("Signed total (€)", disabled=True, format="%.2f"),
+            "abs_total_€": st.column_config.NumberColumn("Abs total (€)", disabled=True, format="%.2f"),
+            "last_seen": st.column_config.TextColumn("Last seen", disabled=True),
+        },
+        key="cat_editor",
     )
 
-    with st.expander("Add category", expanded=False), st.form("add_cat", clear_on_submit=True):
-        name = st.text_input("Name")
-        desc = st.text_input("Description (used as zero-shot hypothesis)")
-        color = st.color_picker("Color", value="#888888")
-        if st.form_submit_button("Save"):
-            if name.strip():
-                upsert_category(conn, name.strip(), desc.strip(), color)
-                st.success(f"saved {name}")
-                st.rerun()
-            else:
-                st.error("name is required")
-
-    with st.expander("Remove category", expanded=False):
-        cat_names = [s.name for s in stats]
-        if not cat_names:
-            st.caption("nothing to remove")
-        else:
-            pick = st.selectbox("Category", ["—"] + cat_names, key="rm_cat_pick")
-            force = st.checkbox(
-                "Force-delete even if labels reference it (cascades)",
-                key="rm_cat_force",
+    # Inline color picker for the existing rows. Pick a name + a color,
+    # click Apply -> the table re-renders with the new color filled in.
+    pc_cols = st.columns([2, 1, 1])
+    with pc_cols[0]:
+        names_now = sorted({str(r) for r in edited["name"] if isinstance(r, str) and r.strip()})
+        if names_now:
+            pc_target = st.selectbox("Edit color of", names_now, key="cat_color_target")
+            current_color = next(
+                (str(r["color"]) for _, r in edited.iterrows() if r["name"] == pc_target),
+                "#888888",
             )
-            if pick != "—":
-                impact = category_removal_impact(conn, pick)
-                if impact.n_labels > 0:
-                    st.warning(
-                        f"{impact.n_labels} label(s) reference {pick!r}. "
-                        "Removing will cascade-delete those labels."
-                    )
-                if st.button(f"Remove {pick}", type="secondary"):
-                    if impact.n_labels > 0 and not force:
-                        st.error("tick the force-delete box first")
+        else:
+            pc_target = None
+            current_color = "#888888"
+    with pc_cols[1]:
+        new_color = st.color_picker("New color", value=current_color, key="cat_color_picker")
+    with pc_cols[2]:
+        st.write("")  # vertical alignment
+        st.write("")
+        if st.button("Apply color", disabled=pc_target is None):
+            mask = edited["name"] == pc_target
+            edited.loc[mask, "color"] = new_color
+            st.session_state["cat_editor_pending_color"] = (pc_target, new_color)
+            st.toast(f"queued color {new_color} for {pc_target}")
+
+    # Pending-deletion warnings -------------------------------------------
+    orig_ids = {int(r["id"]) for r in orig_rows if pd.notna(r["id"])}
+    edited_ids = {int(x) for x in edited["id"] if pd.notna(x)}
+    deleted_ids = orig_ids - edited_ids
+    cascade_warnings: dict[int, tuple[str, int]] = {}
+    if deleted_ids:
+        for s in stats:
+            if s.id in deleted_ids and s.n_expenses > 0:
+                cascade_warnings[s.id] = (s.name, s.n_expenses)
+    if cascade_warnings:
+        for name, n in cascade_warnings.values():
+            st.warning(
+                f"Deleting **{name}** will cascade-delete {n} label(s). "
+                "Tick the box below to confirm before saving."
+            )
+        force_cascade = st.checkbox(
+            "Yes, cascade-delete labels for the removed categories", key="cat_force_cascade"
+        )
+    else:
+        force_cascade = False
+
+    # Save changes -------------------------------------------------------
+    save_disabled = bool(cascade_warnings) and not force_cascade
+    if st.button("Save changes", type="primary", disabled=save_disabled):
+        orig_by_id = {int(r["id"]): r for r in orig_rows if pd.notna(r["id"])}
+        n_added = n_edited = n_deleted = 0
+
+        # Deletions
+        for s in stats:
+            if s.id in deleted_ids:
+                remove_category(conn, s.name)
+                n_deleted += 1
+
+        # Inserts + edits
+        for _, row in edited.iterrows():
+            name = (row.get("name") or "").strip() if isinstance(row.get("name"), str) else ""
+            if not name:
+                continue
+            desc = (row.get("description") or "") if isinstance(row.get("description"), str) else ""
+            color = (row.get("color") or "#888888") if isinstance(row.get("color"), str) else "#888888"
+            if pd.isna(row.get("id")):
+                upsert_category(conn, name, desc.strip(), color)
+                n_added += 1
+            else:
+                orig = orig_by_id.get(int(row["id"]))
+                if orig is None:
+                    continue
+                if (
+                    orig["name"] != name
+                    or (orig["description"] or "") != desc
+                    or (orig["color"] or "#888888") != color
+                ):
+                    # Name changed = treat as rename (upsert by old name then update).
+                    # upsert_category() is keyed by name; for true renames we'd need
+                    # an UPDATE, so handle that path explicitly.
+                    if orig["name"] != name:
+                        conn.execute(
+                            "UPDATE categories SET name=?, description=?, color=? WHERE id=?",
+                            (name, desc, color, int(row["id"])),
+                        )
                     else:
-                        r = remove_category(conn, pick)
-                        st.success(f"removed {r.name}; {r.n_labels_deleted} label(s) cascaded")
-                        st.rerun()
+                        upsert_category(conn, name, desc, color)
+                    n_edited += 1
+
+        st.success(
+            f"saved · added={n_added} edited={n_edited} deleted={n_deleted}"
+        )
+        st.session_state.pop("cat_editor_pending_color", None)
+        st.rerun()
+
+    # Uncategorized info ------------------------------------------------
+    uncat = uncategorized_stat(conn)
+    if uncat.n_expenses > 0:
+        st.info(
+            f"**{uncat.n_expenses}** record(s) currently have no category "
+            f"(total |€| {uncat.abs_total_eur:.2f})."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -704,15 +791,26 @@ with tab_clusters:
 # ---------------------------------------------------------------------------
 
 with tab_settings:
+    from expense_analyzer.config import save_user_config
+    from expense_analyzer.features.model_registry import (
+        EMBEDDING_MODELS,
+        ZEROSHOT_MODELS,
+        hf_cache_dir,
+        is_downloaded,
+        trigger_download,
+    )
+
     st.header("Settings")
 
+    # --- Device / dev toggle --------------------------------------------
     st.subheader("Models")
-    c1, c2 = st.columns(2)
-    with c1:
-        st.write(f"Embedding model: `{cfg.embedding_model}`")
-        st.write(f"Zero-shot model: `{cfg.zeroshot_model}`")
-        st.write(f"Device: `{cfg.device}`")
-    with c2:
+    info_cols = st.columns([2, 1])
+    with info_cols[0]:
+        st.write(f"**Current embedding model:** `{cfg.embedding_model}`")
+        st.write(f"**Current zero-shot model:** `{cfg.zeroshot_model}`")
+        st.write(f"**Device:** `{cfg.device}`")
+        st.caption(f"HF cache: `{hf_cache_dir()}`")
+    with info_cols[1]:
         st.checkbox(
             "Use hash-based dummy embedder (dev / fast iteration)",
             value=st.session_state.get("use_hash_embedder", False),
@@ -720,6 +818,72 @@ with tab_settings:
             help="Skip the HF model and use a deterministic hash embedder. "
             "Quality drops sharply; only useful for clicking through the UI.",
         )
+
+    def _render_model_table(role_label: str, models, current_id: str, cfg_key: str) -> None:
+        st.markdown(f"##### {role_label}")
+        rows = []
+        for m in models:
+            present, size_gb = is_downloaded(m.model_id)
+            rows.append(
+                {
+                    "model_id": m.model_id,
+                    "dim": m.dim if m.dim is not None else "—",
+                    "languages": m.languages,
+                    "downloaded": "✅" if present else "—",
+                    "size_GB": round(size_gb, 2) if present else round(m.approx_size_mb / 1024, 2),
+                    "notes": m.notes,
+                    "active": "●" if m.model_id == current_id else "",
+                }
+            )
+        st.dataframe(
+            pd.DataFrame(rows),
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "model_id": st.column_config.TextColumn("Model"),
+                "downloaded": st.column_config.TextColumn("Cached"),
+                "size_GB": st.column_config.NumberColumn(
+                    "Size (GB)",
+                    help="Actual on-disk if cached, else approximate download size.",
+                    format="%.2f",
+                ),
+                "active": st.column_config.TextColumn("Active"),
+            },
+        )
+        sel_cols = st.columns([3, 1, 1])
+        with sel_cols[0]:
+            picked = st.selectbox(
+                "Switch to",
+                [m.model_id for m in models],
+                index=next((i for i, m in enumerate(models) if m.model_id == current_id), 0),
+                key=f"model_pick_{cfg_key}",
+            )
+        with sel_cols[1]:
+            present, _ = is_downloaded(picked)
+            dl_label = "Download" if not present else "Re-download"
+            if st.button(dl_label, key=f"model_dl_{cfg_key}"):
+                with st.status(f"Downloading {picked}...", expanded=True) as status:
+                    role = "embedding" if cfg_key == "embedding_model" else "zeroshot"
+                    try:
+                        trigger_download(picked, role=role)
+                        status.update(label=f"Downloaded {picked}", state="complete")
+                    except Exception as e:
+                        status.update(label=f"Download failed: {e}", state="error")
+                st.rerun()
+        with sel_cols[2]:
+            st.write("")
+            st.write("")
+            if st.button("Use this", key=f"model_use_{cfg_key}", type="primary",
+                         disabled=picked == current_id):
+                save_user_config({cfg_key: picked}, data_dir=cfg.data_dir)
+                st.cache_resource.clear()
+                st.success(
+                    f"`{cfg_key}` set to `{picked}`. Restart the UI for it to take effect: "
+                    "`expense ui-restart`."
+                )
+
+    _render_model_table("Embedding model", EMBEDDING_MODELS, cfg.embedding_model, "embedding_model")
+    _render_model_table("Zero-shot model", ZEROSHOT_MODELS, cfg.zeroshot_model, "zeroshot_model")
 
     st.subheader("Privacy")
     st.write(f"Vendor web lookup enabled: **{cfg.vendor_lookup.enabled}**")

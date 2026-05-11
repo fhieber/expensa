@@ -167,3 +167,26 @@ def _deep_merge(base: dict, overlay: dict) -> dict:
         else:
             out[k] = v
     return out
+
+
+def save_user_config(updates: dict, data_dir: Path | None = None) -> Path:
+    """Merge `updates` into the user config file at <data_dir>/config.yaml.
+
+    Used by the Settings UI to persist choices (e.g. selected model) across
+    sessions. Only the keys in `updates` are touched; everything else in the
+    existing user config stays put.
+    """
+    base = (
+        Path(data_dir)
+        if data_dir is not None
+        else Path(os.environ.get("EXPENSE_ANALYZER_HOME", "~/.expense-analyzer")).expanduser()
+    )
+    base.mkdir(parents=True, exist_ok=True)
+    path = base / "config.yaml"
+    existing = _load_yaml(path) if path.is_file() else {}
+    merged = _deep_merge(existing, updates)
+    path.write_text(
+        yaml.safe_dump(merged, default_flow_style=False, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    return path
