@@ -30,6 +30,7 @@ from expense_analyzer.ingestion import IngestReport, ingest_csv
 from expense_analyzer.ml.classifier import CategorizationCascade, Prediction
 from expense_analyzer.ml.clustering import cluster_all
 from expense_analyzer.storage.admin import (
+    category_removal_impact,
     remove_category,
     reset_all,
     reset_data,
@@ -187,163 +188,177 @@ with tab_dash:
 # Tab 2: Categories
 # ---------------------------------------------------------------------------
 
+def _save_cat_name(cat_id: int) -> None:
+    new_name = (st.session_state.get(f"cat_{cat_id}_name") or "").strip()
+    if not new_name:
+        st.session_state[f"cat_{cat_id}_error"] = "name cannot be empty"
+        return
+    try:
+        conn.execute("UPDATE categories SET name=? WHERE id=?", (new_name, cat_id))
+        st.session_state.pop(f"cat_{cat_id}_error", None)
+    except sqlite3.IntegrityError as e:
+        st.session_state[f"cat_{cat_id}_error"] = f"name conflict: {e}"
+
+
+def _save_cat_desc(cat_id: int) -> None:
+    new_desc = (st.session_state.get(f"cat_{cat_id}_desc") or "").strip()
+    conn.execute("UPDATE categories SET description=? WHERE id=?", (new_desc, cat_id))
+
+
+def _save_cat_color(cat_id: int) -> None:
+    new_color = st.session_state.get(f"cat_{cat_id}_color") or "#888888"
+    conn.execute("UPDATE categories SET color=? WHERE id=?", (new_color, cat_id))
+
+
 with tab_cats:
+    from expense_analyzer.config import packaged_default_categories
+    from expense_analyzer.storage.categories import import_categories_from_yaml
+    from expense_analyzer.utils.colors import random_hex_color
+
     st.header("Categories")
-    st.caption(
-        "Edit the table directly: rename, change description, change color (hex), "
-        "add a new row at the bottom, or delete a row with the trash icon. "
-        "Click **Save changes** when done. Stats columns are read-only."
-    )
+
     stats = category_stats(conn)
 
-    # Build the editable DataFrame. The 'id' column is the source of truth
-    # for matching edits/deletes back to existing rows; new rows have id=NaN.
-    orig_rows = [
-        {
-            "id": s.id,
-            "name": s.name,
-            "description": s.description,
-            "color": s.color,
-            "n_expenses": s.n_expenses,
-            "total_€": round(s.total_eur, 2),
-            "abs_total_€": round(s.abs_total_eur, 2),
-            "last_seen": s.last_seen or "",
-        }
-        for s in stats
-    ]
-    orig_df = pd.DataFrame(orig_rows)
-    if orig_df.empty:
-        orig_df = pd.DataFrame(
-            columns=["id", "name", "description", "color",
-                     "n_expenses", "total_€", "abs_total_€", "last_seen"]
-        )
-
-    edited = st.data_editor(
-        orig_df,
-        width="stretch",
-        hide_index=True,
-        num_rows="dynamic",
-        column_config={
-            "id": st.column_config.NumberColumn("ID", disabled=True, width="small"),
-            "name": st.column_config.TextColumn("Name", required=True),
-            "description": st.column_config.TextColumn(
-                "Description",
-                help="Used as the zero-shot NLI hypothesis when the cascade falls back.",
-            ),
-            "color": st.column_config.TextColumn(
-                "Color (hex)", help="Edit visually with the picker below the table.",
-                max_chars=7,
-            ),
-            "n_expenses": st.column_config.NumberColumn("# Records", disabled=True),
-            "total_€": st.column_config.NumberColumn("Signed total (€)", disabled=True, format="%.2f"),
-            "abs_total_€": st.column_config.NumberColumn("Abs total (€)", disabled=True, format="%.2f"),
-            "last_seen": st.column_config.TextColumn("Last seen", disabled=True),
-        },
-        key="cat_editor",
-    )
-
-    # Inline color picker for the existing rows. Pick a name + a color,
-    # click Apply -> the table re-renders with the new color filled in.
-    pc_cols = st.columns([2, 1, 1])
-    with pc_cols[0]:
-        names_now = sorted({str(r) for r in edited["name"] if isinstance(r, str) and r.strip()})
-        if names_now:
-            pc_target = st.selectbox("Edit color of", names_now, key="cat_color_target")
-            current_color = next(
-                (str(r["color"]) for _, r in edited.iterrows() if r["name"] == pc_target),
-                "#888888",
-            )
-        else:
-            pc_target = None
-            current_color = "#888888"
-    with pc_cols[1]:
-        new_color = st.color_picker("New color", value=current_color, key="cat_color_picker")
-    with pc_cols[2]:
-        st.write("")  # vertical alignment
-        st.write("")
-        if st.button("Apply color", disabled=pc_target is None):
-            mask = edited["name"] == pc_target
-            edited.loc[mask, "color"] = new_color
-            st.session_state["cat_editor_pending_color"] = (pc_target, new_color)
-            st.toast(f"queued color {new_color} for {pc_target}")
-
-    # Pending-deletion warnings -------------------------------------------
-    orig_ids = {int(r["id"]) for r in orig_rows if pd.notna(r["id"])}
-    edited_ids = {int(x) for x in edited["id"] if pd.notna(x)}
-    deleted_ids = orig_ids - edited_ids
-    cascade_warnings: dict[int, tuple[str, int]] = {}
-    if deleted_ids:
-        for s in stats:
-            if s.id in deleted_ids and s.n_expenses > 0:
-                cascade_warnings[s.id] = (s.name, s.n_expenses)
-    if cascade_warnings:
-        for name, n in cascade_warnings.values():
-            st.warning(
-                f"Deleting **{name}** will cascade-delete {n} label(s). "
-                "Tick the box below to confirm before saving."
-            )
-        force_cascade = st.checkbox(
-            "Yes, cascade-delete labels for the removed categories", key="cat_force_cascade"
-        )
-    else:
-        force_cascade = False
-
-    # Save changes -------------------------------------------------------
-    save_disabled = bool(cascade_warnings) and not force_cascade
-    if st.button("Save changes", type="primary", disabled=save_disabled):
-        orig_by_id = {int(r["id"]): r for r in orig_rows if pd.notna(r["id"])}
-        n_added = n_edited = n_deleted = 0
-
-        # Deletions
-        for s in stats:
-            if s.id in deleted_ids:
-                remove_category(conn, s.name)
-                n_deleted += 1
-
-        # Inserts + edits
-        for _, row in edited.iterrows():
-            name = (row.get("name") or "").strip() if isinstance(row.get("name"), str) else ""
-            if not name:
-                continue
-            desc = (row.get("description") or "") if isinstance(row.get("description"), str) else ""
-            color = (row.get("color") or "#888888") if isinstance(row.get("color"), str) else "#888888"
-            if pd.isna(row.get("id")):
-                upsert_category(conn, name, desc.strip(), color)
-                n_added += 1
-            else:
-                orig = orig_by_id.get(int(row["id"]))
-                if orig is None:
-                    continue
-                if (
-                    orig["name"] != name
-                    or (orig["description"] or "") != desc
-                    or (orig["color"] or "#888888") != color
-                ):
-                    # Name changed = treat as rename (upsert by old name then update).
-                    # upsert_category() is keyed by name; for true renames we'd need
-                    # an UPDATE, so handle that path explicitly.
-                    if orig["name"] != name:
-                        conn.execute(
-                            "UPDATE categories SET name=?, description=?, color=? WHERE id=?",
-                            (name, desc, color, int(row["id"])),
-                        )
-                    else:
-                        upsert_category(conn, name, desc, color)
-                    n_edited += 1
-
-        st.success(
-            f"saved · added={n_added} edited={n_edited} deleted={n_deleted}"
-        )
-        st.session_state.pop("cat_editor_pending_color", None)
-        st.rerun()
-
-    # Uncategorized info ------------------------------------------------
-    uncat = uncategorized_stat(conn)
-    if uncat.n_expenses > 0:
+    # --- Empty-state bootstrap ------------------------------------------
+    if not stats:
         st.info(
-            f"**{uncat.n_expenses}** record(s) currently have no category "
-            f"(total |€| {uncat.abs_total_eur:.2f})."
+            "No categories yet. Install the bundled German defaults to get "
+            "started, or add your own below."
         )
+        if st.button("Install default German categories", type="primary"):
+            n = import_categories_from_yaml(conn, packaged_default_categories())
+            st.success(f"installed {n} categories")
+            st.rerun()
+
+    # --- Existing categories table --------------------------------------
+    if stats:
+        st.caption(
+            "Edit any cell to save immediately. Name and description commit on "
+            "blur/Enter; color commits when you pick a new one. Click ✕ to "
+            "delete (cascade prompt if labels reference it)."
+        )
+
+        # Header row
+        widths = [2, 3, 1, 1, 1, 1.2, 0.5]
+        h = st.columns(widths)
+        h[0].markdown("**Name**")
+        h[1].markdown("**Description**")
+        h[2].markdown("**Color**")
+        h[3].markdown("**# Records**")
+        h[4].markdown("**Abs total €**")
+        h[5].markdown("**Last seen**")
+        h[6].markdown("")
+
+        for s in stats:
+            row = st.columns(widths)
+            with row[0]:
+                st.text_input(
+                    "name",
+                    value=s.name,
+                    key=f"cat_{s.id}_name",
+                    label_visibility="collapsed",
+                    on_change=_save_cat_name,
+                    args=(s.id,),
+                )
+            with row[1]:
+                st.text_input(
+                    "desc",
+                    value=s.description,
+                    key=f"cat_{s.id}_desc",
+                    label_visibility="collapsed",
+                    on_change=_save_cat_desc,
+                    args=(s.id,),
+                    placeholder="(used as zero-shot hypothesis)",
+                )
+            with row[2]:
+                st.color_picker(
+                    "color",
+                    value=s.color,
+                    key=f"cat_{s.id}_color",
+                    label_visibility="collapsed",
+                    on_change=_save_cat_color,
+                    args=(s.id,),
+                )
+            row[3].write(s.n_expenses)
+            row[4].write(f"{s.abs_total_eur:.2f}")
+            row[5].write(s.last_seen or "—")
+            with row[6]:
+                if st.button("✕", key=f"cat_{s.id}_del", help=f"Delete {s.name!r}"):
+                    impact = category_removal_impact(conn, s.name)
+                    if impact.n_labels == 0:
+                        remove_category(conn, s.name)
+                        st.rerun()
+                    else:
+                        st.session_state[f"cat_{s.id}_confirm_delete"] = True
+
+            err = st.session_state.get(f"cat_{s.id}_error")
+            if err:
+                st.error(f"`{s.name}` — {err}")
+
+            if st.session_state.get(f"cat_{s.id}_confirm_delete"):
+                impact = category_removal_impact(conn, s.name)
+                with st.container(border=True):
+                    st.warning(
+                        f"Deleting **{s.name}** will cascade-delete "
+                        f"{impact.n_labels} label(s). Continue?"
+                    )
+                    cc = st.columns([1, 1, 6])
+                    if cc[0].button("Yes, delete", key=f"cat_{s.id}_del_yes",
+                                    type="secondary"):
+                        remove_category(conn, s.name)
+                        st.session_state.pop(f"cat_{s.id}_confirm_delete", None)
+                        st.rerun()
+                    if cc[1].button("Cancel", key=f"cat_{s.id}_del_no"):
+                        st.session_state.pop(f"cat_{s.id}_confirm_delete", None)
+                        st.rerun()
+
+        # Uncategorized note
+        uncat = uncategorized_stat(conn)
+        if uncat.n_expenses > 0:
+            st.info(
+                f"**{uncat.n_expenses}** record(s) currently have no category "
+                f"(total |€| {uncat.abs_total_eur:.2f})."
+            )
+
+    # --- Add a new category --------------------------------------------
+    st.divider()
+    st.markdown("**Add a new category**")
+    if "new_cat_color" not in st.session_state:
+        st.session_state.new_cat_color = random_hex_color()
+
+    add_widths = [2, 3, 1, 1]
+    add_cols = st.columns(add_widths)
+    with add_cols[0]:
+        st.text_input(
+            "new name", key="new_cat_name", label_visibility="collapsed",
+            placeholder="Name (e.g. Lebensmittel)",
+        )
+    with add_cols[1]:
+        st.text_input(
+            "new desc", key="new_cat_desc", label_visibility="collapsed",
+            placeholder="Description (optional; used as zero-shot hypothesis)",
+        )
+    with add_cols[2]:
+        st.color_picker(
+            "new color", key="new_cat_color", label_visibility="collapsed",
+        )
+    with add_cols[3]:
+        if st.button("➕ Add", type="primary"):
+            new_name = (st.session_state.get("new_cat_name") or "").strip()
+            new_desc = (st.session_state.get("new_cat_desc") or "").strip()
+            new_color = st.session_state.get("new_cat_color") or random_hex_color()
+            if not new_name:
+                st.error("name is required")
+            else:
+                try:
+                    upsert_category(conn, new_name, new_desc, new_color)
+                    # Clear inputs for the next addition, refresh suggested color.
+                    for k in ("new_cat_name", "new_cat_desc", "new_cat_color"):
+                        st.session_state.pop(k, None)
+                    st.session_state.new_cat_color = random_hex_color()
+                    st.rerun()
+                except sqlite3.IntegrityError as e:
+                    st.error(f"could not save: {e}")
 
 
 # ---------------------------------------------------------------------------
