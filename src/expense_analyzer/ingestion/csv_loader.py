@@ -103,10 +103,22 @@ def _parse_amount(raw: str) -> Decimal:
 
 
 def _parse_date(raw: str) -> date | None:
+    """Parse a date cell. Supports the formats actually emitted by German
+    bank exports:
+
+      * ``DD.MM.YYYY``  -- canonical 4-digit form (e.g. ``08.05.2026``)
+      * ``DD.MM.YY``    -- 2-digit form (e.g. ``08.05.26``); see below
+      * ``YYYY-MM-DD``  -- ISO, occasionally emitted
+      * ``DD/MM/YYYY``  -- slash variant
+
+    The 2-digit ``%y`` directive follows POSIX: 00-68 → 2000-2068,
+    69-99 → 1969-1999. That covers any realistic bank transaction we'll
+    see.
+    """
     if not raw or not raw.strip():
         return None
     s = raw.strip()
-    for fmt in ("%d.%m.%Y", "%Y-%m-%d", "%d/%m/%Y"):
+    for fmt in ("%d.%m.%Y", "%d.%m.%y", "%Y-%m-%d", "%d/%m/%Y", "%d/%m/%y"):
         try:
             return datetime.strptime(s, fmt).date()
         except ValueError:

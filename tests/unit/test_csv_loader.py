@@ -71,7 +71,15 @@ def test_parse_amount_rejects_garbage() -> None:
 
 @pytest.mark.parametrize(
     "raw,expected",
-    [("01.01.2026", date(2026, 1, 1)), ("31.12.2025", date(2025, 12, 31)), ("", None)],
+    [
+        ("01.01.2026", date(2026, 1, 1)),
+        ("31.12.2025", date(2025, 12, 31)),
+        ("", None),
+        # 2-digit German format that some bank exports use
+        ("08.05.26", date(2026, 5, 8)),
+        ("31.12.99", date(1999, 12, 31)),
+        ("01.01.00", date(2000, 1, 1)),
+    ],
 )
 def test_parse_date(raw: str, expected) -> None:
     assert _parse_date(raw) == expected
@@ -87,6 +95,15 @@ def test_missing_header_raises(tmp_path: Path) -> None:
     bad.write_text("foo;bar\n1;2\n", encoding="utf-8")
     with pytest.raises(CsvParseError):
         parse_csv(bad)
+
+
+def test_parse_csv_with_two_digit_year_dates(fixtures_dir: Path) -> None:
+    """Some bank exports write dates as DD.MM.YY -- still parse cleanly."""
+    rows = parse_csv(fixtures_dir / "sample_de_short_dates.csv")
+    assert len(rows) == 3
+    assert rows[0].buchungsdatum == date(2026, 5, 8)
+    assert rows[0].zahlungsempfaenger == "REWE Markt GmbH"
+    assert rows[2].buchungsdatum == date(2026, 6, 1)
 
 
 def test_cp1252_encoding_handled(tmp_path: Path) -> None:

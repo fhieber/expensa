@@ -819,75 +819,116 @@ with tab_data:
                 f"button only promotes predictions at or above {int(ACCEPT_CONFIDENT_THRESHOLD * 100)}%."
             )
 
-    st.caption(f"{len(df)} record(s) match the filters")
-    event = st.dataframe(
-        df[show_cols] if not df.empty else pd.DataFrame(columns=show_cols),
-        width="stretch",
-        hide_index=True,
-        on_select="rerun",
-        selection_mode="single-row",
-        height=420,
+    st.caption(
+        f"{len(df)} record(s) match the filters · "
+        "click the **Category** cell to change a label inline — saves immediately."
     )
 
-    # Row drawer
-    sel_rows = event.selection.rows if event and event.selection else []
-    if sel_rows:
-        row_idx = sel_rows[0]
-        eid = int(df.iloc[row_idx]["id"])
-        with st.container(border=True):
-            full = conn.execute(
-                "SELECT * FROM expenses WHERE id = ?", (eid,)
-            ).fetchone()
-            full_dict = dict(full) if full else {}
-            st.subheader(f"Record #{eid}")
-            head = st.columns(3)
-            head[0].write(f"**Date:** {full_dict.get('buchungsdatum')}")
-            head[1].write(f"**Amount:** {full_dict.get('betrag_cents', 0) / 100:.2f} €")
-            head[2].write(f"**Counterparty:** {full_dict.get('counterparty')}")
-            if full_dict.get("verwendungszweck"):
-                st.caption(full_dict["verwendungszweck"])
+    # --- Inline-editable table ----------------------------------------------
+    all_cat_names = [s.name for s in category_stats(conn)]
+    cat_id_by_name = {s.name: s.id for s in category_stats(conn)}
 
-            edit_cols = st.columns([2, 1])
-            with edit_cols[0]:
-                opts = _category_options(include_unlabeled=False)
-                current = conn.execute(
-                    """
-                    SELECT l.category_id FROM labels l
-                    WHERE l.expense_id = ?
-                    ORDER BY l.id DESC LIMIT 1
-                    """,
-                    (eid,),
-                ).fetchone()
-                current_cid = int(current["category_id"]) if current else None
-                idx = 0
-                for i, (cid, _) in enumerate(opts):
-                    if cid == current_cid:
-                        idx = i
-                        break
-                pick = st.selectbox(
-                    "Category", [name for _, name in opts], index=idx,
-                    key=f"drawer_cat_{eid}",
-                )
-                if st.button("Save category", key=f"drawer_save_cat_{eid}"):
-                    chosen_cid = next(cid for cid, name in opts if name == pick)
-                    add_label(conn, eid, chosen_cid, "user")
-                    st.success(f"saved → {pick}")
-                    st.rerun()
-            with edit_cols[1]:
-                st.write("**Cluster:**", full_dict.get("cluster_id"))
-                st.write("**Source file:**", full_dict.get("source_file") or "—")
-                st.write("**IBAN:**", full_dict.get("iban") or "—")
+    if df.empty:
+        edited_df = pd.DataFrame(columns=show_cols)
+        editor_view_df = edited_df
+    else:
+        # Display "" instead of "(unkategorisiert)" so the selectbox starts
+        # empty for unlabeled rows.
+        editor_view_df = df[show_cols].copy()
+        editor_view_df.loc[editor_view_df["category"] == "(unkategorisiert)", "category"] = ""
 
-            note = get_note(conn, eid) or ""
-            new_note = st.text_area("Note", value=note, key=f"drawer_note_{eid}")
-            if st.button("Save note", key=f"drawer_save_note_{eid}"):
-                set_note(conn, eid, new_note)
-                st.success("note saved")
+    category_options = [""] + all_cat_names
+    column_config = {
+        "id": st.column_config.NumberColumn("ID", disabled=True, width="small"),
+        "buchungsdatum": st.column_config.TextColumn("Date", disabled=True),
+        "counterparty": st.column_config.TextColumn("Counterparty", disabled=True),
+        "verwendungszweck": st.column_config.TextColumn(
+            "Verwendungszweck", disabled=True, width="large"
+        ),
+        "betrag_€": st.column_config.NumberColumn(
+            "Amount €", disabled=True, format="%.2f"
+        ),
+        "category": st.column_config.SelectboxColumn(
+            "Category",
+            options=category_options,
+            required=False,
+            help="Pick a category right in the cell — saves as a user label immediately.",
+        ),
+        "label_source": st.column_config.TextColumn("Source", disabled=True),
+        "confidence": st.column_config.TextColumn("Conf", disabled=True),
+        "umsatztyp": st.column_config.TextColumn("Umsatztyp", disabled=True),
+        "iban_country": st.column_config.TextColumn("IBAN cc", disabled=True),
+        "iban_is_foreign": st.column_config.NumberColumn("Foreign?", disabled=True),
+        "cluster_id": st.column_config.NumberColumn("Cluster", disabled=True),
+        "has_glaeubiger_id": st.column_config.NumberColumn("Gläubiger?", disabled=True),
+        "mandatsreferenz_present": st.column_config.NumberColumn("Mandat?", disabled=True),
+    }
+    edited_df = st.data_editor(
+        editor_view_df,
+        column_config=column_config,
+        disabled=[c for c in show_cols if c != "category"],
+        hide_index=True,
+        width="stretch",
+        height=420,
+        key="data_editor",
+    )
 
-            with st.expander("All fields"):
-                st.json(
-                    {k: (v if not isinstance(v, bytes) else f"<{len(v)} bytes>") for k, v in full_dict.items()}
-                )
+    # Diff Category column → write user labels for any changes.
+    if not df.empty:
+        changed_count = 0
+        for idx in editor_view_df.index:
+            new_val = str(edited_df.at[idx, "category"] or "").strip()
+            old_val = str(editor_view_df.at[idx, "category"] or "").strip()
+            if new_val and new_val != old_val:
+                cid = cat_id_by_name.get(new_val)
+                if cid is not None:
+                    add_label(conn, int(editor_view_df.at[idx, "id"]), cid, "user")
+                    changed_count += 1
+        if changed_count:
+            # Clear editor state so the next rerun starts from the refreshed DF
+            # rather than re-applying the cached edit.
+            st.session_state.pop("data_editor", None)
+            st.toast(f"saved {changed_count} label change(s)")
+            st.rerun()
+
+    # --- Optional row drawer (notes + all-fields inspection) ---------------
+    sel_id_text = st.text_input(
+        "Inspect record by ID (notes + full fields)",
+        value="",
+        placeholder="enter an expense id from the ID column",
+        key="data_inspect_id",
+    )
+    if sel_id_text.strip().isdigit():
+        eid = int(sel_id_text.strip())
+        full = conn.execute("SELECT * FROM expenses WHERE id = ?", (eid,)).fetchone()
+        if full is None:
+            st.warning(f"no record with id {eid}")
+        else:
+            full_dict = dict(full)
+            with st.container(border=True):
+                st.subheader(f"Record #{eid}")
+                head = st.columns(3)
+                head[0].write(f"**Date:** {full_dict.get('buchungsdatum')}")
+                head[1].write(f"**Amount:** {full_dict.get('betrag_cents', 0) / 100:.2f} €")
+                head[2].write(f"**Counterparty:** {full_dict.get('counterparty')}")
+                if full_dict.get("verwendungszweck"):
+                    st.caption(full_dict["verwendungszweck"])
+                meta_cols = st.columns(3)
+                meta_cols[0].write(f"**Cluster:** {full_dict.get('cluster_id')}")
+                meta_cols[1].write(f"**Source file:** {full_dict.get('source_file') or '—'}")
+                meta_cols[2].write(f"**IBAN:** {full_dict.get('iban') or '—'}")
+
+                note = get_note(conn, eid) or ""
+                new_note = st.text_area("Note", value=note, key=f"drawer_note_{eid}")
+                if st.button("Save note", key=f"drawer_save_note_{eid}"):
+                    set_note(conn, eid, new_note)
+                    st.success("note saved")
+
+                with st.expander("All fields"):
+                    st.json({
+                        k: (v if not isinstance(v, bytes) else f"<{len(v)} bytes>")
+                        for k, v in full_dict.items()
+                    })
 
 
 # ---------------------------------------------------------------------------

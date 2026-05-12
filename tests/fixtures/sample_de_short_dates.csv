@@ -1,0 +1,4 @@
+"Buchungsdatum";"Wertstellung";"Status";"Zahlungspflichtige*r";"Zahlungsempfänger*in";"Verwendungszweck";"Umsatztyp";"IBAN";"Betrag (€)";"Gläubiger-ID";"Mandatsreferenz";"Kundenreferenz"
+"08.05.26";"08.05.26";"Gebucht";"";"REWE Markt GmbH";"REWE Lebensmittel";"Kartenzahlung";"DE21701500000000123456";"-42,17";"";"";""
+"15.05.26";"15.05.26";"Gebucht";"";"Edeka Sued";"Einkauf";"Kartenzahlung";"DE21701500000000777777";"-67,84";"";"";""
+"01.06.26";"01.06.26";"Gebucht";"";"Vermieter Schmidt";"Miete Juni";"Dauerauftrag";"DE89370400440532013000";"-950,00";"";"";""
