@@ -741,31 +741,19 @@ with tab_data:
         amount_max if amount_max is not None else -1.0,
         bool(include_income),
     )
-    if (
-        st.session_state.get("data_filter_signature") != filter_signature
-        or st.session_state.pop("data_force_refresh", False)
-    ):
-        # Filters changed (or user clicked refresh): re-snapshot the IDs.
-        id_sql, id_params = _build_data_query(
-            date_from or None, date_to or None,
-            picked_cats, source, search.strip(),
-            amount_min if amount_min > 0 else None, amount_max,
-            include_income,
-        )
-        id_df = pd.read_sql_query(id_sql, conn, params=id_params)
-        st.session_state.data_snapshot_ids = (
-            id_df["id"].astype(int).tolist() if not id_df.empty else []
-        )
-        st.session_state.data_filter_signature = filter_signature
-        # Wipe the data_editor cache so stale row-index edits don't apply.
-        st.session_state.pop("data_editor", None)
-
-    snapshot_ids: list[int] = st.session_state.get("data_snapshot_ids", [])
-
-    # Fetch the snapshot's current state (categories may have been edited).
-    if snapshot_ids:
-        ph_ids = ",".join("?" * len(snapshot_ids))
-        df = pd.read_sql_query(
+    def _fetch_snapshot_df(ids: list[int]) -> pd.DataFrame:
+        if not ids:
+            return pd.DataFrame(
+                columns=[
+                    "id", "buchungsdatum", "counterparty", "verwendungszweck",
+                    "betrag_€", "category", "category_id", "label_source",
+                    "confidence", "umsatztyp", "iban_country", "iban_is_foreign",
+                    "cluster_id", "has_glaeubiger_id", "mandatsreferenz_present",
+                    "Select",
+                ]
+            )
+        ph_ids = ",".join("?" * len(ids))
+        df_ = pd.read_sql_query(
             f"""
             WITH latest_label AS (
                 SELECT l.expense_id, l.category_id, l.source, l.confidence
@@ -790,23 +778,43 @@ with tab_data:
             ORDER BY e.buchungsdatum DESC, e.id DESC
             """,
             conn,
-            params=snapshot_ids,
+            params=ids,
         )
-    else:
-        df = pd.DataFrame(
-            columns=[
-                "id", "buchungsdatum", "counterparty", "verwendungszweck",
-                "betrag_€", "category", "category_id", "label_source",
-                "confidence", "umsatztyp", "iban_country", "iban_is_foreign",
-                "cluster_id", "has_glaeubiger_id", "mandatsreferenz_present",
-            ]
-        )
+        if not df_.empty:
+            df_["buchungsdatum"] = pd.to_datetime(df_["buchungsdatum"])
+            df_["category"] = df_["category"].fillna("(unkategorisiert)")
+            df_["confidence"] = df_["confidence"].fillna("")
+            df_["label_source"] = df_["label_source"].fillna("")
+        df_.insert(0, "Select", False)
+        return df_
 
-    if not df.empty:
-        # Keep buchungsdatum as a datetime so column-header sorting orders by
-        # actual time, not alphabetically. The DateColumn config below
-        # formats it as DD.MM.YYYY for display.
-        df["buchungsdatum"] = pd.to_datetime(df["buchungsdatum"])
+    if (
+        st.session_state.get("data_filter_signature") != filter_signature
+        or st.session_state.pop("data_force_refresh", False)
+    ):
+        # Filters changed (or user clicked refresh): re-snapshot the IDs and
+        # cache a fresh display dataframe.
+        id_sql, id_params = _build_data_query(
+            date_from or None, date_to or None,
+            picked_cats, source, search.strip(),
+            amount_min if amount_min > 0 else None, amount_max,
+            include_income,
+        )
+        id_df = pd.read_sql_query(id_sql, conn, params=id_params)
+        snapshot_ids = id_df["id"].astype(int).tolist() if not id_df.empty else []
+        st.session_state.data_snapshot_ids = snapshot_ids
+        st.session_state.data_filter_signature = filter_signature
+        st.session_state["data_view_df"] = _fetch_snapshot_df(snapshot_ids)
+        # Wipe the data_editor cache so stale row-index edits don't apply.
+        st.session_state.pop("data_editor", None)
+
+    # Cached display df. We mutate this in place on edits so the data_editor
+    # sees an identical input object between renders -- key to keeping scroll
+    # position and avoiding visible re-mounts.
+    df: pd.DataFrame = st.session_state.get("data_view_df")
+    if df is None:
+        df = _fetch_snapshot_df(st.session_state.get("data_snapshot_ids", []))
+        st.session_state["data_view_df"] = df
 
     # Counts BEFORE the fillna pass below, so we can use NaN semantics.
     def _to_conf(v) -> float:
@@ -815,8 +823,12 @@ with tab_data:
         except (TypeError, ValueError):
             return 0.0
 
-    n_unlabeled = int(df["label_source"].isna().sum()) if not df.empty else 0
+    # Counts are computed against the cached snapshot df; "(unkategorisiert)"
+    # is the in-cache sentinel for an unlabeled row (set by _fetch_snapshot_df).
     if not df.empty:
+        n_unlabeled = int(
+            ((df["label_source"] == "") | (df["category"] == "(unkategorisiert)")).sum()
+        )
         n_confident_model = int(
             (
                 (df["label_source"] == "model")
@@ -824,13 +836,10 @@ with tab_data:
             ).sum()
         )
     else:
+        n_unlabeled = 0
         n_confident_model = 0
 
-    if not df.empty:
-        df["category"] = df["category"].fillna("(unkategorisiert)")
-        df["confidence"] = df["confidence"].fillna("")
-        df["label_source"] = df["label_source"].fillna("")
-    base_cols = ["id", "buchungsdatum", "counterparty", "verwendungszweck",
+    base_cols = ["Select", "id", "buchungsdatum", "counterparty", "verwendungszweck",
                  "betrag_€", "category"]
     ext_cols = base_cols + ["label_source", "confidence", "umsatztyp",
                             "iban_country", "iban_is_foreign", "cluster_id",
@@ -921,17 +930,16 @@ with tab_data:
     all_cat_names = [s.name for s in category_stats(conn)]
     cat_id_by_name = {s.name: s.id for s in category_stats(conn)}
 
-    if df.empty:
-        edited_df = pd.DataFrame(columns=show_cols)
-        editor_view_df = edited_df
-    else:
-        # Display "" instead of "(unkategorisiert)" so the selectbox starts
-        # empty for unlabeled rows.
-        editor_view_df = df[show_cols].copy()
-        editor_view_df.loc[editor_view_df["category"] == "(unkategorisiert)", "category"] = ""
+    # `df` is the cached snapshot dataframe (mutated in place on edits below).
+    # The editor needs the unlabeled sentinel rendered as "" so the selectbox
+    # starts blank, so we project a view-copy for display only.
+    editor_view_df = pd.DataFrame(columns=show_cols) if df.empty else df[show_cols]
 
     category_options = [""] + all_cat_names
     column_config = {
+        "Select": st.column_config.CheckboxColumn(
+            "Sel", help="Tick to include in bulk operations below.", width="small",
+        ),
         "id": st.column_config.NumberColumn("ID", disabled=True, width="small"),
         "buchungsdatum": st.column_config.DateColumn(
             "Date", disabled=True, format="DD.MM.YYYY"
@@ -958,33 +966,95 @@ with tab_data:
         "has_glaeubiger_id": st.column_config.NumberColumn("Gläubiger?", disabled=True),
         "mandatsreferenz_present": st.column_config.NumberColumn("Mandat?", disabled=True),
     }
+    # Editor is read-only EXCEPT for Category and Select.
+    editor_disabled = [c for c in show_cols if c not in ("category", "Select")]
+
+    # Map "(unkategorisiert)" → "" for the editor input so the dropdown is
+    # blank for unlabeled rows. Apply this on a temporary copy to keep the
+    # cached df stable across renders.
+    if not editor_view_df.empty:
+        editor_view_for_render = editor_view_df.copy()
+        editor_view_for_render.loc[
+            editor_view_for_render["category"] == "(unkategorisiert)", "category"
+        ] = ""
+    else:
+        editor_view_for_render = editor_view_df
+
     edited_df = st.data_editor(
-        editor_view_df,
+        editor_view_for_render,
         column_config=column_config,
-        disabled=[c for c in show_cols if c != "category"],
+        disabled=editor_disabled,
         hide_index=True,
         width="stretch",
         height=420,
         key="data_editor",
     )
 
-    # Diff Category column → write user labels for any changes. Do NOT call
-    # st.rerun() or clear data_editor state -- the SelectboxColumn change
-    # already triggered a rerun, and the cached edit is idempotent against
-    # the updated DB on subsequent renders. Forcing another rerun resets
-    # scroll position / cell focus, which is the actual UX bug.
+    # Persist inline Category edits AND sync the Select column back to the
+    # cached df. Mutating in place keeps the dataframe object identity
+    # stable across reruns, which Streamlit needs to preserve scroll/focus.
     if not df.empty:
         changed_count = 0
-        for idx in editor_view_df.index:
+        for idx in df.index:
+            # Sync Select state
+            df.at[idx, "Select"] = bool(edited_df.at[idx, "Select"])
+
+            # Detect Category edits
             new_val = str(edited_df.at[idx, "category"] or "").strip()
-            old_val = str(editor_view_df.at[idx, "category"] or "").strip()
-            if new_val and new_val != old_val:
+            old_val_display = str(editor_view_for_render.at[idx, "category"] or "").strip()
+            if new_val and new_val != old_val_display:
                 cid = cat_id_by_name.get(new_val)
                 if cid is not None:
-                    add_label(conn, int(editor_view_df.at[idx, "id"]), cid, "user")
+                    add_label(conn, int(df.at[idx, "id"]), cid, "user")
+                    df.at[idx, "category"] = new_val
+                    df.at[idx, "label_source"] = "user"
+                    df.at[idx, "confidence"] = ""
+                    df.at[idx, "category_id"] = cid
                     changed_count += 1
         if changed_count:
             st.toast(f"saved {changed_count} label change(s)")
+
+    # --- Bulk-set category for selected rows -------------------------------
+    if not df.empty:
+        n_selected = int(df["Select"].sum())
+        if n_selected > 0:
+            bulk_cols = st.columns([2, 3, 1, 1])
+            bulk_cols[0].markdown(f"**{n_selected} row(s) selected**")
+            bulk_new_cat = bulk_cols[1].selectbox(
+                "Bulk-set category",
+                [""] + all_cat_names,
+                key="data_bulk_cat",
+                label_visibility="collapsed",
+                placeholder="Set category for selected…",
+            )
+            apply_bulk = bulk_cols[2].button(
+                f"Apply to {n_selected}",
+                type="primary",
+                disabled=not bulk_new_cat,
+                key="data_bulk_apply",
+            )
+            clear_sel = bulk_cols[3].button("Clear selection", key="data_bulk_clear")
+            if apply_bulk and bulk_new_cat:
+                cid = cat_id_by_name.get(bulk_new_cat)
+                if cid is not None:
+                    sel_mask = df["Select"] == True  # noqa: E712
+                    for idx in df.index[sel_mask]:
+                        add_label(conn, int(df.at[idx, "id"]), cid, "user")
+                        df.at[idx, "category"] = bulk_new_cat
+                        df.at[idx, "label_source"] = "user"
+                        df.at[idx, "confidence"] = ""
+                        df.at[idx, "category_id"] = cid
+                    df["Select"] = False
+                    st.toast(f"set {bulk_new_cat} on {int(sel_mask.sum())} row(s)")
+                    # Clear data_editor's session state so the unticked
+                    # checkboxes show; this rerun is intentional and only
+                    # happens on an explicit Apply click.
+                    st.session_state.pop("data_editor", None)
+                    st.rerun()
+            if clear_sel:
+                df["Select"] = False
+                st.session_state.pop("data_editor", None)
+                st.rerun()
 
     # --- Optional row drawer (notes + all-fields inspection) ---------------
     sel_id_text = st.text_input(
