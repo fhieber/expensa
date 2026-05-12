@@ -494,6 +494,12 @@ with tab_import:
             conn,
             params=new_ids,
         )
+        # Format the date as DD.MM.YYYY (German style) for display. Without
+        # this, pandas/streamlit can render date objects as epoch numbers.
+        if not rows_df.empty:
+            rows_df["buchungsdatum"] = pd.to_datetime(
+                rows_df["buchungsdatum"]
+            ).dt.strftime("%d.%m.%Y")
 
         def _stage_glyph(stage: str | None) -> str:
             return {
@@ -720,6 +726,10 @@ with tab_data:
         include_income,
     )
     df = pd.read_sql_query(sql, conn, params=params)
+    if not df.empty:
+        # Render the date as DD.MM.YYYY (German style) rather than letting
+        # pandas/streamlit show a date object as raw numbers.
+        df["buchungsdatum"] = pd.to_datetime(df["buchungsdatum"]).dt.strftime("%d.%m.%Y")
 
     # Counts BEFORE the fillna pass below, so we can use NaN semantics.
     def _to_conf(v) -> float:
