@@ -723,13 +723,85 @@ with tab_data:
             amount_max = amount_max_raw if amount_max_raw > 0 else None
 
     extended = st.toggle("Extended columns", value=False, key="data_extended")
-    sql, params = _build_data_query(
-        date_from or None, date_to or None,
-        picked_cats, source, search.strip(),
-        amount_min if amount_min > 0 else None, amount_max,
-        include_income,
+
+    # --- Snapshot the row set when filters change ---------------------------
+    # The Data tab supports inline category editing. Without snapshotting,
+    # editing a row whose new category no longer matches the active filter
+    # (e.g. you filter "unlabeled" and label one) would make it disappear on
+    # the next render, reshuffling the table. We therefore fix the row set
+    # at the moment the filters change, and only refresh it when the user
+    # actually changes a filter (or clicks "Refresh filter" below).
+    filter_signature = (
+        str(date_from) if date_from else "",
+        str(date_to) if date_to else "",
+        tuple(picked_cats),
+        source,
+        search.strip(),
+        amount_min if amount_min > 0 else 0.0,
+        amount_max if amount_max is not None else -1.0,
+        bool(include_income),
     )
-    df = pd.read_sql_query(sql, conn, params=params)
+    if (
+        st.session_state.get("data_filter_signature") != filter_signature
+        or st.session_state.pop("data_force_refresh", False)
+    ):
+        # Filters changed (or user clicked refresh): re-snapshot the IDs.
+        id_sql, id_params = _build_data_query(
+            date_from or None, date_to or None,
+            picked_cats, source, search.strip(),
+            amount_min if amount_min > 0 else None, amount_max,
+            include_income,
+        )
+        id_df = pd.read_sql_query(id_sql, conn, params=id_params)
+        st.session_state.data_snapshot_ids = (
+            id_df["id"].astype(int).tolist() if not id_df.empty else []
+        )
+        st.session_state.data_filter_signature = filter_signature
+        # Wipe the data_editor cache so stale row-index edits don't apply.
+        st.session_state.pop("data_editor", None)
+
+    snapshot_ids: list[int] = st.session_state.get("data_snapshot_ids", [])
+
+    # Fetch the snapshot's current state (categories may have been edited).
+    if snapshot_ids:
+        ph_ids = ",".join("?" * len(snapshot_ids))
+        df = pd.read_sql_query(
+            f"""
+            WITH latest_label AS (
+                SELECT l.expense_id, l.category_id, l.source, l.confidence
+                FROM labels l
+                JOIN (
+                    SELECT expense_id, MAX(id) AS max_id
+                    FROM labels GROUP BY expense_id
+                ) m ON l.id = m.max_id
+            )
+            SELECT
+                e.id, e.buchungsdatum, e.counterparty, e.verwendungszweck,
+                e.betrag_cents / 100.0 AS "betrag_€",
+                c.name AS category, ll.category_id AS category_id,
+                ll.source AS label_source, ll.confidence,
+                e.umsatztyp, e.iban_country, e.iban_is_foreign,
+                e.cluster_id,
+                e.has_glaeubiger_id, e.mandatsreferenz_present
+            FROM expenses e
+            LEFT JOIN latest_label ll ON ll.expense_id = e.id
+            LEFT JOIN categories c ON c.id = ll.category_id
+            WHERE e.id IN ({ph_ids})
+            ORDER BY e.buchungsdatum DESC, e.id DESC
+            """,
+            conn,
+            params=snapshot_ids,
+        )
+    else:
+        df = pd.DataFrame(
+            columns=[
+                "id", "buchungsdatum", "counterparty", "verwendungszweck",
+                "betrag_€", "category", "category_id", "label_source",
+                "confidence", "umsatztyp", "iban_country", "iban_is_foreign",
+                "cluster_id", "has_glaeubiger_id", "mandatsreferenz_present",
+            ]
+        )
+
     if not df.empty:
         # Keep buchungsdatum as a datetime so column-header sorting orders by
         # actual time, not alphabetically. The DateColumn config below
@@ -834,10 +906,16 @@ with tab_data:
                 f"button only promotes predictions at or above {int(ACCEPT_CONFIDENT_THRESHOLD * 100)}%."
             )
 
-    st.caption(
-        f"{len(df)} record(s) match the filters · "
-        "click the **Category** cell to change a label inline — saves immediately."
+    caption_cols = st.columns([5, 1])
+    caption_cols[0].caption(
+        f"{len(df)} record(s) in current snapshot · "
+        "click the **Category** cell to change a label inline — saves immediately. "
+        "Rows stay in the table after labeling so the view doesn't shuffle while you work; "
+        "click **Refresh filter** to re-evaluate."
     )
+    if caption_cols[1].button("Refresh filter", help="Re-run the filter against the latest DB state."):
+        st.session_state["data_force_refresh"] = True
+        st.rerun()
 
     # --- Inline-editable table ----------------------------------------------
     all_cat_names = [s.name for s in category_stats(conn)]
