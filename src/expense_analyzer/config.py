@@ -34,6 +34,20 @@ class ZeroshotConfig(BaseModel):
     use_when_confidence_below: float = 0.5
 
 
+class CategorySimilarityConfig(BaseModel):
+    """Zero-shot via embedding similarity between expense and category text.
+
+    Embeds each category as ``"name: description"`` using the same
+    sentence-transformer as expenses. Cosine similarity picks the top
+    category. Faster and (in practice on German bank text) more accurate
+    than the NLI-based zero-shot.
+    """
+
+    enabled: bool = True
+    min_top1: float = 0.25        # require top-1 cosine >= this
+    min_margin: float = 0.03      # require top1 - top2 >= this
+
+
 class ClusteringConfig(BaseModel):
     umap_n_components: int = 10
     umap_n_neighbors: int = 15
@@ -81,6 +95,7 @@ class Config(BaseModel):
     vendor_exact_match: VendorExactMatchConfig = Field(default_factory=VendorExactMatchConfig)
     knn: KnnConfig = Field(default_factory=KnnConfig)
     zeroshot: ZeroshotConfig = Field(default_factory=ZeroshotConfig)
+    category_similarity: CategorySimilarityConfig = Field(default_factory=CategorySimilarityConfig)
     clustering: ClusteringConfig = Field(default_factory=ClusteringConfig)
     active_learning: ActiveLearningConfig = Field(default_factory=ActiveLearningConfig)
     vendor_lookup: VendorLookupConfig = Field(default_factory=VendorLookupConfig)

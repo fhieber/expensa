@@ -117,6 +117,54 @@ def test_cascade_falls_through_to_unknown_with_no_labels(
     assert pred.stage == "unknown"
 
 
+def test_category_similarity_fires_with_no_user_labels(
+    tmp_db: sqlite3.Connection, fixtures_dir: Path, tmp_path: Path
+) -> None:
+    """With zero user labels, the category_similarity stage should still
+    produce predictions for every record using only category text."""
+    ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
+    # Install a few categories whose names exactly match the hash-embedded text
+    # of some records, so the HashEmbedder produces matching vectors.
+    # HashEmbedder hashes the literal string; we can't exploit semantic match,
+    # so this test just checks that the stage *runs* (and at least one cat
+    # similarity prediction lands), not that the categories are right.
+    upsert_category(tmp_db, "A", description="Lebensmittel")
+    upsert_category(tmp_db, "B", description="Miete")
+
+    cfg = _config_no_zeroshot(tmp_path)
+    cfg.category_similarity.min_top1 = -1.0  # accept anything top-1
+    cfg.category_similarity.min_margin = -1.0
+    cascade = CategorizationCascade(tmp_db, cfg, HashEmbedder(dim=128))
+    cascade.fit()
+    sample_ids = [int(r["id"]) for r in tmp_db.execute(
+        "SELECT id FROM expenses LIMIT 5"
+    ).fetchall()]
+    preds = cascade.predict_batch(sample_ids)
+    stages = {p.stage for p in preds}
+    assert "category_similarity" in stages
+    # All those predictions must point at one of our two installed categories.
+    for p in preds:
+        if p.stage == "category_similarity":
+            assert p.category_id is not None
+
+
+def test_category_similarity_respects_min_top1_threshold(
+    tmp_db: sqlite3.Connection, fixtures_dir: Path, tmp_path: Path
+) -> None:
+    """With an impossibly-high threshold, similarity should abstain."""
+    ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
+    upsert_category(tmp_db, "Solo")
+    cfg = _config_no_zeroshot(tmp_path)
+    cfg.category_similarity.min_top1 = 0.999
+    cascade = CategorizationCascade(tmp_db, cfg, HashEmbedder(dim=64))
+    cascade.fit()
+    rid = int(tmp_db.execute("SELECT id FROM expenses LIMIT 1").fetchone()["id"])
+    p = cascade.predict(rid)
+    # Nothing should have fired -> stage 'unknown'.
+    assert p.stage == "unknown"
+    assert p.category_id is None
+
+
 def test_cascade_fit_and_classifier_predict(
     tmp_db: sqlite3.Connection, fixtures_dir: Path, tmp_path: Path
 ) -> None:

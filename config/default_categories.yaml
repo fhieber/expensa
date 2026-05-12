@@ -1,56 +1,62 @@
 # Initial expense categories (in German). Edit freely.
-# Each category has a name, optional description (used by zero-shot classifier as hypothesis),
+# Each category has a name, description (used by the zero-shot
+# category-similarity stage to match expense embeddings against),
 # and a color for visualizations.
+#
+# Descriptions should LEAD with concrete merchant names / German + English
+# keywords. The cascade's category_similarity stage embeds both the name and
+# the description and takes the per-category max cosine, so keyword-dense
+# descriptions improve cold-start predictions a lot.
 
 categories:
   - name: Lebensmittel
-    description: Einkäufe in Supermärkten und Lebensmittelgeschäften (REWE, Edeka, Aldi, Lidl, dm).
+    description: REWE Edeka Aldi Lidl Penny Netto Kaufland dm Rossmann Müller Supermarkt Lebensmittel Einkauf grocery supermarket food.
     color: "#4caf50"
   - name: Restaurant
-    description: Restaurants, Cafés, Lieferdienste, Bars.
+    description: Restaurant Café Gaststätte Imbiss Pizzeria Bar Bistro Lieferando Lieferdienst Mittagessen Abendessen restaurant dining.
     color: "#ff7043"
   - name: Miete
-    description: Monatliche Miete oder Wohnungsnebenkosten.
+    description: Miete Wohnung Vermieter Mietzahlung Hausverwaltung Nebenkosten rent housing landlord.
     color: "#5e35b1"
   - name: Nebenkosten
-    description: Strom, Gas, Wasser, Müllgebühren.
+    description: Strom Gas Wasser Heizung Müllgebühren Stadtwerke E.ON RWE Vattenfall EnBW utilities electricity water.
     color: "#7e57c2"
   - name: Internet & Mobilfunk
-    description: Internet- und Mobilfunkverträge (Telekom, Vodafone, O2, 1&1).
+    description: Telekom Vodafone O2 1&1 Telefónica Congstar Mobilfunk Internet DSL Tarif Handyrechnung phone internet.
     color: "#26a69a"
   - name: Versicherung
-    description: Krankenversicherung, KFZ, Haftpflicht, sonstige Versicherungen.
+    description: Versicherung Allianz AXA HUK Generali Versicherungsbeitrag Krankenversicherung KFZ-Versicherung Haftpflicht insurance.
     color: "#789262"
   - name: Transport
-    description: Deutsche Bahn, ÖPNV, Tankstellen, Parkgebühren, Carsharing.
+    description: Deutsche Bahn DB BVG MVG VBB HVV Tankstelle Aral Shell Esso Total Bahnticket ÖPNV Carsharing Mobilität transport fuel.
     color: "#42a5f5"
   - name: Reisen
-    description: Hotels, Flüge, Mietwagen, Urlaubsausgaben.
+    description: Hotel Pension Booking Airbnb Lufthansa Eurowings Flug Mietwagen Sixt Europcar Hertz Urlaub Reise hotel flight travel.
     color: "#26c6da"
   - name: Online-Shopping
-    description: Amazon, eBay, Onlinehändler.
+    description: Amazon eBay Otto Zalando Klarna PayPal online-shop Onlinehändler online-shopping marketplace.
     color: "#ec407a"
   - name: Abos & Streaming
-    description: Netflix, Spotify, Apple, Cloud-Abos, Zeitungen.
+    description: Netflix Spotify Disney Apple Cloud iCloud YouTube Premium Zeitschrift Zeitung Abo subscription streaming.
     color: "#ab47bc"
   - name: Gesundheit
-    description: Arzt, Apotheke, Zuzahlungen, Fitnessstudio.
+    description: Apotheke Arzt Praxis Krankenhaus Klinik Zahnarzt Rezeptzuzahlung Fitnessstudio FitX McFit health medical pharmacy.
     color: "#ef5350"
   - name: Bildung
-    description: Bücher, Kurse, Studiengebühren, Fortbildung.
+    description: Bücher Hugendubel Thalia Buchhandlung Kurs Schulung Fortbildung Studiengebühr Lehrgang books education tuition.
     color: "#8d6e63"
   - name: Freizeit
-    description: Kino, Sport, Hobbys, Eintritte.
+    description: Kino Cinemaxx UCI Theater Konzert Eintritt Hobby Sportverein Schwimmbad cinema entertainment leisure.
     color: "#ffa726"
   - name: Bargeld
-    description: Geldautomatenabhebungen.
+    description: Geldautomat ATM Bargeldabhebung Auszahlung Sparkasse Volksbank cash withdrawal Bargeld.
     color: "#90a4ae"
   - name: Einkommen
-    description: Gehalt, Lohn, Erstattungen, sonstige Einnahmen.
+    description: Gehalt Lohn Bonus Arbeitgeber Erstattung Rückzahlung salary wage income payment incoming.
     color: "#66bb6a"
   - name: Umbuchung
-    description: Eigene Umbuchungen zwischen eigenen Konten.
+    description: Umbuchung eigene Konten Sparkonto Tagesgeld interner Transfer transfer between own accounts.
     color: "#bdbdbd"
   - name: Sonstiges
-    description: Nicht klar zuordenbare Ausgaben.
+    description: Sonstiges nicht klar zuordenbare Ausgabe Misc other miscellaneous.
     color: "#9e9e9e"

@@ -30,6 +30,12 @@ zeroshot:
   enabled: true
   use_when_confidence_below: 0.5
 
+# --- Zero-shot via embedding similarity (categories embedded as name+description) ---
+category_similarity:
+  enabled: true
+  min_top1: 0.25
+  min_margin: 0.03
+
 # --- Clustering ---
 clustering:
   umap_n_components: 10

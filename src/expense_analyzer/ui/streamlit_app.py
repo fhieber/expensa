@@ -432,16 +432,61 @@ with tab_import:
             _reset_import_state()
             st.rerun()
 
-        st.write(f"**{len(new_ids)} new record(s)** ingested. Review and label below.")
+        st.write(
+            f"**{len(new_ids)} new record(s)** ingested. Click **Auto-label** to "
+            "have the cascade predict, then edit any wrong Category cell inline "
+            "and click **Save labels** to commit."
+        )
+
+        # --- Action buttons (above the table for visibility) ----------------
+        preds_dict: dict[int, Prediction] = st.session_state.import_predictions
+        has_preds = bool(preds_dict)
+        c1, c2, c3, c4 = st.columns([1, 1.4, 1.4, 1])
+        run_auto = c1.button("Auto-label", type="primary")
+        accept_confident = c2.button(
+            f"Save ≥ {int(ACCEPT_CONFIDENT_THRESHOLD * 100)}% confident as user labels",
+            disabled=not has_preds,
+        )
+        save_all = c3.button("Save all visible categories as user labels", disabled=not has_preds)
+        done = c4.button("Done", help="Exit. Predictions stay as `model` labels until accepted later.")
+
+        if run_auto:
+            emb = _embedder()
+            cascade = CategorizationCascade(conn, cfg, emb)
+            with st.status("Predicting…", expanded=True) as status:
+                status.write(f"loading embedding model `{cfg.embedding_model}`…")
+                try:
+                    cascade.fit()
+                except Exception as e:
+                    status.write(f"  fit skipped: {e}")
+                status.write(f"predicting {len(new_ids)} record(s)…")
+                preds = cascade.predict_batch(new_ids)
+                from collections import Counter
+
+                stages = Counter(p.stage for p in preds)
+                st.session_state.import_predictions = {p.expense_id: p for p in preds}
+                for p in preds:
+                    if p.category_id is not None:
+                        add_label(conn, p.expense_id, p.category_id, "model",
+                                  confidence=p.confidence)
+                status.update(
+                    label=", ".join(f"{k}={v}" for k, v in stages.items()),
+                    state="complete",
+                )
+            st.rerun()
+
+        # --- Compact review table -------------------------------------------
+        cats = list_categories(conn)
+        cat_options_for_editor = [""] + [c.name for c in cats]
+        cat_id_by_name = {c.name: c.id for c in cats}
 
         ph = ",".join("?" * len(new_ids))
-        df = pd.read_sql_query(
+        rows_df = pd.read_sql_query(
             f"""
             SELECT id, buchungsdatum, counterparty, verwendungszweck,
-                   betrag_cents,
-                   amount_bucket, iban_country, iban_is_foreign,
-                   has_glaeubiger_id, mandatsreferenz_present,
-                   umsatztyp
+                   betrag_cents / 100.0 AS "Betrag €",
+                   amount_bucket, iban_country, umsatztyp,
+                   has_glaeubiger_id, mandatsreferenz_present
             FROM expenses
             WHERE id IN ({ph})
             ORDER BY buchungsdatum, id
@@ -449,123 +494,119 @@ with tab_import:
             conn,
             params=new_ids,
         )
-        df["betrag_€"] = df["betrag_cents"] / 100
+
+        def _stage_glyph(stage: str | None) -> str:
+            return {
+                "vendor_exact_match": "🟢",
+                "knn": "🟢",
+                "classifier": "🟡",
+                "category_similarity": "🟡",
+                "zeroshot": "🟠",
+                "unknown": "⚪",
+            }.get(stage or "", "")
+
+        # Resolve current prediction (or override) per row.
+        cats_by_id = {c.id: c.name for c in cats}
+        predicted_names: list[str] = []
+        confidences: list[str] = []
+        stages_visible: list[str] = []
+        for eid in rows_df["id"].astype(int).tolist():
+            p = preds_dict.get(eid)
+            if p is None or p.category_id is None:
+                predicted_names.append("")
+                confidences.append("")
+                stages_visible.append("")
+            else:
+                predicted_names.append(cats_by_id.get(p.category_id, ""))
+                confidences.append(f"{p.confidence:.2f}")
+                stages_visible.append(f"{_stage_glyph(p.stage)} {p.stage}")
+        rows_df["Category"] = predicted_names
+        rows_df["Conf"] = confidences
+        rows_df["Stage"] = stages_visible
+
         extended = st.toggle("Extended columns", value=False, key="import_extended")
         if extended:
-            show_cols = ["id", "buchungsdatum", "counterparty", "verwendungszweck",
-                         "betrag_€", "amount_bucket", "umsatztyp",
-                         "iban_country", "iban_is_foreign",
-                         "has_glaeubiger_id", "mandatsreferenz_present"]
+            show_cols = [
+                "id", "buchungsdatum", "counterparty", "verwendungszweck",
+                "Betrag €", "Category", "Conf", "Stage",
+                "amount_bucket", "umsatztyp", "iban_country",
+                "has_glaeubiger_id", "mandatsreferenz_present",
+            ]
         else:
-            show_cols = ["id", "buchungsdatum", "counterparty",
-                         "verwendungszweck", "betrag_€"]
-        st.dataframe(df[show_cols], width="stretch", hide_index=True)
+            show_cols = [
+                "id", "buchungsdatum", "counterparty", "verwendungszweck",
+                "Betrag €", "Category", "Conf", "Stage",
+            ]
 
-        # --- Auto-label controls --------------------------------------------
-        st.subheader("Auto-label")
-        c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
-        run_auto = c1.button("Auto-label", type="primary")
-        accept_confident = c2.button(
-            f"Accept all ≥ {int(ACCEPT_CONFIDENT_THRESHOLD * 100)}%",
-            disabled=not st.session_state.import_predictions,
+        column_config = {
+            "id": st.column_config.NumberColumn("ID", disabled=True, width="small"),
+            "buchungsdatum": st.column_config.TextColumn("Date", disabled=True),
+            "counterparty": st.column_config.TextColumn("Counterparty", disabled=True),
+            "verwendungszweck": st.column_config.TextColumn(
+                "Verwendungszweck", disabled=True, width="large"
+            ),
+            "Betrag €": st.column_config.NumberColumn(
+                "Amount €", disabled=True, format="%.2f"
+            ),
+            "Category": st.column_config.SelectboxColumn(
+                "Category",
+                options=cat_options_for_editor,
+                required=False,
+                help="Override the prediction (or fill one in when the cascade abstained).",
+            ),
+            "Conf": st.column_config.TextColumn("Conf", disabled=True, width="small"),
+            "Stage": st.column_config.TextColumn("Stage", disabled=True),
+            "amount_bucket": st.column_config.TextColumn("Bucket", disabled=True),
+            "umsatztyp": st.column_config.TextColumn("Umsatztyp", disabled=True),
+            "iban_country": st.column_config.TextColumn("IBAN cc", disabled=True),
+            "has_glaeubiger_id": st.column_config.NumberColumn("Gläubiger?", disabled=True),
+            "mandatsreferenz_present": st.column_config.NumberColumn(
+                "Mandat?", disabled=True
+            ),
+        }
+        editor_disabled = [c for c in show_cols if c != "Category"]
+
+        edited = st.data_editor(
+            rows_df[show_cols],
+            column_config=column_config,
+            disabled=editor_disabled,
+            hide_index=True,
+            width="stretch",
+            height=min(420, 60 + 35 * len(rows_df)),
+            key="import_editor",
         )
-        accept_all = c3.button("Accept all", disabled=not st.session_state.import_predictions)
-        done = c4.button("Done", help="Leave any not-yet-confirmed predictions as model-labels.")
-
-        if run_auto:
-            emb = _embedder()
-            cascade = CategorizationCascade(conn, cfg, emb)
-            with st.status("Predicting…", expanded=False):
-                try:
-                    cascade.fit()
-                except Exception:
-                    pass
-                preds = cascade.predict_batch(new_ids)
-                st.session_state.import_predictions = {p.expense_id: p for p in preds}
-                # Persist model labels for the predictions that fired.
-                for p in preds:
-                    if p.category_id is not None:
-                        add_label(conn, p.expense_id, p.category_id, "model",
-                                  confidence=p.confidence)
-            st.rerun()
 
         if accept_confident:
             n_promoted = 0
-            for eid, p in st.session_state.import_predictions.items():
-                override = st.session_state.import_overrides.get(eid)
-                final_cat = override if override is not None else p.category_id
-                final_conf = (
-                    1.0 if override is not None
-                    else p.confidence
-                )
-                if final_cat is not None and final_conf >= ACCEPT_CONFIDENT_THRESHOLD:
-                    add_label(conn, eid, final_cat, "user")
-                    n_promoted += 1
+            for _, r in edited.iterrows():
+                eid = int(r["id"])
+                p = preds_dict.get(eid)
+                if p is None or p.category_id is None:
+                    continue
+                if float(p.confidence) >= ACCEPT_CONFIDENT_THRESHOLD:
+                    chosen_name = r["Category"] or cats_by_id.get(p.category_id, "")
+                    chosen_cid = cat_id_by_name.get(chosen_name)
+                    if chosen_cid is not None:
+                        add_label(conn, eid, chosen_cid, "user")
+                        n_promoted += 1
             st.success(f"promoted {n_promoted} prediction(s) to user labels")
 
-        if accept_all:
+        if save_all:
             n_promoted = 0
-            for eid, p in st.session_state.import_predictions.items():
-                override = st.session_state.import_overrides.get(eid)
-                final_cat = override if override is not None else p.category_id
-                if final_cat is not None:
-                    add_label(conn, eid, final_cat, "user")
-                    n_promoted += 1
-            st.success(f"promoted {n_promoted} prediction(s) to user labels")
+            for _, r in edited.iterrows():
+                chosen_name = r["Category"]
+                if not chosen_name:
+                    continue
+                chosen_cid = cat_id_by_name.get(chosen_name)
+                if chosen_cid is None:
+                    continue
+                add_label(conn, int(r["id"]), chosen_cid, "user")
+                n_promoted += 1
+            st.success(f"saved {n_promoted} user label(s)")
 
         if done:
             _reset_import_state()
             st.rerun()
-
-        # --- Per-row review --------------------------------------------------
-        preds: dict[int, Prediction] = st.session_state.import_predictions
-        if preds:
-            st.subheader("Per-row review")
-            cat_opts = _category_options(include_unlabeled=False)
-            id_to_idx = {cid: i for i, (cid, _) in enumerate(cat_opts)}
-            for eid in new_ids:
-                p = preds.get(eid)
-                row = conn.execute(
-                    "SELECT buchungsdatum, betrag_cents, counterparty, verwendungszweck "
-                    "FROM expenses WHERE id = ?",
-                    (eid,),
-                ).fetchone()
-                stage_color = {
-                    "vendor_exact_match": "🟢",
-                    "knn": "🟢",
-                    "classifier": "🟡",
-                    "zeroshot": "🟡",
-                    "unknown": "⚪",
-                }
-                with st.container(border=True):
-                    head_cols = st.columns([1, 1, 2, 1])
-                    head_cols[0].write(f"**{row['buchungsdatum']}**")
-                    head_cols[1].write(_format_eur(row['betrag_cents']))
-                    head_cols[2].write(f"**{row['counterparty']}**")
-                    if p is not None:
-                        head_cols[3].write(
-                            f"{stage_color.get(p.stage, '⚪')} {p.stage} · "
-                            f"{p.confidence:.2f}"
-                        )
-                    if row["verwendungszweck"]:
-                        st.caption(row["verwendungszweck"])
-                    default_cid = (
-                        st.session_state.import_overrides.get(eid)
-                        or (p.category_id if p else None)
-                    )
-                    default_idx = id_to_idx.get(default_cid, 0) if default_cid is not None else 0
-                    pick = st.selectbox(
-                        "Category",
-                        options=[name for _, name in cat_opts],
-                        index=default_idx,
-                        key=f"import_pick_{eid}",
-                    )
-                    chosen_cid = next(cid for cid, name in cat_opts if name == pick)
-                    if chosen_cid != default_cid:
-                        st.session_state.import_overrides[eid] = chosen_cid
-                    if st.button("Save as user label", key=f"import_save_{eid}"):
-                        add_label(conn, eid, chosen_cid, "user")
-                        st.success(f"saved → {pick}")
 
 
 # ---------------------------------------------------------------------------

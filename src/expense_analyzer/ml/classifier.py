@@ -4,7 +4,10 @@ Stages, in order:
   1. ``vendor_exact_match``: same counterparty already labeled, agreement >= threshold.
   2. ``knn``: k-nearest labeled embeddings; agreement >= threshold.
   3. ``classifier``: scikit-learn pipeline on combined features.
-  4. ``zeroshot``: mDeBERTa NLI fallback (lazy-loaded).
+  4. ``category_similarity``: zero-shot via cosine similarity between the
+     expense embedding and each category's ``name: description`` embedding.
+     Works cold-start (no user labels needed).
+  5. ``zeroshot``: mDeBERTa NLI fallback (lazy-loaded, slowest).
 
 Each stage emits a Prediction or yields to the next.
 """
@@ -31,7 +34,7 @@ class Prediction:
     expense_id: int
     category_id: int | None
     confidence: float
-    stage: str  # 'vendor_exact_match' | 'knn' | 'classifier' | 'zeroshot' | 'unknown'
+    stage: str  # 'vendor_exact_match' | 'knn' | 'classifier' | 'category_similarity' | 'zeroshot' | 'unknown'
     runner_up: int | None = None
     runner_up_confidence: float = 0.0
     notes: str = ""
@@ -123,7 +126,7 @@ def _knn_vote(
 
 
 class CategorizationCascade:
-    """Glue holding all four stages plus the trained sklearn model."""
+    """Glue holding all stages plus the trained sklearn model."""
 
     def __init__(self, conn: sqlite3.Connection, config: Config, embedder: Embedder) -> None:
         self.conn = conn
@@ -133,6 +136,106 @@ class CategorizationCascade:
         self._classes_: np.ndarray | None = None
         self._feature_dim: int | None = None
         self._zs = None  # zeroshot pipeline (lazy)
+        # Category-similarity stage cache: (cat_ids, embedding_matrix)
+        self._cat_emb_cache: tuple[np.ndarray, np.ndarray] | None = None
+
+    # ---- category similarity (zero-shot via embeddings) -----------------
+
+    def _populate_category_embeddings(self) -> None:
+        """Embed each category as multiple text variants and pre-compute
+        a token set per category for the lexical-overlap bonus.
+
+        At inference we combine:
+          * per-category max cosine over the variants  (semantic signal)
+          * a small bonus per shared >=4-char token    (lexical signal)
+        This catches both fuzzy semantic matches AND obvious keyword hits
+        like "Lebensmittel" appearing in both expense text and category
+        description.
+        """
+        import re
+
+        from expense_analyzer.storage.categories import list_categories
+
+        cats = list_categories(self.conn)
+        if not cats:
+            self._cat_emb_cache = None
+            return
+
+        variants: list[str] = []
+        variant_to_cat: list[int] = []
+        cat_ids: list[int] = []
+        cat_token_sets: dict[int, set[str]] = {}
+        for c in cats:
+            cat_ids.append(c.id)
+            variants.append(c.name)
+            variant_to_cat.append(c.id)
+            if c.description:
+                variants.append(f"{c.name}: {c.description}")
+                variant_to_cat.append(c.id)
+            text_for_tokens = f"{c.name} {c.description or ''}".lower()
+            cat_token_sets[c.id] = {
+                t for t in re.findall(r"[\wäöüß]+", text_for_tokens) if len(t) >= 4
+            }
+
+        matrix = self.embedder.encode(variants).astype(np.float32, copy=False)
+        norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        matrix = matrix / norms
+        self._cat_emb_cache = (
+            np.array(cat_ids, dtype=np.int64),
+            matrix,
+            np.array(variant_to_cat, dtype=np.int64),
+            cat_token_sets,
+        )
+
+    def _category_similarity(
+        self, expense_vec: np.ndarray, expense_text: str = ""
+    ) -> tuple[int | None, float]:
+        import re
+
+        if self._cat_emb_cache is None:
+            self._populate_category_embeddings()
+        if self._cat_emb_cache is None:
+            return None, 0.0
+        cat_ids, var_mat, var_to_cat, cat_token_sets = self._cat_emb_cache
+        v = expense_vec.astype(np.float32, copy=False)
+        n = float(np.linalg.norm(v))
+        if n == 0:
+            return None, 0.0
+        var_sims = var_mat @ (v / n)
+
+        # Per-category max cosine across that category's variants.
+        embed_per_cat: dict[int, float] = {}
+        for cid_int, sim in zip(var_to_cat.tolist(), var_sims.tolist(), strict=True):
+            if sim > embed_per_cat.get(cid_int, float("-inf")):
+                embed_per_cat[cid_int] = sim
+
+        # Lexical bonus: tokens shared between expense_text and category text.
+        bonus_per_cat: dict[int, float] = {}
+        if expense_text:
+            tokens = {
+                t for t in re.findall(r"[\wäöüß]+", expense_text.lower())
+                if len(t) >= 4
+            }
+            for cid_int, cat_tokens in cat_token_sets.items():
+                overlap = tokens & cat_tokens
+                # 0.10 per hit, capped at 0.30 so semantic always matters too.
+                if overlap:
+                    bonus_per_cat[cid_int] = min(0.30, 0.10 * len(overlap))
+
+        combined: dict[int, float] = {
+            cid: embed_per_cat[cid] + bonus_per_cat.get(cid, 0.0)
+            for cid in embed_per_cat
+        }
+        ranked = sorted(combined.items(), key=lambda kv: kv[1], reverse=True)
+        top_cat, top_score = ranked[0]
+        second_score = ranked[1][1] if len(ranked) > 1 else 0.0
+        if (
+            top_score >= self.cfg.category_similarity.min_top1
+            and (top_score - second_score) >= self.cfg.category_similarity.min_margin
+        ):
+            return int(top_cat), float(top_score)
+        return None, 0.0
 
     # ---- training -------------------------------------------------------
 
@@ -142,6 +245,10 @@ class CategorizationCascade:
         from sklearn.pipeline import Pipeline
         from sklearn.preprocessing import StandardScaler
 
+        # Always embed categories -- the similarity stage works cold-start.
+        if self.cfg.category_similarity.enabled:
+            self._populate_category_embeddings()
+
         labels = labeled_ids_with_categories(self.conn, source="user")
         if len(labels) < 2:
             return FitReport(
@@ -150,7 +257,7 @@ class CategorizationCascade:
                 classifier_type="none",
                 feature_dim=0,
                 train_score=float("nan"),
-                notes="need >= 2 labeled examples to train",
+                notes="need >= 2 labeled examples to train classifier (category_similarity still works)",
             )
         ids = [eid for eid, _ in labels]
         y = np.array([cid for _, cid in labels])
@@ -295,7 +402,18 @@ class CategorizationCascade:
             else:
                 low_conf = True
 
-            # Stage 4: zero-shot NLI
+            # Stage 4: category similarity (zero-shot via embeddings + lexical overlap)
+            if self.cfg.category_similarity.enabled and low_conf:
+                target_pos = list(df.index).index(eid)
+                cid, conf = self._category_similarity(
+                    emb[target_pos],
+                    expense_text=str(row.get("combined_text") or ""),
+                )
+                if cid is not None:
+                    out.append(Prediction(eid, cid, conf, "category_similarity"))
+                    continue
+
+            # Stage 5: zero-shot NLI (slowest fallback)
             if self.cfg.zeroshot.enabled and low_conf:
                 cid, conf = self._zeroshot_predict(str(row.get("combined_text") or ""))
                 if cid is not None:
