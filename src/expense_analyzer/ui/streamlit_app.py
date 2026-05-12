@@ -862,7 +862,9 @@ def _build_data_query(
 
 with tab_data:
     st.header("Data")
-    cat_options = [s.name for s in category_stats(conn)] + ["(unkategorisiert)"]
+    # Alphabetical order so the filter multiselect doesn't reshuffle every
+    # time stats change (same reasoning as the inline Category dropdown).
+    cat_options = sorted(c.name for c in list_categories(conn)) + ["(unkategorisiert)"]
 
     with st.expander("Filters", expanded=True):
         fc1, fc2, fc3 = st.columns(3)
@@ -1114,8 +1116,15 @@ with tab_data:
         st.rerun()
 
     # --- Inline-editable table ----------------------------------------------
-    all_cat_names = [s.name for s in category_stats(conn)]
-    cat_id_by_name = {s.name: s.id for s in category_stats(conn)}
+    # Use ALPHABETICAL order here, NOT the stats-derived order from
+    # category_stats(). The latter sorts by abs_total_eur, which changes
+    # every time a label is saved -- Streamlit's SelectboxColumn treats a
+    # changed `options` list as a config invalidation and drops the
+    # editor's cached row state, which manifests as "the table resets
+    # after a couple of inline edits". Stable order = stable editor.
+    _all_cat_objs = list_categories(conn)
+    all_cat_names = sorted(c.name for c in _all_cat_objs)
+    cat_id_by_name = {c.name: c.id for c in _all_cat_objs}
 
     # `df` is the cached snapshot dataframe (mutated in place on edits below).
     # The editor needs the unlabeled sentinel rendered as "" so the selectbox
