@@ -473,7 +473,11 @@ with tab_import:
                     label=", ".join(f"{k}={v}" for k, v in stages.items()),
                     state="complete",
                 )
-            st.rerun()
+            # No explicit st.rerun(): predictions are already in
+            # session_state.import_predictions, so when execution falls
+            # through to the table render below it picks them up. Skipping
+            # the rerun avoids a second full re-render that resets the
+            # data_editor's scroll / focus position.
 
         # --- Compact review table -------------------------------------------
         cats = list_categories(conn)
@@ -886,7 +890,11 @@ with tab_data:
         key="data_editor",
     )
 
-    # Diff Category column → write user labels for any changes.
+    # Diff Category column → write user labels for any changes. Do NOT call
+    # st.rerun() or clear data_editor state -- the SelectboxColumn change
+    # already triggered a rerun, and the cached edit is idempotent against
+    # the updated DB on subsequent renders. Forcing another rerun resets
+    # scroll position / cell focus, which is the actual UX bug.
     if not df.empty:
         changed_count = 0
         for idx in editor_view_df.index:
@@ -898,11 +906,7 @@ with tab_data:
                     add_label(conn, int(editor_view_df.at[idx, "id"]), cid, "user")
                     changed_count += 1
         if changed_count:
-            # Clear editor state so the next rerun starts from the refreshed DF
-            # rather than re-applying the cached edit.
-            st.session_state.pop("data_editor", None)
             st.toast(f"saved {changed_count} label change(s)")
-            st.rerun()
 
     # --- Optional row drawer (notes + all-fields inspection) ---------------
     sel_id_text = st.text_input(
