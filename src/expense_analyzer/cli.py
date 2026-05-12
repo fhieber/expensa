@@ -491,11 +491,17 @@ def viz(ctx: click.Context, name: str, out: Path | None, since: str | None, unti
 # --- vendor-lookup -----------------------------------------------------------
 
 @cli.command("vendor-lookup")
-@click.argument("counterparty")
+@click.argument("counterparty", required=False)
+@click.option("--all", "all_vendors", is_flag=True,
+              help="Look up every distinct counterparty in the DB that isn't yet cached.")
 @click.pass_context
-def vendor_lookup(ctx: click.Context, counterparty: str) -> None:
-    """Look up a vendor (only if vendor_lookup.enabled)."""
+def vendor_lookup(ctx: click.Context, counterparty: str | None, all_vendors: bool) -> None:
+    """Look up one vendor by name, or `--all` to populate vendor_cache for
+    every distinct counterparty in the DB. Requires vendor_lookup.enabled."""
     cfg: Config = ctx.obj[_CTX_KEY]["config"]
+    if not counterparty and not all_vendors:
+        click.echo("provide a counterparty name or pass --all", err=True)
+        ctx.exit(2)
     conn = _connect(cfg)
     try:
         from expense_analyzer.enrichment.vendor_web import (
@@ -504,15 +510,41 @@ def vendor_lookup(ctx: click.Context, counterparty: str) -> None:
         )
         from expense_analyzer.ingestion.normalizer import normalize_counterparty
 
-        cp = normalize_counterparty(counterparty)
         try:
-            info = lookup_vendor(conn, cp, cfg.vendor_lookup)
+            if all_vendors:
+                rows = conn.execute(
+                    """
+                    SELECT DISTINCT e.counterparty_normalized
+                    FROM expenses e
+                    LEFT JOIN vendor_cache vc
+                      ON vc.counterparty_normalized = e.counterparty_normalized
+                    WHERE e.counterparty_normalized IS NOT NULL
+                      AND e.counterparty_normalized <> ''
+                      AND vc.counterparty_normalized IS NULL
+                    ORDER BY e.counterparty_normalized
+                    """
+                ).fetchall()
+                if not rows:
+                    click.echo("nothing to look up — every counterparty is already cached.")
+                    return
+                click.echo(f"looking up {len(rows)} vendor(s)...")
+                for r in rows:
+                    cp = r["counterparty_normalized"]
+                    try:
+                        info = lookup_vendor(conn, cp, cfg.vendor_lookup)
+                    except VendorLookupDisabled as e:
+                        click.echo(str(e), err=True)
+                        ctx.exit(2)
+                    click.echo(f"  {cp:<40} -> {info.industry}")
+            else:
+                cp = normalize_counterparty(counterparty)
+                info = lookup_vendor(conn, cp, cfg.vendor_lookup)
+                click.echo(f"counterparty: {info.counterparty_normalized}")
+                click.echo(f"industry:     {info.industry}")
+                click.echo(f"summary:      {info.summary[:300] or '(empty)'}")
         except VendorLookupDisabled as e:
             click.echo(str(e), err=True)
             ctx.exit(2)
-        click.echo(f"counterparty: {info.counterparty_normalized}")
-        click.echo(f"industry:     {info.industry}")
-        click.echo(f"summary:      {info.summary[:300] or '(empty)'}")
     finally:
         conn.close()
 

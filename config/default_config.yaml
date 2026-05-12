@@ -35,6 +35,7 @@ category_similarity:
   enabled: true
   min_top1: 0.25
   min_margin: 0.03
+  use_vendor_industry: true
 
 # --- Clustering ---
 clustering:

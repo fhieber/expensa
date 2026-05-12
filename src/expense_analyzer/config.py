@@ -46,6 +46,10 @@ class CategorySimilarityConfig(BaseModel):
     enabled: bool = True
     min_top1: float = 0.25        # require top-1 cosine >= this
     min_margin: float = 0.03      # require top1 - top2 >= this
+    # When True, append the vendor_cache.industry tag (e.g. "supermarket"
+    # for REWE) to the expense text before lexical scoring. Helps when
+    # the industry tag matches a token in the target category's description.
+    use_vendor_industry: bool = True
 
 
 class ClusteringConfig(BaseModel):

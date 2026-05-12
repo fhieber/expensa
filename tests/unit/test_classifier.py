@@ -148,6 +148,82 @@ def test_category_similarity_fires_with_no_user_labels(
             assert p.category_id is not None
 
 
+def test_vendor_industry_boosts_category_similarity(
+    tmp_db: sqlite3.Connection, fixtures_dir: Path, tmp_path: Path
+) -> None:
+    """A vendor-cache 'industry' tag should bias category_similarity toward
+    the category whose description contains that keyword.
+
+    Setup: two near-identical categories, only one of which has the
+    keyword "supermarket" in its description; the vendor_cache marks the
+    counterparty's industry as "supermarket". With the boost the
+    targeted category must win even though the embedding signal alone
+    can be too noisy."""
+    from expense_analyzer.storage.categories import upsert_category as _upsert
+
+    ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
+
+    grocery = _upsert(
+        tmp_db, "Lebensmittel",
+        description="REWE Edeka Aldi Lidl Penny Netto Kaufland Supermarkt supermarket Einkauf.",
+    )
+    other = _upsert(
+        tmp_db, "Sonstiges",
+        description="Anderes nicht klar zuordenbare Ausgabe miscellaneous.",
+    )
+    assert grocery != other
+
+    cp = tmp_db.execute(
+        "SELECT counterparty_normalized FROM expenses WHERE counterparty_normalized = 'rewe markt' LIMIT 1"
+    ).fetchone()["counterparty_normalized"]
+    tmp_db.execute(
+        "INSERT INTO vendor_cache(counterparty_normalized, summary, industry) VALUES (?, ?, ?)",
+        (cp, "REWE Markt is a German supermarket chain.", "supermarket"),
+    )
+
+    cfg = _config_no_zeroshot(tmp_path)
+    cfg.category_similarity.min_top1 = -1.0
+    cfg.category_similarity.min_margin = -1.0
+    cascade = CategorizationCascade(tmp_db, cfg, HashEmbedder(dim=128))
+    cascade.fit()
+
+    rewe_ids = [
+        int(r["id"]) for r in tmp_db.execute(
+            "SELECT id FROM expenses WHERE counterparty_normalized = 'rewe markt'"
+        ).fetchall()
+    ]
+    preds = cascade.predict_batch(rewe_ids)
+    # All REWE rows must land on Lebensmittel (the category whose
+    # description matches the vendor industry).
+    assert all(p.category_id == grocery for p in preds), (
+        f"expected REWE -> Lebensmittel, got "
+        f"{[(p.expense_id, p.category_id) for p in preds]}"
+    )
+
+
+def test_vendor_industry_boost_disabled(
+    tmp_db: sqlite3.Connection, fixtures_dir: Path, tmp_path: Path
+) -> None:
+    """With use_vendor_industry=False the boost is skipped (no SQL hit)."""
+    ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
+    upsert_category(tmp_db, "X", description="x")
+    cfg = _config_no_zeroshot(tmp_path)
+    cfg.category_similarity.use_vendor_industry = False
+    cfg.category_similarity.min_top1 = -1.0
+    cfg.category_similarity.min_margin = -1.0
+    cascade = CategorizationCascade(tmp_db, cfg, HashEmbedder(dim=64))
+    cascade.fit()
+    # The vendor_cache table is empty; even if we forgot to gate the
+    # SQL it'd just return no rows. This test mostly exercises the
+    # disabled code path.
+    preds = cascade.predict_batch([
+        int(r["id"]) for r in tmp_db.execute(
+            "SELECT id FROM expenses LIMIT 3"
+        ).fetchall()
+    ])
+    assert len(preds) == 3
+
+
 def test_category_similarity_respects_min_top1_threshold(
     tmp_db: sqlite3.Connection, fixtures_dir: Path, tmp_path: Path
 ) -> None:

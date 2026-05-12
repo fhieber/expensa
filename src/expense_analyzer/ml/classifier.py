@@ -345,6 +345,35 @@ class CategorizationCascade:
         else:
             train_vecs = np.zeros((0, 0), dtype=np.float32)
 
+        # Vendor-lookup industry tags (one SQL roundtrip for all expenses).
+        # Used to augment the lexical-overlap signal in the category_similarity
+        # stage: e.g. industry="supermarket" makes the Lebensmittel category
+        # win for a REWE row even when the cosine signal is borderline.
+        vendor_industry: dict[int, str] = {}
+        if self.cfg.category_similarity.use_vendor_industry:
+            try:
+                ids_list = list(expense_ids)
+                ph_v = ",".join("?" * len(ids_list))
+                rows = self.conn.execute(
+                    f"""
+                    SELECT e.id, vc.industry
+                    FROM expenses e
+                    LEFT JOIN vendor_cache vc
+                      ON vc.counterparty_normalized = e.counterparty_normalized
+                    WHERE e.id IN ({ph_v})
+                    """,
+                    ids_list,
+                ).fetchall()
+                vendor_industry = {
+                    int(r["id"]): (r["industry"] or "")
+                    for r in rows
+                    if r["industry"]
+                }
+            except Exception:
+                # vendor_cache table missing or other transient issue -- skip
+                # the boost rather than crash prediction.
+                vendor_industry = {}
+
         out: list[Prediction] = []
         # Lazy-build the X matrix only if we actually need the classifier.
         X_cache = None
@@ -415,9 +444,16 @@ class CategorizationCascade:
                 # Stage 4: category similarity (zero-shot via embeddings + lexical overlap)
                 if self.cfg.category_similarity.enabled and low_conf:
                     target_pos = list(df.index).index(eid)
+                    expense_text = str(row.get("combined_text") or "")
+                    industry = vendor_industry.get(eid, "")
+                    if industry:
+                        # Append the vendor-cache industry tag so it counts as
+                        # an additional token in the lexical-overlap bonus
+                        # (e.g. "supermarket" matches a Lebensmittel category
+                        # description that lists "supermarket").
+                        expense_text = f"{expense_text} {industry}".strip()
                     cid, conf = self._category_similarity(
-                        emb[target_pos],
-                        expense_text=str(row.get("combined_text") or ""),
+                        emb[target_pos], expense_text=expense_text
                     )
                     if cid is not None:
                         out.append(Prediction(eid, cid, conf, "category_similarity"))
