@@ -44,16 +44,12 @@ from expense_analyzer.storage.database import get_or_create_database
 from expense_analyzer.storage.stats import category_stats, uncategorized_stat
 from expense_analyzer.viz import (
     amount_distribution,
-    bar_top_counterparties,
-    daily_calendar,
     histogram_amounts,
     monthly_flow_by_category,
     pie_chart,
     spend_by_category,
-    top_counterparties,
     trend_lines,
 )
-from expense_analyzer.viz.charts import calendar_heatmap
 
 # Higher threshold for one-click "accept all confident" predictions
 # (the cfg.classifier.confidence_threshold is for review queues).
@@ -162,26 +158,78 @@ def _format_eur(cents: int) -> str:
 # Tab 1: Dashboard
 # ---------------------------------------------------------------------------
 
+_DASHBOARD_PRESETS = [
+    "All", "YTD", "Last month", "Last 3 months",
+    "Last 6 months", "Last year", "Last 2 years", "Custom",
+]
+
+
+def _dashboard_date_range(preset: str, custom_from=None, custom_to=None):
+    from datetime import date as _date
+    from datetime import timedelta
+
+    today = _date.today()
+    if preset == "All":
+        return None, None
+    if preset == "YTD":
+        return _date(today.year, 1, 1), today
+    if preset == "Last month":
+        return today - timedelta(days=30), today
+    if preset == "Last 3 months":
+        return today - timedelta(days=90), today
+    if preset == "Last 6 months":
+        return today - timedelta(days=180), today
+    if preset == "Last year":
+        return today - timedelta(days=365), today
+    if preset == "Last 2 years":
+        return today - timedelta(days=730), today
+    if preset == "Custom":
+        return custom_from, custom_to
+    return None, None
+
+
 with tab_dash:
+    from expense_analyzer.viz import daily_by_category, stacked_daily_by_category
+
     st.header("Dashboard")
     n_exp = conn.execute("SELECT COUNT(*) AS n FROM expenses").fetchone()["n"]
     if n_exp == 0:
         st.info("Import a CSV from the **Import** tab to get started.")
     else:
-        c1, c2 = st.columns(2)
+        preset = st.radio(
+            "Date range",
+            _DASHBOARD_PRESETS,
+            index=0,
+            horizontal=True,
+            key="dashboard_date_preset",
+        )
+        if preset == "Custom":
+            cfrom_col, cto_col = st.columns(2)
+            custom_from = cfrom_col.date_input("From", value=None, key="dashboard_from")
+            custom_to = cto_col.date_input("To", value=None, key="dashboard_to")
+            since, until = _dashboard_date_range(preset, custom_from, custom_to)
+        else:
+            since, until = _dashboard_date_range(preset)
+
+        c1, c2 = st.columns([1, 1])
         with c1:
-            st.plotly_chart(pie_chart(spend_by_category(conn)), width="stretch")
-        with c2:
             st.plotly_chart(
-                bar_top_counterparties(top_counterparties(conn, n=15)),
+                pie_chart(spend_by_category(conn, since=since, until=until)),
                 width="stretch",
             )
-        st.plotly_chart(trend_lines(monthly_flow_by_category(conn)), width="stretch")
-        c3, c4 = st.columns(2)
-        with c3:
-            st.plotly_chart(histogram_amounts(amount_distribution(conn)), width="stretch")
-        with c4:
-            st.plotly_chart(calendar_heatmap(daily_calendar(conn)), width="stretch")
+        with c2:
+            st.plotly_chart(
+                histogram_amounts(amount_distribution(conn, since=since, until=until)),
+                width="stretch",
+            )
+        st.plotly_chart(
+            trend_lines(monthly_flow_by_category(conn, since=since, until=until)),
+            width="stretch",
+        )
+        st.plotly_chart(
+            stacked_daily_by_category(daily_by_category(conn, since=since, until=until)),
+            width="stretch",
+        )
 
 
 # ---------------------------------------------------------------------------

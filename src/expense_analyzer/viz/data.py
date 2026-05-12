@@ -171,3 +171,38 @@ def daily_calendar(
     if not df.empty:
         df["d"] = pd.to_datetime(df["d"]).dt.date
     return df
+
+
+def daily_by_category(
+    conn: sqlite3.Connection,
+    since: date | None = None,
+    until: date | None = None,
+) -> pd.DataFrame:
+    """One row per (date, category) with the spend total. Used by the
+    Dashboard's stacked daily-spend bar chart.
+
+    Uncategorized rows fall under "(unkategorisiert)" with a neutral grey.
+    """
+    extra, params = _date_filter_clause("e.buchungsdatum", since, until)
+    sql = (
+        _LATEST_LABEL_CTE
+        + f"""
+        SELECT e.buchungsdatum AS d,
+               COALESCE(c.name, '(unkategorisiert)') AS name,
+               COALESCE(c.color, '#bbbbbb') AS color,
+               SUM(ABS(e.betrag_cents)) / 100.0 AS amount
+        FROM expenses e
+        LEFT JOIN latest_label ll ON ll.expense_id = e.id
+        LEFT JOIN categories c ON c.id = ll.category_id
+        WHERE e.is_income = 0 {extra}
+        GROUP BY d, name, color
+        ORDER BY d, name
+        """
+    )
+    rows = conn.execute(sql, params).fetchall()
+    df = pd.DataFrame([dict(r) for r in rows])
+    if df.empty:
+        df = pd.DataFrame(columns=["d", "name", "color", "amount"])
+    if not df.empty:
+        df["d"] = pd.to_datetime(df["d"]).dt.date
+    return df

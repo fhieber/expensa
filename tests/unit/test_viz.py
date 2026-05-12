@@ -95,7 +95,9 @@ def test_chart_factories_return_figures(
 
 
 def test_chart_builders_dict_complete() -> None:
-    assert set(CHART_BUILDERS) == {"pie", "histogram", "trend", "top", "calendar"}
+    assert set(CHART_BUILDERS) == {
+        "pie", "histogram", "trend", "top", "calendar", "daily-stacked",
+    }
 
 
 def test_save_figure_html(tmp_db: sqlite3.Connection, fixtures_dir: Path, tmp_path: Path) -> None:

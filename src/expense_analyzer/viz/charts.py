@@ -82,3 +82,22 @@ def calendar_heatmap(cal_df) -> go.Figure:
         labels={"d": "Tag", "amount": "Betrag (€)"},
     )
     return fig
+
+
+def stacked_daily_by_category(df) -> go.Figure:
+    """Stacked bars per day showing how much was spent on each category.
+    Useful for spotting e.g. "spent X on Lebensmittel on May 8th"."""
+    if df.empty:
+        return go.Figure(layout={"title": "Tägliche Ausgaben nach Kategorie (keine Daten)"})
+    color_map = {r["name"]: r["color"] for _, r in df.drop_duplicates("name").iterrows()}
+    fig = px.bar(
+        df,
+        x="d",
+        y="amount",
+        color="name",
+        color_discrete_map=color_map,
+        title="Tägliche Ausgaben nach Kategorie",
+        labels={"d": "Tag", "amount": "Betrag (€)", "name": "Kategorie"},
+    )
+    fig.update_layout(barmode="stack", legend_title_text="Kategorie")
+    return fig

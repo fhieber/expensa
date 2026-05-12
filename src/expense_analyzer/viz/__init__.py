@@ -5,10 +5,12 @@ from expense_analyzer.viz.charts import (
     calendar_heatmap,
     histogram_amounts,
     pie_chart,
+    stacked_daily_by_category,
     trend_lines,
 )
 from expense_analyzer.viz.data import (
     amount_distribution,
+    daily_by_category,
     daily_calendar,
     monthly_flow_by_category,
     spend_by_category,
@@ -22,6 +24,7 @@ CHART_BUILDERS = {
     "trend": (monthly_flow_by_category, trend_lines),
     "top": (top_counterparties, bar_top_counterparties),
     "calendar": (daily_calendar, calendar_heatmap),
+    "daily-stacked": (daily_by_category, stacked_daily_by_category),
 }
 
 __all__ = [
@@ -29,12 +32,14 @@ __all__ = [
     "bar_top_counterparties",
     "calendar_heatmap",
     "CHART_BUILDERS",
+    "daily_by_category",
     "daily_calendar",
     "histogram_amounts",
     "monthly_flow_by_category",
     "pie_chart",
     "save_figure",
     "spend_by_category",
+    "stacked_daily_by_category",
     "top_counterparties",
     "trend_lines",
 ]
