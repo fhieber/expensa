@@ -494,12 +494,10 @@ with tab_import:
             conn,
             params=new_ids,
         )
-        # Format the date as DD.MM.YYYY (German style) for display. Without
-        # this, pandas/streamlit can render date objects as epoch numbers.
+        # Keep the date as a real datetime so sorting works numerically;
+        # the column_config below formats it as DD.MM.YYYY for display.
         if not rows_df.empty:
-            rows_df["buchungsdatum"] = pd.to_datetime(
-                rows_df["buchungsdatum"]
-            ).dt.strftime("%d.%m.%Y")
+            rows_df["buchungsdatum"] = pd.to_datetime(rows_df["buchungsdatum"])
 
         def _stage_glyph(stage: str | None) -> str:
             return {
@@ -546,7 +544,9 @@ with tab_import:
 
         column_config = {
             "id": st.column_config.NumberColumn("ID", disabled=True, width="small"),
-            "buchungsdatum": st.column_config.TextColumn("Date", disabled=True),
+            "buchungsdatum": st.column_config.DateColumn(
+                "Date", disabled=True, format="DD.MM.YYYY"
+            ),
             "counterparty": st.column_config.TextColumn("Counterparty", disabled=True),
             "verwendungszweck": st.column_config.TextColumn(
                 "Verwendungszweck", disabled=True, width="large"
@@ -727,9 +727,10 @@ with tab_data:
     )
     df = pd.read_sql_query(sql, conn, params=params)
     if not df.empty:
-        # Render the date as DD.MM.YYYY (German style) rather than letting
-        # pandas/streamlit show a date object as raw numbers.
-        df["buchungsdatum"] = pd.to_datetime(df["buchungsdatum"]).dt.strftime("%d.%m.%Y")
+        # Keep buchungsdatum as a datetime so column-header sorting orders by
+        # actual time, not alphabetically. The DateColumn config below
+        # formats it as DD.MM.YYYY for display.
+        df["buchungsdatum"] = pd.to_datetime(df["buchungsdatum"])
 
     # Counts BEFORE the fillna pass below, so we can use NaN semantics.
     def _to_conf(v) -> float:
@@ -850,7 +851,9 @@ with tab_data:
     category_options = [""] + all_cat_names
     column_config = {
         "id": st.column_config.NumberColumn("ID", disabled=True, width="small"),
-        "buchungsdatum": st.column_config.TextColumn("Date", disabled=True),
+        "buchungsdatum": st.column_config.DateColumn(
+            "Date", disabled=True, format="DD.MM.YYYY"
+        ),
         "counterparty": st.column_config.TextColumn("Counterparty", disabled=True),
         "verwendungszweck": st.column_config.TextColumn(
             "Verwendungszweck", disabled=True, width="large"
