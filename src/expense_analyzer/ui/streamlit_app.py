@@ -990,16 +990,16 @@ with tab_data:
         key="data_editor",
     )
 
-    # Persist inline Category edits AND sync the Select column back to the
-    # cached df. Mutating in place keeps the dataframe object identity
-    # stable across reruns, which Streamlit needs to preserve scroll/focus.
+    # Persist inline Category edits. We deliberately do NOT sync `Select`
+    # back into the cached df: Streamlit's data_editor tracks checkbox
+    # state in session_state["data_editor"]["edited_rows"], and if we
+    # write the tick back into the input df, Streamlit treats the
+    # subsequent (now-redundant) edit as a conflict and silently drops
+    # ticks once a few accumulate. Keep the input column as always False
+    # and read the current ticks straight from `edited_df["Select"]`.
     if not df.empty:
         changed_count = 0
         for idx in df.index:
-            # Sync Select state
-            df.at[idx, "Select"] = bool(edited_df.at[idx, "Select"])
-
-            # Detect Category edits
             new_val = str(edited_df.at[idx, "category"] or "").strip()
             old_val_display = str(editor_view_for_render.at[idx, "category"] or "").strip()
             if new_val and new_val != old_val_display:
@@ -1016,7 +1016,9 @@ with tab_data:
 
     # --- Bulk-set category for selected rows -------------------------------
     if not df.empty:
-        n_selected = int(df["Select"].sum())
+        # Read selection straight from the editor's current state.
+        sel_mask = edited_df["Select"].fillna(False).astype(bool)
+        n_selected = int(sel_mask.sum())
         if n_selected > 0:
             bulk_cols = st.columns([2, 3, 1, 1])
             bulk_cols[0].markdown(f"**{n_selected} row(s) selected**")
@@ -1037,22 +1039,19 @@ with tab_data:
             if apply_bulk and bulk_new_cat:
                 cid = cat_id_by_name.get(bulk_new_cat)
                 if cid is not None:
-                    sel_mask = df["Select"] == True  # noqa: E712
-                    for idx in df.index[sel_mask]:
+                    for idx in edited_df.index[sel_mask]:
                         add_label(conn, int(df.at[idx, "id"]), cid, "user")
                         df.at[idx, "category"] = bulk_new_cat
                         df.at[idx, "label_source"] = "user"
                         df.at[idx, "confidence"] = ""
                         df.at[idx, "category_id"] = cid
-                    df["Select"] = False
-                    st.toast(f"set {bulk_new_cat} on {int(sel_mask.sum())} row(s)")
+                    st.toast(f"set {bulk_new_cat} on {n_selected} row(s)")
                     # Clear data_editor's session state so the unticked
                     # checkboxes show; this rerun is intentional and only
                     # happens on an explicit Apply click.
                     st.session_state.pop("data_editor", None)
                     st.rerun()
             if clear_sel:
-                df["Select"] = False
                 st.session_state.pop("data_editor", None)
                 st.rerun()
 
