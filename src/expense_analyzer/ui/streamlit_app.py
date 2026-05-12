@@ -56,6 +56,27 @@ from expense_analyzer.viz import (
 ACCEPT_CONFIDENT_THRESHOLD = 0.85
 
 
+# Shared CTE used by the Dashboard drill-down queries.
+_LATEST_LABEL_CTE_DASHBOARD = """
+    WITH latest_label AS (
+        SELECT l.expense_id, l.category_id
+        FROM labels l
+        JOIN (
+            SELECT expense_id, MAX(id) AS max_id
+            FROM labels GROUP BY expense_id
+        ) m ON l.id = m.max_id
+    )
+    SELECT
+        e.id, e.buchungsdatum, e.counterparty, e.verwendungszweck,
+        e.betrag_cents / 100.0 AS "betrag_€",
+        COALESCE(c.name, '(unkategorisiert)') AS category,
+        e.iban_country
+    FROM expenses e
+    LEFT JOIN latest_label ll ON ll.expense_id = e.id
+    LEFT JOIN categories c ON c.id = ll.category_id
+"""
+
+
 # ---------------------------------------------------------------------------
 # Boot
 # ---------------------------------------------------------------------------
@@ -226,10 +247,103 @@ with tab_dash:
             trend_lines(monthly_flow_by_category(conn, since=since, until=until)),
             width="stretch",
         )
-        st.plotly_chart(
-            stacked_daily_by_category(daily_by_category(conn, since=since, until=until)),
+
+        # --- Stacked daily-spend bar, clickable to drill into records ----
+        daily_df = daily_by_category(conn, since=since, until=until)
+        daily_event = st.plotly_chart(
+            stacked_daily_by_category(daily_df),
             width="stretch",
+            on_select="rerun",
+            selection_mode=("points", "box", "lasso"),
+            key="dashboard_daily_chart",
         )
+
+        # Plotly's selection payload: every clicked bar has x (date),
+        # y (amount) and legendgroup (category name). Use it to filter
+        # records below.
+        clicked_points = []
+        if daily_event and getattr(daily_event, "selection", None):
+            clicked_points = daily_event.selection.points or []
+
+        if clicked_points:
+            # Distinct (date, category) pairs the user clicked.
+            wanted: set[tuple[str, str]] = set()
+            for p in clicked_points:
+                x_val = p.get("x")
+                cat_name = p.get("legendgroup")
+                if x_val and cat_name:
+                    iso_date = str(x_val).split("T")[0]
+                    wanted.add((iso_date, cat_name))
+
+            st.subheader(
+                f"Records contributing to {len(wanted)} selected bar segment(s)"
+            )
+            params: list = []
+            clauses: list[str] = []
+            for iso_date, cat_name in wanted:
+                if cat_name == "(unkategorisiert)":
+                    clauses.append("(e.buchungsdatum = ? AND c.id IS NULL)")
+                    params.append(iso_date)
+                else:
+                    clauses.append("(e.buchungsdatum = ? AND c.name = ?)")
+                    params.extend([iso_date, cat_name])
+            sql = (
+                _LATEST_LABEL_CTE_DASHBOARD
+                + " WHERE e.is_income = 0 AND ("
+                + " OR ".join(clauses)
+                + ") ORDER BY e.buchungsdatum, ABS(e.betrag_cents) DESC"
+            )
+            sub_df = pd.read_sql_query(sql, conn, params=params)
+            if not sub_df.empty:
+                sub_df["buchungsdatum"] = pd.to_datetime(sub_df["buchungsdatum"])
+                sub_df["category"] = sub_df["category"].fillna("(unkategorisiert)")
+            st.dataframe(
+                sub_df,
+                hide_index=True,
+                width="stretch",
+                column_config={
+                    "buchungsdatum": st.column_config.DateColumn(
+                        "Date", format="DD.MM.YYYY"
+                    ),
+                    "betrag_€": st.column_config.NumberColumn("Amount €", format="%.2f"),
+                },
+            )
+
+        # General "show everything in current view" expander
+        with st.expander(
+            f"All records contributing to this dashboard view "
+            f"({'all dates' if since is None and until is None else f'{since} … {until}'})",
+            expanded=False,
+        ):
+            params: list = []
+            clauses = ["e.is_income = 0"]
+            if since is not None:
+                clauses.append("e.buchungsdatum >= ?")
+                params.append(since.isoformat())
+            if until is not None:
+                clauses.append("e.buchungsdatum <= ?")
+                params.append(until.isoformat())
+            sql = (
+                _LATEST_LABEL_CTE_DASHBOARD
+                + " WHERE " + " AND ".join(clauses)
+                + " ORDER BY e.buchungsdatum DESC, e.id DESC LIMIT 5000"
+            )
+            full_df = pd.read_sql_query(sql, conn, params=params)
+            if not full_df.empty:
+                full_df["buchungsdatum"] = pd.to_datetime(full_df["buchungsdatum"])
+                full_df["category"] = full_df["category"].fillna("(unkategorisiert)")
+            st.caption(f"{len(full_df)} record(s)")
+            st.dataframe(
+                full_df,
+                hide_index=True,
+                width="stretch",
+                column_config={
+                    "buchungsdatum": st.column_config.DateColumn(
+                        "Date", format="DD.MM.YYYY"
+                    ),
+                    "betrag_€": st.column_config.NumberColumn("Amount €", format="%.2f"),
+                },
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -862,6 +976,8 @@ with tab_data:
         st.session_state["data_view_df"] = _fetch_snapshot_df(snapshot_ids)
         # Wipe the data_editor cache so stale row-index edits don't apply.
         st.session_state.pop("data_editor", None)
+        # And the saved-category tracker -- new snapshot, new state.
+        st.session_state.pop("data_last_saved_categories", None)
 
     # Cached display df. We mutate this in place on edits so the data_editor
     # sees an identical input object between renders -- key to keeping scroll
@@ -1067,27 +1183,40 @@ with tab_data:
         key="data_editor",
     )
 
-    # Persist inline Category edits. We deliberately do NOT sync `Select`
-    # back into the cached df: Streamlit's data_editor tracks checkbox
-    # state in session_state["data_editor"]["edited_rows"], and if we
-    # write the tick back into the input df, Streamlit treats the
-    # subsequent (now-redundant) edit as a conflict and silently drops
-    # ticks once a few accumulate. Keep the input column as always False
-    # and read the current ticks straight from `edited_df["Select"]`.
+    # Persist inline Category edits. We deliberately do NOT mutate the
+    # `category` column of the cached df: Streamlit's data_editor tracks
+    # edits in session_state["data_editor"]["edited_rows"], and once the
+    # input df also contains the new value, Streamlit treats the existing
+    # edit as redundant and silently drops it -- which after a couple of
+    # edits dropped *adjacent* edits too, manifesting as the "table
+    # resets" bug. So we leave the input column untouched, let the
+    # editor's overlay show the user's pick, and track what we've saved
+    # in session_state to avoid double-writes / loops.
+    last_saved: dict[int, str] = st.session_state.setdefault(
+        "data_last_saved_categories", {}
+    )
     if not df.empty:
         changed_count = 0
         for idx in df.index:
+            eid = int(df.at[idx, "id"])
             new_val = str(edited_df.at[idx, "category"] or "").strip()
-            old_val_display = str(editor_view_for_render.at[idx, "category"] or "").strip()
-            if new_val and new_val != old_val_display:
-                cid = cat_id_by_name.get(new_val)
-                if cid is not None:
-                    add_label(conn, int(df.at[idx, "id"]), cid, "user")
-                    df.at[idx, "category"] = new_val
-                    df.at[idx, "label_source"] = "user"
-                    df.at[idx, "confidence"] = ""
-                    df.at[idx, "category_id"] = cid
-                    changed_count += 1
+            if not new_val:
+                continue
+            if last_saved.get(eid) == new_val:
+                continue  # already persisted exactly this value
+            cid = cat_id_by_name.get(new_val)
+            if cid is None:
+                continue
+            add_label(conn, eid, cid, "user")
+            last_saved[eid] = new_val
+            # Update READ-ONLY visualisation columns only (Source / Conf /
+            # category_id). These don't conflict with the editor's tracked
+            # edits on the `category` column.
+            df.at[idx, "label_source"] = "user"
+            df.at[idx, "confidence"] = ""
+            df.at[idx, "category_id"] = cid
+            df.at[idx, "src"] = "✅ user"
+            changed_count += 1
         if changed_count:
             st.toast(f"saved {changed_count} label change(s)")
 
