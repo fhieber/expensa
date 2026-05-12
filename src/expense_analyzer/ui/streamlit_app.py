@@ -1155,8 +1155,9 @@ with tab_data:
     caption_cols[0].caption(
         f"{len(df)} record(s) in current snapshot · "
         "click the **Category** cell to change a label inline — saves immediately. "
-        "Rows stay in the table after labeling so the view doesn't shuffle while you work; "
-        "click **Refresh filter** to re-evaluate."
+        "Rows stay in the table after labeling so the view doesn't shuffle while you work. "
+        "The **Source** and **Conf** columns refresh from the DB only on **Refresh filter** "
+        "(deferred so unrelated inline edits don't lose focus)."
     )
     if caption_cols[1].button("Refresh filter", help="Re-run the filter against the latest DB state."):
         st.session_state["data_force_refresh"] = True
@@ -1239,15 +1240,17 @@ with tab_data:
         key="data_editor",
     )
 
-    # Persist inline Category edits. We deliberately do NOT mutate the
-    # `category` column of the cached df: Streamlit's data_editor tracks
-    # edits in session_state["data_editor"]["edited_rows"], and once the
-    # input df also contains the new value, Streamlit treats the existing
-    # edit as redundant and silently drops it -- which after a couple of
-    # edits dropped *adjacent* edits too, manifesting as the "table
-    # resets" bug. So we leave the input column untouched, let the
-    # editor's overlay show the user's pick, and track what we've saved
-    # in session_state to avoid double-writes / loops.
+    # Persist inline Category edits. We deliberately do NOT mutate any
+    # cell of the cached df: Streamlit's data_editor receives the entire
+    # input dataframe and treats *any* changed cell -- even in a
+    # disabled column like Source / Conf -- as a reason to reconcile and
+    # silently drop in-flight edits in OTHER rows. That was the root
+    # cause of "after the 2nd/3rd Enter the table flips/changes".
+    #
+    # Trade-off: the Source / Conf cells stay visually stale after an
+    # inline save until the user clicks Refresh filter (which rebuilds
+    # the snapshot from the DB). The Category column itself updates
+    # because Streamlit's own session_state overlay paints it.
     last_saved: dict[int, str] = st.session_state.setdefault(
         "data_last_saved_categories", {}
     )
@@ -1265,13 +1268,6 @@ with tab_data:
                 continue
             add_label(conn, eid, cid, "user")
             last_saved[eid] = new_val
-            # Update READ-ONLY visualisation columns only (Source / Conf /
-            # category_id). These don't conflict with the editor's tracked
-            # edits on the `category` column.
-            df.at[idx, "label_source"] = "user"
-            df.at[idx, "confidence"] = ""
-            df.at[idx, "category_id"] = cid
-            df.at[idx, "src"] = "✅ user"
             changed_count += 1
         if changed_count:
             st.toast(f"saved {changed_count} label change(s)")
@@ -1351,10 +1347,12 @@ with tab_data:
                 if pd.isna(cid):
                     continue
                 add_label(conn, int(df.at[idx, "id"]), int(cid), "user")
-                # Mutate cached row so the table reflects the new source.
-                df.at[idx, "label_source"] = "user"
-                df.at[idx, "src"] = "✅ user"
                 n_promoted += 1
+            # No cell mutation here either, for the same reason as
+            # inline edits: any df change reconciles the data_editor
+            # and can drop in-flight overlays in other rows. Source /
+            # Conf will reflect the promotion after the next snapshot
+            # rebuild (Refresh filter, or a filter change).
             st.toast(f"promoted {n_promoted} prediction(s) to user labels")
 
     # --- Optional row drawer (notes + all-fields inspection) ---------------
