@@ -531,7 +531,7 @@ if "import_step" not in st.session_state:
     st.session_state.import_step = "upload"
     st.session_state.import_new_ids = []
     st.session_state.import_predictions = {}  # expense_id -> Prediction
-    st.session_state.import_overrides = {}    # expense_id -> category_id
+    st.session_state.import_overrides = {}    # expense_id -> category_name (user override)
 
 
 def _reset_import_state() -> None:
@@ -539,6 +539,9 @@ def _reset_import_state() -> None:
     st.session_state.import_new_ids = []
     st.session_state.import_predictions = {}
     st.session_state.import_overrides = {}
+    # Drop the data_editor session state too so a fresh review doesn't
+    # carry stale row-index edits from the previous batch.
+    st.session_state.pop("import_editor", None)
 
 
 with tab_import:
@@ -642,9 +645,22 @@ with tab_import:
             # data_editor's scroll / focus position.
 
         # --- Compact review table -------------------------------------------
-        cats = list_categories(conn)
+        # IMPORTANT: dropdown options must be in a STABLE order across reruns.
+        # list_categories(conn) is already ORDER BY name in SQL, but we sort
+        # again here defensively in case anyone changes that.
+        cats = sorted(list_categories(conn), key=lambda c: c.name)
         cat_options_for_editor = [""] + [c.name for c in cats]
         cat_id_by_name = {c.name: c.id for c in cats}
+        cats_by_id = {c.id: c.name for c in cats}
+
+        # Per-eid manual overrides. The data_editor's own session state can
+        # drop edits when its cached column config invalidates, so we keep
+        # our own copy of "what the user has picked" and feed it into the
+        # input dataframe each render. This is the same trick that fixed
+        # the Data tab's inline-edit reset.
+        import_overrides: dict[int, str] = st.session_state.setdefault(
+            "import_overrides", {}
+        )
 
         ph = ",".join("?" * len(new_ids))
         rows_df = pd.read_sql_query(
@@ -675,12 +691,17 @@ with tab_import:
                 "unknown": "⚪",
             }.get(stage or "", "")
 
-        # Resolve current prediction (or override) per row.
-        cats_by_id = {c.id: c.name for c in cats}
+        # Resolve current prediction (or override) per row. Priority:
+        # user override > model prediction > empty.
         predicted_names: list[str] = []
         confidences: list[str] = []
         stages_visible: list[str] = []
         for eid in rows_df["id"].astype(int).tolist():
+            if eid in import_overrides:
+                predicted_names.append(import_overrides[eid])
+                confidences.append("1.00")
+                stages_visible.append("✏ manual")
+                continue
             p = preds_dict.get(eid)
             if p is None or p.category_id is None:
                 predicted_names.append("")
@@ -748,32 +769,58 @@ with tab_import:
             key="import_editor",
         )
 
+        # Sync the user's current Category picks back into import_overrides.
+        # Only record values that differ from the prediction / current value.
+        # This keeps import_overrides the source of truth for "what to save",
+        # independent of whether the data_editor has retained its overlay.
+        if not rows_df.empty:
+            for idx in rows_df.index:
+                eid = int(rows_df.at[idx, "id"])
+                new_val = str(edited.at[idx, "Category"] or "").strip()
+                rendered_val = str(rows_df.at[idx, "Category"] or "").strip()
+                if new_val != rendered_val:
+                    if new_val:
+                        import_overrides[eid] = new_val
+                    else:
+                        import_overrides.pop(eid, None)
+
+        def _resolve_save_category(eid: int) -> int | None:
+            """Pick the category_id to save for an eid: user override beats
+            model prediction. Returns None if neither yields a category."""
+            if eid in import_overrides:
+                return cat_id_by_name.get(import_overrides[eid])
+            p = preds_dict.get(eid)
+            if p is not None and p.category_id is not None:
+                return int(p.category_id)
+            return None
+
         if accept_confident:
             n_promoted = 0
-            for _, r in edited.iterrows():
-                eid = int(r["id"])
-                p = preds_dict.get(eid)
-                if p is None or p.category_id is None:
-                    continue
-                if float(p.confidence) >= ACCEPT_CONFIDENT_THRESHOLD:
-                    chosen_name = r["Category"] or cats_by_id.get(p.category_id, "")
-                    chosen_cid = cat_id_by_name.get(chosen_name)
-                    if chosen_cid is not None:
-                        add_label(conn, eid, chosen_cid, "user")
+            for eid in new_ids:
+                if eid in import_overrides:
+                    # User manually picked -> count as confident regardless.
+                    cid = cat_id_by_name.get(import_overrides[eid])
+                    if cid is not None:
+                        add_label(conn, eid, cid, "user")
+                        n_promoted += 1
+                else:
+                    p = preds_dict.get(eid)
+                    if (
+                        p is not None
+                        and p.category_id is not None
+                        and float(p.confidence) >= ACCEPT_CONFIDENT_THRESHOLD
+                    ):
+                        add_label(conn, eid, int(p.category_id), "user")
                         n_promoted += 1
             st.success(f"promoted {n_promoted} prediction(s) to user labels")
 
         if save_all:
             n_promoted = 0
-            for _, r in edited.iterrows():
-                chosen_name = r["Category"]
-                if not chosen_name:
-                    continue
-                chosen_cid = cat_id_by_name.get(chosen_name)
-                if chosen_cid is None:
-                    continue
-                add_label(conn, int(r["id"]), chosen_cid, "user")
-                n_promoted += 1
+            for eid in new_ids:
+                cid = _resolve_save_category(eid)
+                if cid is not None:
+                    add_label(conn, eid, cid, "user")
+                    n_promoted += 1
             st.success(f"saved {n_promoted} user label(s)")
 
         if done:
