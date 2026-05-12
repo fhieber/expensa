@@ -15,7 +15,7 @@ Each stage emits a Prediction or yields to the next.
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -313,7 +313,17 @@ class CategorizationCascade:
     def predict(self, expense_id: int) -> Prediction:
         return self.predict_batch([expense_id])[0]
 
-    def predict_batch(self, expense_ids: Sequence[int]) -> list[Prediction]:
+    def predict_batch(
+        self,
+        expense_ids: Sequence[int],
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> list[Prediction]:
+        """Predict categories for the given expense IDs.
+
+        `progress_callback`, if given, is invoked as ``cb(done, total)``
+        after each record so the UI can drive a progress bar. ``done``
+        is 1-indexed.
+        """
         if not expense_ids:
             return []
         df, emb = build_full_features(self.conn, embedder=self.embedder, expense_ids=list(expense_ids))
@@ -339,89 +349,93 @@ class CategorizationCascade:
         # Lazy-build the X matrix only if we actually need the classifier.
         X_cache = None
 
-        for eid in expense_ids:
-            if eid not in df.index:
-                out.append(
-                    Prediction(eid, None, 0.0, "unknown", notes="not found / no features")
-                )
-                continue
-            row = df.loc[eid]
-
-            # Stage 1: vendor exact match
-            if self.cfg.vendor_exact_match.enabled:
-                hit = _vendor_exact_match(
-                    self.conn,
-                    str(row.get("counterparty_normalized") or ""),
-                    self.cfg.vendor_exact_match.agreement_min,
-                )
-                if hit:
-                    cid, agreement = hit
-                    out.append(Prediction(eid, cid, agreement, "vendor_exact_match"))
-                    continue
-
-            # Stage 2: k-NN over labeled embeddings
-            if self.cfg.knn.enabled and train_vecs.shape[0] > 0:
-                # Find this row's embedding inside emb
-                target_pos = list(df.index).index(eid)
-                target_vec = emb[target_pos]
-                hit = _knn_vote(
-                    target_vec,
-                    train_vecs,
-                    train_y,
-                    k=self.cfg.knn.k,
-                    agreement_min=self.cfg.knn.agreement_min,
-                )
-                if hit:
-                    cid, conf = hit
-                    out.append(Prediction(eid, cid, conf, "knn"))
-                    continue
-
-            # Stage 3: supervised classifier
-            if self._sk is not None:
-                if X_cache is None:
-                    X_cache = _build_x(df, emb)
-                target_pos = list(df.index).index(eid)
-                proba = self._sk.predict_proba(X_cache[target_pos : target_pos + 1])[0]
-                top = int(np.argmax(proba))
-                top_conf = float(proba[top])
-                runner = int(np.argsort(proba)[-2]) if len(proba) > 1 else top
-                if top_conf >= self.cfg.classifier.confidence_threshold:
+        total = len(expense_ids)
+        for done, eid in enumerate(expense_ids, start=1):
+            try:
+                if eid not in df.index:
                     out.append(
-                        Prediction(
-                            eid,
-                            int(self._classes_[top]),
-                            top_conf,
-                            "classifier",
-                            runner_up=int(self._classes_[runner]),
-                            runner_up_confidence=float(proba[runner]),
-                        )
+                        Prediction(eid, None, 0.0, "unknown", notes="not found / no features")
                     )
                     continue
-                # If classifier is unsure, optionally fall through to zeroshot.
-                low_conf = top_conf < self.cfg.zeroshot.use_when_confidence_below
-            else:
-                low_conf = True
+                row = df.loc[eid]
 
-            # Stage 4: category similarity (zero-shot via embeddings + lexical overlap)
-            if self.cfg.category_similarity.enabled and low_conf:
-                target_pos = list(df.index).index(eid)
-                cid, conf = self._category_similarity(
-                    emb[target_pos],
-                    expense_text=str(row.get("combined_text") or ""),
-                )
-                if cid is not None:
-                    out.append(Prediction(eid, cid, conf, "category_similarity"))
-                    continue
+                # Stage 1: vendor exact match
+                if self.cfg.vendor_exact_match.enabled:
+                    hit = _vendor_exact_match(
+                        self.conn,
+                        str(row.get("counterparty_normalized") or ""),
+                        self.cfg.vendor_exact_match.agreement_min,
+                    )
+                    if hit:
+                        cid, agreement = hit
+                        out.append(Prediction(eid, cid, agreement, "vendor_exact_match"))
+                        continue
 
-            # Stage 5: zero-shot NLI (slowest fallback)
-            if self.cfg.zeroshot.enabled and low_conf:
-                cid, conf = self._zeroshot_predict(str(row.get("combined_text") or ""))
-                if cid is not None:
-                    out.append(Prediction(eid, cid, conf, "zeroshot"))
-                    continue
+                # Stage 2: k-NN over labeled embeddings
+                if self.cfg.knn.enabled and train_vecs.shape[0] > 0:
+                    target_pos = list(df.index).index(eid)
+                    target_vec = emb[target_pos]
+                    hit = _knn_vote(
+                        target_vec,
+                        train_vecs,
+                        train_y,
+                        k=self.cfg.knn.k,
+                        agreement_min=self.cfg.knn.agreement_min,
+                    )
+                    if hit:
+                        cid, conf = hit
+                        out.append(Prediction(eid, cid, conf, "knn"))
+                        continue
 
-            # Nothing fired: surface as unknown so the UI flags it.
-            out.append(Prediction(eid, None, 0.0, "unknown"))
+                # Stage 3: supervised classifier
+                if self._sk is not None:
+                    if X_cache is None:
+                        X_cache = _build_x(df, emb)
+                    target_pos = list(df.index).index(eid)
+                    proba = self._sk.predict_proba(X_cache[target_pos : target_pos + 1])[0]
+                    top = int(np.argmax(proba))
+                    top_conf = float(proba[top])
+                    runner = int(np.argsort(proba)[-2]) if len(proba) > 1 else top
+                    if top_conf >= self.cfg.classifier.confidence_threshold:
+                        out.append(
+                            Prediction(
+                                eid,
+                                int(self._classes_[top]),
+                                top_conf,
+                                "classifier",
+                                runner_up=int(self._classes_[runner]),
+                                runner_up_confidence=float(proba[runner]),
+                            )
+                        )
+                        continue
+                    low_conf = top_conf < self.cfg.zeroshot.use_when_confidence_below
+                else:
+                    low_conf = True
+
+                # Stage 4: category similarity (zero-shot via embeddings + lexical overlap)
+                if self.cfg.category_similarity.enabled and low_conf:
+                    target_pos = list(df.index).index(eid)
+                    cid, conf = self._category_similarity(
+                        emb[target_pos],
+                        expense_text=str(row.get("combined_text") or ""),
+                    )
+                    if cid is not None:
+                        out.append(Prediction(eid, cid, conf, "category_similarity"))
+                        continue
+
+                # Stage 5: zero-shot NLI (slowest fallback)
+                if self.cfg.zeroshot.enabled and low_conf:
+                    cid, conf = self._zeroshot_predict(str(row.get("combined_text") or ""))
+                    if cid is not None:
+                        out.append(Prediction(eid, cid, conf, "zeroshot"))
+                        continue
+
+                # Nothing fired: surface as unknown so the UI flags it.
+                out.append(Prediction(eid, None, 0.0, "unknown"))
+            finally:
+                # Always fire the callback, even when a stage continue'd above.
+                if progress_callback is not None:
+                    progress_callback(done, total)
 
         return out
 

@@ -783,8 +783,15 @@ with tab_data:
         if not df_.empty:
             df_["buchungsdatum"] = pd.to_datetime(df_["buchungsdatum"])
             df_["category"] = df_["category"].fillna("(unkategorisiert)")
-            df_["confidence"] = df_["confidence"].fillna("")
+            df_["confidence"] = df_["confidence"].apply(
+                lambda v: f"{float(v):.2f}" if v is not None and v == v else ""
+            )
             df_["label_source"] = df_["label_source"].fillna("")
+        # `src` is a derived emoji indicator computed from label_source. It's
+        # purely cosmetic so the user can spot model vs user labels at a glance.
+        df_["src"] = df_["label_source"].map(
+            {"user": "✅ user", "model": "🤖 model"}
+        ).fillna("")
         df_.insert(0, "Select", False)
         return df_
 
@@ -829,91 +836,107 @@ with tab_data:
         n_unlabeled = int(
             ((df["label_source"] == "") | (df["category"] == "(unkategorisiert)")).sum()
         )
-        n_confident_model = int(
-            (
-                (df["label_source"] == "model")
-                & df["confidence"].apply(_to_conf).ge(ACCEPT_CONFIDENT_THRESHOLD)
-            ).sum()
-        )
+        n_model = int((df["label_source"] == "model").sum())
+        model_conf_series = df.loc[df["label_source"] == "model", "confidence"].apply(_to_conf)
     else:
         n_unlabeled = 0
-        n_confident_model = 0
+        n_model = 0
+        model_conf_series = pd.Series(dtype=float)
 
+    # Surface source + confidence in the BASE column set (icon prefix added
+    # later in display_df). Keeps prediction status visible without needing
+    # the Extended toggle.
     base_cols = ["Select", "id", "buchungsdatum", "counterparty", "verwendungszweck",
-                 "betrag_€", "category"]
-    ext_cols = base_cols + ["label_source", "confidence", "umsatztyp",
-                            "iban_country", "iban_is_foreign", "cluster_id",
-                            "has_glaeubiger_id", "mandatsreferenz_present"]
+                 "betrag_€", "category", "src", "confidence"]
+    ext_cols = base_cols + ["umsatztyp", "iban_country", "iban_is_foreign",
+                            "cluster_id", "has_glaeubiger_id", "mandatsreferenz_present"]
     show_cols = ext_cols if extended else base_cols
 
-    # --- Batch actions (respect current filters) ---------------------------
-    if n_unlabeled > 0 or n_confident_model > 0:
-        action_cols = st.columns([2, 2, 3])
-        with action_cols[0]:
-            if n_unlabeled > 0 and st.button(
-                f"Auto-label {n_unlabeled} uncategorized",
-                type="primary",
-                key="data_auto_label_btn",
-            ):
-                unlabeled_ids = [
-                    int(x) for x in df.loc[df["label_source"] == "", "id"].tolist()
-                ]
-                with st.status(
-                    f"auto-labeling {len(unlabeled_ids)} record(s)…", expanded=True
-                ) as status:
-                    status.write(f"loading embedding model `{cfg.embedding_model}`…")
-                    emb = _embedder()
-                    cascade = CategorizationCascade(conn, cfg, emb)
-                    status.write("fitting cascade on existing user labels…")
-                    try:
-                        cascade.fit()
-                    except Exception as e:
-                        status.write(f"  fit skipped: {e}")
-                    status.write(f"predicting {len(unlabeled_ids)} record(s)…")
-                    preds = cascade.predict_batch(unlabeled_ids)
-                    n_persisted = 0
-                    for p in preds:
-                        if p.category_id is not None:
-                            add_label(
-                                conn, p.expense_id, p.category_id, "model",
-                                confidence=p.confidence,
-                            )
-                            n_persisted += 1
-                    from collections import Counter
+    def _run_autolabel(target_ids: list[int], label_text: str) -> None:
+        """Run the cascade on `target_ids`, persist model labels, mutate the
+        cached df so the table reflects new categories without re-fetching.
 
-                    stages = Counter(p.stage for p in preds)
-                    status.update(
-                        label=(
-                            f"labeled {n_persisted}/{len(preds)} record(s) · "
-                            + ", ".join(f"{k}={v}" for k, v in stages.items())
-                        ),
-                        state="complete",
+        Drives an st.progress bar via the cascade's progress_callback.
+        """
+        if not target_ids:
+            return
+        with st.status(label_text, expanded=True) as status:
+            status.write(f"loading embedding model `{cfg.embedding_model}`…")
+            emb = _embedder()
+            cascade = CategorizationCascade(conn, cfg, emb)
+            status.write("fitting cascade on the latest user labels…")
+            try:
+                cascade.fit()
+            except Exception as e:
+                status.write(f"  fit skipped: {e}")
+            status.write(f"predicting {len(target_ids)} record(s)…")
+            progress = st.progress(0, text=f"0 / {len(target_ids)}")
+
+            def _cb(done: int, total: int) -> None:
+                progress.progress(done / total, text=f"{done} / {total}")
+
+            preds = cascade.predict_batch(target_ids, progress_callback=_cb)
+            id_to_cat_name = {s.id: s.name for s in category_stats(conn)}
+            n_persisted = 0
+            for p in preds:
+                if p.category_id is not None:
+                    add_label(
+                        conn, p.expense_id, p.category_id, "model",
+                        confidence=p.confidence,
                     )
-                st.rerun()
-        with action_cols[1]:
-            if n_confident_model > 0 and st.button(
-                f"Accept {n_confident_model} ≥ {int(ACCEPT_CONFIDENT_THRESHOLD * 100)}% as user labels",
-                key="data_accept_btn",
-            ):
-                confident_rows = df[
-                    (df["label_source"] == "model")
-                    & df["confidence"].apply(_to_conf).ge(ACCEPT_CONFIDENT_THRESHOLD)
-                ]
-                n_promoted = 0
-                for _, r in confident_rows.iterrows():
-                    cid = r.get("category_id")
-                    if pd.isna(cid):
-                        continue
-                    add_label(conn, int(r["id"]), int(cid), "user")
-                    n_promoted += 1
-                st.success(f"promoted {n_promoted} prediction(s) to user labels")
-                st.rerun()
-        with action_cols[2]:
-            st.caption(
-                "Both actions apply to the rows that match the **current filters**. "
-                "Auto-label respects the cascade's confidence thresholds; the accept "
-                f"button only promotes predictions at or above {int(ACCEPT_CONFIDENT_THRESHOLD * 100)}%."
+                    # Mutate cached df so the table shows the new category
+                    # without re-fetching from the DB.
+                    if p.expense_id in df["id"].values:
+                        mask = df["id"] == p.expense_id
+                        df.loc[mask, "category"] = id_to_cat_name.get(p.category_id, "")
+                        df.loc[mask, "label_source"] = "model"
+                        df.loc[mask, "confidence"] = f"{p.confidence:.2f}"
+                        df.loc[mask, "category_id"] = p.category_id
+                    n_persisted += 1
+            progress.empty()
+            from collections import Counter
+
+            stages = Counter(p.stage for p in preds)
+            status.update(
+                label=(
+                    f"labeled {n_persisted}/{len(preds)} record(s) · "
+                    + ", ".join(f"{k}={v}" for k, v in stages.items())
+                ),
+                state="complete",
             )
+        # Remember which IDs were just predicted so we can highlight them.
+        st.session_state["data_just_predicted_ids"] = set(target_ids)
+
+    # --- Batch actions (respect current filters) ---------------------------
+    action_cols = st.columns([2, 2, 3])
+    with action_cols[0]:
+        if n_unlabeled > 0 and st.button(
+            f"Auto-label {n_unlabeled} uncategorized",
+            type="primary",
+            key="data_auto_label_btn",
+        ):
+            _run_autolabel(
+                [int(x) for x in df.loc[df["label_source"] == "", "id"].tolist()],
+                f"auto-labeling {n_unlabeled} uncategorized record(s)…",
+            )
+    with action_cols[1]:
+        if n_model > 0 and st.button(
+            f"Re-auto-label {n_model} model-source",
+            key="data_relabel_model_btn",
+            help=("Re-run the cascade on rows currently labeled by the model. "
+                  "Useful after you've added more user labels so the classifier "
+                  "is smarter."),
+        ):
+            _run_autolabel(
+                [int(x) for x in df.loc[df["label_source"] == "model", "id"].tolist()],
+                f"re-auto-labeling {n_model} model-source record(s)…",
+            )
+    with action_cols[2]:
+        st.caption(
+            "Both actions operate on the current snapshot, fit the cascade "
+            "on the latest user labels, and persist results as `source='model'`. "
+            "Use the slider below the table to accept predictions in bulk."
+        )
 
     caption_cols = st.columns([5, 1])
     caption_cols[0].caption(
@@ -957,8 +980,14 @@ with tab_data:
             required=False,
             help="Pick a category right in the cell — saves as a user label immediately.",
         ),
+        "src": st.column_config.TextColumn(
+            "Source",
+            disabled=True,
+            help="🤖 model = predicted by the cascade · ✅ user = confirmed by you.",
+            width="small",
+        ),
         "label_source": st.column_config.TextColumn("Source", disabled=True),
-        "confidence": st.column_config.TextColumn("Conf", disabled=True),
+        "confidence": st.column_config.TextColumn("Conf", disabled=True, width="small"),
         "umsatztyp": st.column_config.TextColumn("Umsatztyp", disabled=True),
         "iban_country": st.column_config.TextColumn("IBAN cc", disabled=True),
         "iban_is_foreign": st.column_config.NumberColumn("Foreign?", disabled=True),
@@ -1054,6 +1083,46 @@ with tab_data:
             if clear_sel:
                 st.session_state.pop("data_editor", None)
                 st.rerun()
+
+    # --- Accept predictions by confidence threshold ------------------------
+    if not df.empty and n_model > 0:
+        st.markdown("##### Promote predictions to user labels")
+        threshold = st.slider(
+            "Confidence threshold",
+            min_value=0.0,
+            max_value=1.0,
+            value=st.session_state.get("data_accept_threshold", ACCEPT_CONFIDENT_THRESHOLD),
+            step=0.01,
+            key="data_accept_threshold",
+            help="Slide to pick a cutoff. The button below shows how many "
+            "model-source predictions in the current snapshot meet it.",
+        )
+        n_above = int((model_conf_series >= threshold).sum())
+        accept_cols = st.columns([3, 1])
+        accept_cols[0].caption(
+            f"**{n_above}** of {n_model} model-source rows have confidence "
+            f"≥ {threshold:.2f}."
+        )
+        if accept_cols[1].button(
+            f"Accept {n_above} as user labels",
+            type="primary",
+            disabled=n_above == 0,
+            key="data_accept_slider_btn",
+        ):
+            mask = (df["label_source"] == "model") & df["confidence"].apply(_to_conf).ge(
+                threshold
+            )
+            n_promoted = 0
+            for idx in df.index[mask]:
+                cid = df.at[idx, "category_id"]
+                if pd.isna(cid):
+                    continue
+                add_label(conn, int(df.at[idx, "id"]), int(cid), "user")
+                # Mutate cached row so the table reflects the new source.
+                df.at[idx, "label_source"] = "user"
+                df.at[idx, "src"] = "✅ user"
+                n_promoted += 1
+            st.toast(f"promoted {n_promoted} prediction(s) to user labels")
 
     # --- Optional row drawer (notes + all-fields inspection) ---------------
     sel_id_text = st.text_input(
