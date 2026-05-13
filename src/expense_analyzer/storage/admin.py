@@ -102,3 +102,18 @@ def reset_all(conn: sqlite3.Connection) -> ResetReport:
     for t in tables:
         conn.execute(f"DELETE FROM {t}")
     return ResetReport(table_counts=counts)
+
+
+def delete_user_labels(conn: sqlite3.Connection) -> int:
+    """Delete every row in ``labels`` with ``source='user'``.
+
+    Useful when you want to re-run auto-label across the whole DB without
+    your previous user confirmations dominating the cascade. Model labels
+    are kept, so rows that had both a user and a model label keep their
+    visible category (via the latest_label CTE picking the remaining
+    model entry); rows that only had a user label become uncategorized.
+
+    Returns the number of rows deleted.
+    """
+    cur = conn.execute("DELETE FROM labels WHERE source = 'user'")
+    return cur.rowcount or 0

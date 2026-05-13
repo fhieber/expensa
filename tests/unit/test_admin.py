@@ -99,3 +99,49 @@ def test_reset_all_drops_categories_too(
 def test_reset_data_on_empty_db(tmp_db: sqlite3.Connection) -> None:
     report = reset_data(tmp_db)
     assert report.total == 0
+
+
+def test_delete_user_labels_keeps_model_labels(
+    tmp_db: sqlite3.Connection, fixtures_dir: Path
+) -> None:
+    """delete_user_labels() should wipe source='user' rows and leave
+    source='model' rows alone, so subsequent latest_label queries fall
+    back to the model entry."""
+    from expense_analyzer.storage.admin import delete_user_labels
+
+    ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
+    food = upsert_category(tmp_db, "Food")
+    other = upsert_category(tmp_db, "Other")
+    # Pick a row, give it both a model label (older) and a user label (newer).
+    eid = int(
+        tmp_db.execute("SELECT id FROM expenses LIMIT 1").fetchone()["id"]
+    )
+    add_label(tmp_db, eid, other, "model", confidence=0.4)
+    add_label(tmp_db, eid, food, "user")
+
+    n_user_before = tmp_db.execute(
+        "SELECT COUNT(*) AS n FROM labels WHERE source='user'"
+    ).fetchone()["n"]
+    n_model_before = tmp_db.execute(
+        "SELECT COUNT(*) AS n FROM labels WHERE source='model'"
+    ).fetchone()["n"]
+    assert n_user_before == 1
+    assert n_model_before == 1
+
+    n_deleted = delete_user_labels(tmp_db)
+    assert n_deleted == 1
+
+    n_user_after = tmp_db.execute(
+        "SELECT COUNT(*) AS n FROM labels WHERE source='user'"
+    ).fetchone()["n"]
+    n_model_after = tmp_db.execute(
+        "SELECT COUNT(*) AS n FROM labels WHERE source='model'"
+    ).fetchone()["n"]
+    assert n_user_after == 0
+    assert n_model_after == 1  # model entries kept
+
+
+def test_delete_user_labels_returns_zero_when_empty(tmp_db: sqlite3.Connection) -> None:
+    from expense_analyzer.storage.admin import delete_user_labels
+
+    assert delete_user_labels(tmp_db) == 0

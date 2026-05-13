@@ -1383,6 +1383,30 @@ with tab_settings:
         st.info("Vendor lookup is OFF. Set `vendor_lookup.enabled: true` in your config to enable.")
 
     st.subheader(":red[Danger zone — clear data]")
+    with st.expander("Delete all user labels", expanded=False):
+        from expense_analyzer.storage.admin import delete_user_labels as _del_user_labels
+
+        n_user_labels = conn.execute(
+            "SELECT COUNT(*) AS n FROM labels WHERE source='user'"
+        ).fetchone()["n"]
+        st.write(
+            f"Currently **{n_user_labels}** row(s) in `labels` with `source='user'`. "
+            "Deleting them lets you re-run Auto-label across the whole DB without "
+            "your previous confirmations dominating the cascade. Model labels stay, "
+            "so rows that have both keep their visible category via the remaining "
+            "model entry; rows that had **only** a user label become uncategorized."
+        )
+        confirm_user = st.text_input(
+            "Type `delete user labels` to confirm", key="confirm_delete_user_labels"
+        )
+        if st.button("Delete all user labels", type="secondary"):
+            if confirm_user.strip().lower() == "delete user labels":
+                n = _del_user_labels(conn)
+                st.success(f"deleted {n} user label row(s)")
+                st.rerun()
+            else:
+                st.error("type the confirmation phrase exactly")
+
     with st.expander("Clear ingested expenses + ML state", expanded=False):
         st.write(
             "Deletes every row in `expenses`, `labels`, `notes`, `embeddings`, "
