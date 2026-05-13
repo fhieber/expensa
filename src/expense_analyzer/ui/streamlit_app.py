@@ -309,11 +309,11 @@ with tab_dash:
                 },
             )
 
-        # General "show everything in current view" expander
+        # General "show everything in current view" expander (default open)
         with st.expander(
             f"All records contributing to this dashboard view "
             f"({'all dates' if since is None and until is None else f'{since} … {until}'})",
-            expanded=False,
+            expanded=True,
         ):
             params: list = []
             clauses = ["e.is_income = 0"]
@@ -332,18 +332,68 @@ with tab_dash:
             if not full_df.empty:
                 full_df["buchungsdatum"] = pd.to_datetime(full_df["buchungsdatum"])
                 full_df["category"] = full_df["category"].fillna("(unkategorisiert)")
-            st.caption(f"{len(full_df)} record(s)")
-            st.dataframe(
-                full_df,
+            st.caption(f"{len(full_df)} record(s) · click a Category cell to relabel")
+
+            # Inline Category editing here uses the same pattern as the
+            # Data tab: a SelectboxColumn with alphabetical category options.
+            dash_cats = list_categories(conn)
+            dash_cat_id_by_name = {c.name: c.id for c in dash_cats}
+            dash_cat_options = [""] + sorted(c.name for c in dash_cats)
+            display_full_df = full_df.copy()
+            if not display_full_df.empty:
+                display_full_df.loc[
+                    display_full_df["category"] == "(unkategorisiert)", "category"
+                ] = ""
+            dash_edited = st.data_editor(
+                display_full_df,
                 hide_index=True,
                 width="stretch",
                 column_config={
+                    "id": st.column_config.NumberColumn("ID", disabled=True, width="small"),
                     "buchungsdatum": st.column_config.DateColumn(
-                        "Date", format="DD.MM.YYYY"
+                        "Date", disabled=True, format="DD.MM.YYYY"
                     ),
-                    "betrag_€": st.column_config.NumberColumn("Amount €", format="%.2f"),
+                    "counterparty": st.column_config.TextColumn(
+                        "Counterparty", disabled=True
+                    ),
+                    "verwendungszweck": st.column_config.TextColumn(
+                        "Verwendungszweck", disabled=True
+                    ),
+                    "betrag_€": st.column_config.NumberColumn(
+                        "Amount €", disabled=True, format="%.2f"
+                    ),
+                    "category": st.column_config.SelectboxColumn(
+                        "Category",
+                        options=dash_cat_options,
+                        required=False,
+                    ),
+                    "iban_country": st.column_config.TextColumn(
+                        "IBAN cc", disabled=True
+                    ),
                 },
+                disabled=[c for c in display_full_df.columns if c != "category"],
+                key="dashboard_records_editor",
             )
+
+            # Diff against the source df; persist any category changes.
+            if not full_df.empty:
+                dash_changed = 0
+                for idx in full_df.index:
+                    new_val = str(dash_edited.at[idx, "category"] or "").strip()
+                    if not new_val:
+                        continue
+                    old_val = str(full_df.at[idx, "category"] or "").strip()
+                    if old_val == "(unkategorisiert)":
+                        old_val = ""
+                    if new_val == old_val:
+                        continue
+                    cid = dash_cat_id_by_name.get(new_val)
+                    if cid is None:
+                        continue
+                    add_label(conn, int(full_df.at[idx, "id"]), cid, "user")
+                    dash_changed += 1
+                if dash_changed:
+                    st.toast(f"saved {dash_changed} label change(s)")
 
 
 # ---------------------------------------------------------------------------
