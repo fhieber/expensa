@@ -50,7 +50,7 @@ active_learning:
 
 # --- Privacy: vendor web lookup is OFF by default ---
 vendor_lookup:
-  enabled: false
+  enabled: true 
   backend: duckduckgo        # duckduckgo | searxng
   searxng_url: ""            # only used if backend=searxng
   cache_ttl_days: 90

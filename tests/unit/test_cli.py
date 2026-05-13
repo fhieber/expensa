@@ -115,6 +115,12 @@ def test_train_with_mocked_embedder(tmp_path: Path, fixtures_dir: Path) -> None:
 def test_vendor_lookup_disabled_message(tmp_path: Path) -> None:
     runner = CliRunner()
     runner.invoke(cli, ["init"], env=_runner_env(tmp_path))
+    # Write a user config that explicitly disables vendor lookup so the test
+    # doesn't depend on the bundled default.
+    (tmp_path / "config.yaml").write_text(
+        "vendor_lookup:\n  enabled: false\n",
+        encoding="utf-8",
+    )
     r = runner.invoke(cli, ["vendor-lookup", "REWE"], env=_runner_env(tmp_path))
     assert r.exit_code != 0
     assert "enabled is False" in r.output

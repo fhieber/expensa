@@ -531,14 +531,12 @@ if "import_step" not in st.session_state:
     st.session_state.import_step = "upload"
     st.session_state.import_new_ids = []
     st.session_state.import_predictions = {}  # expense_id -> Prediction
-    st.session_state.import_overrides = {}    # expense_id -> category_name (user override)
 
 
 def _reset_import_state() -> None:
     st.session_state.import_step = "upload"
     st.session_state.import_new_ids = []
     st.session_state.import_predictions = {}
-    st.session_state.import_overrides = {}
     # Drop the data_editor session state too so a fresh review doesn't
     # carry stale row-index edits from the previous batch.
     st.session_state.pop("import_editor", None)
@@ -645,22 +643,10 @@ with tab_import:
             # data_editor's scroll / focus position.
 
         # --- Compact review table -------------------------------------------
-        # IMPORTANT: dropdown options must be in a STABLE order across reruns.
-        # list_categories(conn) is already ORDER BY name in SQL, but we sort
-        # again here defensively in case anyone changes that.
-        cats = sorted(list_categories(conn), key=lambda c: c.name)
+        cats = list_categories(conn)
         cat_options_for_editor = [""] + [c.name for c in cats]
         cat_id_by_name = {c.name: c.id for c in cats}
         cats_by_id = {c.id: c.name for c in cats}
-
-        # Per-eid manual overrides. The data_editor's own session state can
-        # drop edits when its cached column config invalidates, so we keep
-        # our own copy of "what the user has picked" and feed it into the
-        # input dataframe each render. This is the same trick that fixed
-        # the Data tab's inline-edit reset.
-        import_overrides: dict[int, str] = st.session_state.setdefault(
-            "import_overrides", {}
-        )
 
         ph = ",".join("?" * len(new_ids))
         rows_df = pd.read_sql_query(
@@ -691,17 +677,11 @@ with tab_import:
                 "unknown": "⚪",
             }.get(stage or "", "")
 
-        # Resolve current prediction (or override) per row. Priority:
-        # user override > model prediction > empty.
+        # Resolve current prediction per row.
         predicted_names: list[str] = []
         confidences: list[str] = []
         stages_visible: list[str] = []
         for eid in rows_df["id"].astype(int).tolist():
-            if eid in import_overrides:
-                predicted_names.append(import_overrides[eid])
-                confidences.append("1.00")
-                stages_visible.append("✏ manual")
-                continue
             p = preds_dict.get(eid)
             if p is None or p.category_id is None:
                 predicted_names.append("")
@@ -769,58 +749,32 @@ with tab_import:
             key="import_editor",
         )
 
-        # Sync the user's current Category picks back into import_overrides.
-        # Only record values that differ from the prediction / current value.
-        # This keeps import_overrides the source of truth for "what to save",
-        # independent of whether the data_editor has retained its overlay.
-        if not rows_df.empty:
-            for idx in rows_df.index:
-                eid = int(rows_df.at[idx, "id"])
-                new_val = str(edited.at[idx, "Category"] or "").strip()
-                rendered_val = str(rows_df.at[idx, "Category"] or "").strip()
-                if new_val != rendered_val:
-                    if new_val:
-                        import_overrides[eid] = new_val
-                    else:
-                        import_overrides.pop(eid, None)
-
-        def _resolve_save_category(eid: int) -> int | None:
-            """Pick the category_id to save for an eid: user override beats
-            model prediction. Returns None if neither yields a category."""
-            if eid in import_overrides:
-                return cat_id_by_name.get(import_overrides[eid])
-            p = preds_dict.get(eid)
-            if p is not None and p.category_id is not None:
-                return int(p.category_id)
-            return None
-
         if accept_confident:
             n_promoted = 0
-            for eid in new_ids:
-                if eid in import_overrides:
-                    # User manually picked -> count as confident regardless.
-                    cid = cat_id_by_name.get(import_overrides[eid])
-                    if cid is not None:
-                        add_label(conn, eid, cid, "user")
-                        n_promoted += 1
-                else:
-                    p = preds_dict.get(eid)
-                    if (
-                        p is not None
-                        and p.category_id is not None
-                        and float(p.confidence) >= ACCEPT_CONFIDENT_THRESHOLD
-                    ):
-                        add_label(conn, eid, int(p.category_id), "user")
+            for _, r in edited.iterrows():
+                eid = int(r["id"])
+                p = preds_dict.get(eid)
+                if p is None or p.category_id is None:
+                    continue
+                if float(p.confidence) >= ACCEPT_CONFIDENT_THRESHOLD:
+                    chosen_name = r["Category"] or cats_by_id.get(p.category_id, "")
+                    chosen_cid = cat_id_by_name.get(chosen_name)
+                    if chosen_cid is not None:
+                        add_label(conn, eid, chosen_cid, "user")
                         n_promoted += 1
             st.success(f"promoted {n_promoted} prediction(s) to user labels")
 
         if save_all:
             n_promoted = 0
-            for eid in new_ids:
-                cid = _resolve_save_category(eid)
-                if cid is not None:
-                    add_label(conn, eid, cid, "user")
-                    n_promoted += 1
+            for _, r in edited.iterrows():
+                chosen_name = r["Category"]
+                if not chosen_name:
+                    continue
+                chosen_cid = cat_id_by_name.get(chosen_name)
+                if chosen_cid is None:
+                    continue
+                add_label(conn, int(r["id"]), chosen_cid, "user")
+                n_promoted += 1
             st.success(f"saved {n_promoted} user label(s)")
 
         if done:
@@ -935,116 +889,36 @@ with tab_data:
 
     extended = st.toggle("Extended columns", value=False, key="data_extended")
 
-    # --- Snapshot the row set when filters change ---------------------------
-    # The Data tab supports inline category editing. Without snapshotting,
-    # editing a row whose new category no longer matches the active filter
-    # (e.g. you filter "unlabeled" and label one) would make it disappear on
-    # the next render, reshuffling the table. We therefore fix the row set
-    # at the moment the filters change, and only refresh it when the user
-    # actually changes a filter (or clicks "Refresh filter" below).
-    filter_signature = (
-        str(date_from) if date_from else "",
-        str(date_to) if date_to else "",
-        tuple(picked_cats),
-        source,
-        search.strip(),
-        amount_min if amount_min > 0 else 0.0,
-        amount_max if amount_max is not None else -1.0,
-        bool(include_income),
+    # Build the display df from the current filters every render. Simple and
+    # straightforward: any DB write (inline save, auto-label, bulk apply)
+    # shows up immediately on the next interaction.
+    sql, params = _build_data_query(
+        date_from or None, date_to or None,
+        picked_cats, source, search.strip(),
+        amount_min if amount_min > 0 else None, amount_max,
+        include_income,
     )
-    def _fetch_snapshot_df(ids: list[int]) -> pd.DataFrame:
-        if not ids:
-            return pd.DataFrame(
-                columns=[
-                    "id", "buchungsdatum", "counterparty", "verwendungszweck",
-                    "betrag_€", "category", "category_id", "label_source",
-                    "confidence", "umsatztyp", "iban_country", "iban_is_foreign",
-                    "cluster_id", "has_glaeubiger_id", "mandatsreferenz_present",
-                    "Select",
-                ]
-            )
-        ph_ids = ",".join("?" * len(ids))
-        df_ = pd.read_sql_query(
-            f"""
-            WITH latest_label AS (
-                SELECT l.expense_id, l.category_id, l.source, l.confidence
-                FROM labels l
-                JOIN (
-                    SELECT expense_id, MAX(id) AS max_id
-                    FROM labels GROUP BY expense_id
-                ) m ON l.id = m.max_id
-            )
-            SELECT
-                e.id, e.buchungsdatum, e.counterparty, e.verwendungszweck,
-                e.betrag_cents / 100.0 AS "betrag_€",
-                c.name AS category, ll.category_id AS category_id,
-                ll.source AS label_source, ll.confidence,
-                e.umsatztyp, e.iban_country, e.iban_is_foreign,
-                e.cluster_id,
-                e.has_glaeubiger_id, e.mandatsreferenz_present
-            FROM expenses e
-            LEFT JOIN latest_label ll ON ll.expense_id = e.id
-            LEFT JOIN categories c ON c.id = ll.category_id
-            WHERE e.id IN ({ph_ids})
-            ORDER BY e.buchungsdatum DESC, e.id DESC
-            """,
-            conn,
-            params=ids,
+    df = pd.read_sql_query(sql, conn, params=params)
+    if not df.empty:
+        df["buchungsdatum"] = pd.to_datetime(df["buchungsdatum"])
+        df["category"] = df["category"].fillna("(unkategorisiert)")
+        df["confidence"] = df["confidence"].apply(
+            lambda v: f"{float(v):.2f}" if v is not None and v == v else ""
         )
-        if not df_.empty:
-            df_["buchungsdatum"] = pd.to_datetime(df_["buchungsdatum"])
-            df_["category"] = df_["category"].fillna("(unkategorisiert)")
-            df_["confidence"] = df_["confidence"].apply(
-                lambda v: f"{float(v):.2f}" if v is not None and v == v else ""
-            )
-            df_["label_source"] = df_["label_source"].fillna("")
-        # `src` is a derived emoji indicator computed from label_source. It's
-        # purely cosmetic so the user can spot model vs user labels at a glance.
-        df_["src"] = df_["label_source"].map(
-            {"user": "✅ user", "model": "🤖 model"}
-        ).fillna("")
-        df_.insert(0, "Select", False)
-        return df_
+        df["label_source"] = df["label_source"].fillna("")
+    df["src"] = df["label_source"].map(
+        {"user": "✅ user", "model": "🤖 model"}
+    ).fillna("")
+    df.insert(0, "Select", False)
 
-    if (
-        st.session_state.get("data_filter_signature") != filter_signature
-        or st.session_state.pop("data_force_refresh", False)
-    ):
-        # Filters changed (or user clicked refresh): re-snapshot the IDs and
-        # cache a fresh display dataframe.
-        id_sql, id_params = _build_data_query(
-            date_from or None, date_to or None,
-            picked_cats, source, search.strip(),
-            amount_min if amount_min > 0 else None, amount_max,
-            include_income,
-        )
-        id_df = pd.read_sql_query(id_sql, conn, params=id_params)
-        snapshot_ids = id_df["id"].astype(int).tolist() if not id_df.empty else []
-        st.session_state.data_snapshot_ids = snapshot_ids
-        st.session_state.data_filter_signature = filter_signature
-        st.session_state["data_view_df"] = _fetch_snapshot_df(snapshot_ids)
-        # Wipe the data_editor cache so stale row-index edits don't apply.
-        st.session_state.pop("data_editor", None)
-        # And the saved-category tracker -- new snapshot, new state.
-        st.session_state.pop("data_last_saved_categories", None)
-
-    # Cached display df. We mutate this in place on edits so the data_editor
-    # sees an identical input object between renders -- key to keeping scroll
-    # position and avoiding visible re-mounts.
-    df: pd.DataFrame = st.session_state.get("data_view_df")
-    if df is None:
-        df = _fetch_snapshot_df(st.session_state.get("data_snapshot_ids", []))
-        st.session_state["data_view_df"] = df
-
-    # Counts BEFORE the fillna pass below, so we can use NaN semantics.
     def _to_conf(v) -> float:
         try:
             return float(v)
         except (TypeError, ValueError):
             return 0.0
 
-    # Counts are computed against the cached snapshot df; "(unkategorisiert)"
-    # is the in-cache sentinel for an unlabeled row (set by _fetch_snapshot_df).
+    # Counts on the freshly-queried df. "(unkategorisiert)" is the fillna
+    # sentinel for an unlabeled row.
     if not df.empty:
         n_unlabeled = int(
             ((df["label_source"] == "") | (df["category"] == "(unkategorisiert)")).sum()
@@ -1089,7 +963,6 @@ with tab_data:
                 progress.progress(done / total, text=f"{done} / {total}")
 
             preds = cascade.predict_batch(target_ids, progress_callback=_cb)
-            id_to_cat_name = {s.id: s.name for s in category_stats(conn)}
             n_persisted = 0
             for p in preds:
                 if p.category_id is not None:
@@ -1097,14 +970,6 @@ with tab_data:
                         conn, p.expense_id, p.category_id, "model",
                         confidence=p.confidence,
                     )
-                    # Mutate cached df so the table shows the new category
-                    # without re-fetching from the DB.
-                    if p.expense_id in df["id"].values:
-                        mask = df["id"] == p.expense_id
-                        df.loc[mask, "category"] = id_to_cat_name.get(p.category_id, "")
-                        df.loc[mask, "label_source"] = "model"
-                        df.loc[mask, "confidence"] = f"{p.confidence:.2f}"
-                        df.loc[mask, "category_id"] = p.category_id
                     n_persisted += 1
             progress.empty()
             from collections import Counter
@@ -1117,8 +982,7 @@ with tab_data:
                 ),
                 state="complete",
             )
-        # Remember which IDs were just predicted so we can highlight them.
-        st.session_state["data_just_predicted_ids"] = set(target_ids)
+        st.rerun()
 
     # --- Batch actions (respect current filters) ---------------------------
     action_cols = st.columns([2, 2, 3])
@@ -1151,17 +1015,10 @@ with tab_data:
             "Use the slider below the table to accept predictions in bulk."
         )
 
-    caption_cols = st.columns([5, 1])
-    caption_cols[0].caption(
-        f"{len(df)} record(s) in current snapshot · "
-        "click the **Category** cell to change a label inline — saves immediately. "
-        "Rows stay in the table after labeling so the view doesn't shuffle while you work. "
-        "The **Source** and **Conf** columns refresh from the DB only on **Refresh filter** "
-        "(deferred so unrelated inline edits don't lose focus)."
+    st.caption(
+        f"{len(df)} record(s) match the filters · "
+        "click the **Category** cell to change a label inline — saves immediately."
     )
-    if caption_cols[1].button("Refresh filter", help="Re-run the filter against the latest DB state."):
-        st.session_state["data_force_refresh"] = True
-        st.rerun()
 
     # --- Inline-editable table ----------------------------------------------
     # Use ALPHABETICAL order here, NOT the stats-derived order from
@@ -1240,34 +1097,23 @@ with tab_data:
         key="data_editor",
     )
 
-    # Persist inline Category edits. We deliberately do NOT mutate any
-    # cell of the cached df: Streamlit's data_editor receives the entire
-    # input dataframe and treats *any* changed cell -- even in a
-    # disabled column like Source / Conf -- as a reason to reconcile and
-    # silently drop in-flight edits in OTHER rows. That was the root
-    # cause of "after the 2nd/3rd Enter the table flips/changes".
-    #
-    # Trade-off: the Source / Conf cells stay visually stale after an
-    # inline save until the user clicks Refresh filter (which rebuilds
-    # the snapshot from the DB). The Category column itself updates
-    # because Streamlit's own session_state overlay paints it.
-    last_saved: dict[int, str] = st.session_state.setdefault(
-        "data_last_saved_categories", {}
-    )
+    # Persist inline Category edits. Simple: if the edited value differs
+    # from what's in the input df for that row, write it to the DB.
     if not df.empty:
         changed_count = 0
         for idx in df.index:
-            eid = int(df.at[idx, "id"])
             new_val = str(edited_df.at[idx, "category"] or "").strip()
             if not new_val:
                 continue
-            if last_saved.get(eid) == new_val:
-                continue  # already persisted exactly this value
+            old_val = str(df.at[idx, "category"] or "").strip()
+            if old_val == "(unkategorisiert)":
+                old_val = ""
+            if new_val == old_val:
+                continue
             cid = cat_id_by_name.get(new_val)
             if cid is None:
                 continue
-            add_label(conn, eid, cid, "user")
-            last_saved[eid] = new_val
+            add_label(conn, int(df.at[idx, "id"]), cid, "user")
             changed_count += 1
         if changed_count:
             st.toast(f"saved {changed_count} label change(s)")
@@ -1299,10 +1145,6 @@ with tab_data:
                 if cid is not None:
                     for idx in edited_df.index[sel_mask]:
                         add_label(conn, int(df.at[idx, "id"]), cid, "user")
-                        df.at[idx, "category"] = bulk_new_cat
-                        df.at[idx, "label_source"] = "user"
-                        df.at[idx, "confidence"] = ""
-                        df.at[idx, "category_id"] = cid
                     st.toast(f"set {bulk_new_cat} on {n_selected} row(s)")
                     # Clear data_editor's session state so the unticked
                     # checkboxes show; this rerun is intentional and only
@@ -1348,11 +1190,6 @@ with tab_data:
                     continue
                 add_label(conn, int(df.at[idx, "id"]), int(cid), "user")
                 n_promoted += 1
-            # No cell mutation here either, for the same reason as
-            # inline edits: any df change reconciles the data_editor
-            # and can drop in-flight overlays in other rows. Source /
-            # Conf will reflect the promotion after the next snapshot
-            # rebuild (Refresh filter, or a filter change).
             st.toast(f"promoted {n_promoted} prediction(s) to user labels")
 
     # --- Optional row drawer (notes + all-fields inspection) ---------------

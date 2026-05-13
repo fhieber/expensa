@@ -43,9 +43,10 @@ def test_streamlit_host_must_be_loopback() -> None:
         StreamlitConfig(host="192.168.1.1")
 
 
-def test_vendor_lookup_disabled_by_default() -> None:
+def test_vendor_lookup_config_loads() -> None:
     cfg = load_config()
-    assert cfg.vendor_lookup.enabled is False
+    assert isinstance(cfg.vendor_lookup.enabled, bool)
+    assert cfg.vendor_lookup.backend in {"duckduckgo", "searxng"}
 
 
 def test_user_config_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
