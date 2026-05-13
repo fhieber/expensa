@@ -1,12 +1,13 @@
 """Streamlit UI — local-only (binds to 127.0.0.1 via the CLI launcher).
 
 Tabs, in order:
-  1. Dashboard  — overview stats.
+  1. Dashboard  — overview stats, inline-editable records list.
   2. Categories — types table with per-category stats, add/remove.
-  3. Import     — upload CSV → inspect new rows → auto-label → accept/review.
-  4. Data       — sortable/filterable table; row drawer for full record + notes.
-  5. Clusters   — HDBSCAN exploration.
-  6. Settings   — model info, privacy, danger zone.
+  3. Data       — sortable/filterable table; inline category edit;
+                  selection-driven Auto-Label flow. Upload+ingest lives in
+                  a collapsed "Import CSV" expander at the top.
+  4. Clusters   — HDBSCAN exploration.
+  5. Settings   — model info, privacy, danger zone.
 
 No sidebar by design — everything lives in tabs.
 """
@@ -26,8 +27,8 @@ from expense_analyzer.features.embeddings import (
     HashEmbedder,
     SentenceTransformerEmbedder,
 )
-from expense_analyzer.ingestion import IngestReport, ingest_csv
-from expense_analyzer.ml.classifier import CategorizationCascade, Prediction
+from expense_analyzer.ingestion import ingest_csv
+from expense_analyzer.ml.classifier import CategorizationCascade
 from expense_analyzer.ml.clustering import cluster_all
 from expense_analyzer.storage.admin import (
     category_removal_impact,
@@ -148,8 +149,8 @@ def _render_header() -> None:
 
 _render_header()
 
-tab_dash, tab_cats, tab_import, tab_data, tab_clusters, tab_settings = st.tabs(
-    ["Dashboard", "Categories", "Import", "Data", "Clusters", "Settings"]
+tab_dash, tab_cats, tab_data, tab_clusters, tab_settings = st.tabs(
+    ["Dashboard", "Categories", "Data", "Clusters", "Settings"]
 )
 
 
@@ -215,7 +216,7 @@ with tab_dash:
     st.header("Dashboard")
     n_exp = conn.execute("SELECT COUNT(*) AS n FROM expenses").fetchone()["n"]
     if n_exp == 0:
-        st.info("Import a CSV from the **Import** tab to get started.")
+        st.info("Import a CSV from the **Data** tab's *Import CSV* expander to get started.")
     else:
         preset = st.radio(
             "Date range",
@@ -574,276 +575,61 @@ with tab_cats:
 
 
 # ---------------------------------------------------------------------------
-# Tab 3: Import
+# Tab 3: Data
 # ---------------------------------------------------------------------------
-
-if "import_step" not in st.session_state:
-    st.session_state.import_step = "upload"
-    st.session_state.import_new_ids = []
-    st.session_state.import_predictions = {}  # expense_id -> Prediction
-
-
-def _reset_import_state() -> None:
-    st.session_state.import_step = "upload"
-    st.session_state.import_new_ids = []
-    st.session_state.import_predictions = {}
-    # Drop the data_editor session state too so a fresh review doesn't
-    # carry stale row-index edits from the previous batch.
-    st.session_state.pop("import_editor", None)
-
-
-with tab_import:
-    st.header("Import")
-
-    if st.session_state.import_step == "upload":
-        st.write("Upload one or more German bank-export CSVs (`;` separator, comma decimal).")
-        files = st.file_uploader(
-            "CSV file(s)", accept_multiple_files=True, type=["csv"]
-        )
-        cols = st.columns(2)
-        with cols[0]:
-            ingest_clicked = st.button(
-                "Ingest", type="primary", disabled=not files
-            )
-        with cols[1]:
-            st.caption(
-                "Features (text, IBAN, numeric, embedding) are computed at import "
-                "time, so subsequent steps are fast."
-            )
-
-        if ingest_clicked and files:
-            import tempfile
-
-            emb = _embedder()
-            reports: list[IngestReport] = []
-            new_ids: list[int] = []
-            with st.status("Importing…", expanded=True) as status:
-                for f in files:
-                    status.write(f"parsing {f.name}…")
-                    with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tmp:
-                        tmp.write(f.read())
-                        p = Path(tmp.name)
-                    status.write(f"ingesting + embedding {f.name}…")
-                    r = ingest_csv(conn, p, embedder=emb)
-                    reports.append(r)
-                    new_ids.extend(r.new_ids)
-                    status.write(
-                        f"{f.name}: parsed={r.parsed} new={r.inserted} "
-                        f"duplicate={r.duplicates} embedded={r.embedded}"
-                    )
-                status.update(label=f"Imported {sum(r.inserted for r in reports)} new row(s).", state="complete")
-            st.session_state.import_new_ids = new_ids
-            if new_ids:
-                st.session_state.import_step = "review"
-                st.rerun()
-            else:
-                st.info("Nothing new — all records were duplicates.")
-
-    else:  # review step
-        new_ids = st.session_state.import_new_ids
-        if not new_ids:
-            _reset_import_state()
-            st.rerun()
-
-        st.write(
-            f"**{len(new_ids)} new record(s)** ingested. Click **Auto-label** to "
-            "have the cascade predict, then edit any wrong Category cell inline "
-            "and click **Save labels** to commit."
-        )
-
-        # --- Action buttons (above the table for visibility) ----------------
-        preds_dict: dict[int, Prediction] = st.session_state.import_predictions
-        has_preds = bool(preds_dict)
-        c1, c2, c3, c4 = st.columns([1, 1.4, 1.4, 1])
-        run_auto = c1.button("Auto-label", type="primary")
-        accept_confident = c2.button(
-            f"Save ≥ {int(ACCEPT_CONFIDENT_THRESHOLD * 100)}% confident as user labels",
-            disabled=not has_preds,
-        )
-        save_all = c3.button("Save all visible categories as user labels", disabled=not has_preds)
-        done = c4.button("Done", help="Exit. Predictions stay as `model` labels until accepted later.")
-
-        if run_auto:
-            emb = _embedder()
-            cascade = CategorizationCascade(conn, cfg, emb)
-            with st.status("Predicting…", expanded=True) as status:
-                status.write(f"loading embedding model `{cfg.embedding_model}`…")
-                try:
-                    cascade.fit()
-                except Exception as e:
-                    status.write(f"  fit skipped: {e}")
-                status.write(f"predicting {len(new_ids)} record(s)…")
-                preds = cascade.predict_batch(new_ids)
-                from collections import Counter
-
-                stages = Counter(p.stage for p in preds)
-                st.session_state.import_predictions = {p.expense_id: p for p in preds}
-                for p in preds:
-                    if p.category_id is not None:
-                        add_label(conn, p.expense_id, p.category_id, "model",
-                                  confidence=p.confidence)
-                status.update(
-                    label=", ".join(f"{k}={v}" for k, v in stages.items()),
-                    state="complete",
-                )
-            # No explicit st.rerun(): predictions are already in
-            # session_state.import_predictions, so when execution falls
-            # through to the table render below it picks them up. Skipping
-            # the rerun avoids a second full re-render that resets the
-            # data_editor's scroll / focus position.
-
-        # --- Compact review table -------------------------------------------
-        cats = list_categories(conn)
-        cat_options_for_editor = [""] + [c.name for c in cats]
-        cat_id_by_name = {c.name: c.id for c in cats}
-        cats_by_id = {c.id: c.name for c in cats}
-
-        ph = ",".join("?" * len(new_ids))
-        rows_df = pd.read_sql_query(
-            f"""
-            SELECT id, buchungsdatum, counterparty, verwendungszweck,
-                   betrag_cents / 100.0 AS "Betrag €",
-                   amount_bucket, iban_country, umsatztyp,
-                   has_glaeubiger_id, mandatsreferenz_present
-            FROM expenses
-            WHERE id IN ({ph})
-            ORDER BY buchungsdatum, id
-            """,
-            conn,
-            params=new_ids,
-        )
-        # Keep the date as a real datetime so sorting works numerically;
-        # the column_config below formats it as DD.MM.YYYY for display.
-        if not rows_df.empty:
-            rows_df["buchungsdatum"] = pd.to_datetime(rows_df["buchungsdatum"])
-
-        def _stage_glyph(stage: str | None) -> str:
-            return {
-                "vendor_exact_match": "🟢",
-                "knn": "🟢",
-                "classifier": "🟡",
-                "category_similarity": "🟡",
-                "zeroshot": "🟠",
-                "unknown": "⚪",
-            }.get(stage or "", "")
-
-        # Resolve current prediction per row.
-        predicted_names: list[str] = []
-        confidences: list[str] = []
-        stages_visible: list[str] = []
-        for eid in rows_df["id"].astype(int).tolist():
-            p = preds_dict.get(eid)
-            if p is None or p.category_id is None:
-                predicted_names.append("")
-                confidences.append("")
-                stages_visible.append("")
-            else:
-                predicted_names.append(cats_by_id.get(p.category_id, ""))
-                confidences.append(f"{p.confidence:.2f}")
-                stages_visible.append(f"{_stage_glyph(p.stage)} {p.stage}")
-        rows_df["Category"] = predicted_names
-        rows_df["Conf"] = confidences
-        rows_df["Stage"] = stages_visible
-
-        extended = st.toggle("Extended columns", value=False, key="import_extended")
-        if extended:
-            show_cols = [
-                "id", "buchungsdatum", "counterparty", "verwendungszweck",
-                "Betrag €", "Category", "Conf", "Stage",
-                "amount_bucket", "umsatztyp", "iban_country",
-                "has_glaeubiger_id", "mandatsreferenz_present",
-            ]
-        else:
-            show_cols = [
-                "id", "buchungsdatum", "counterparty", "verwendungszweck",
-                "Betrag €", "Category", "Conf", "Stage",
-            ]
-
-        column_config = {
-            "id": st.column_config.NumberColumn("ID", disabled=True, width="small"),
-            "buchungsdatum": st.column_config.DateColumn(
-                "Date", disabled=True, format="DD.MM.YYYY"
-            ),
-            "counterparty": st.column_config.TextColumn("Counterparty", disabled=True),
-            "verwendungszweck": st.column_config.TextColumn(
-                "Verwendungszweck", disabled=True, width="large"
-            ),
-            "Betrag €": st.column_config.NumberColumn(
-                "Amount €", disabled=True, format="%.2f"
-            ),
-            "Category": st.column_config.SelectboxColumn(
-                "Category",
-                options=cat_options_for_editor,
-                required=False,
-                help="Override the prediction (or fill one in when the cascade abstained).",
-            ),
-            "Conf": st.column_config.TextColumn("Conf", disabled=True, width="small"),
-            "Stage": st.column_config.TextColumn("Stage", disabled=True),
-            "amount_bucket": st.column_config.TextColumn("Bucket", disabled=True),
-            "umsatztyp": st.column_config.TextColumn("Umsatztyp", disabled=True),
-            "iban_country": st.column_config.TextColumn("IBAN cc", disabled=True),
-            "has_glaeubiger_id": st.column_config.NumberColumn("Gläubiger?", disabled=True),
-            "mandatsreferenz_present": st.column_config.NumberColumn(
-                "Mandat?", disabled=True
-            ),
-        }
-        editor_disabled = [c for c in show_cols if c != "Category"]
-
-        edited = st.data_editor(
-            rows_df[show_cols],
-            column_config=column_config,
-            disabled=editor_disabled,
-            hide_index=True,
-            width="stretch",
-            height=min(420, 60 + 35 * len(rows_df)),
-            key="import_editor",
-        )
-
-        if accept_confident:
-            n_promoted = 0
-            for _, r in edited.iterrows():
-                eid = int(r["id"])
-                p = preds_dict.get(eid)
-                if p is None or p.category_id is None:
-                    continue
-                if float(p.confidence) >= ACCEPT_CONFIDENT_THRESHOLD:
-                    chosen_name = r["Category"] or cats_by_id.get(p.category_id, "")
-                    chosen_cid = cat_id_by_name.get(chosen_name)
-                    if chosen_cid is not None:
-                        add_label(conn, eid, chosen_cid, "user")
-                        n_promoted += 1
-            st.success(f"promoted {n_promoted} prediction(s) to user labels")
-
-        if save_all:
-            n_promoted = 0
-            for _, r in edited.iterrows():
-                chosen_name = r["Category"]
-                if not chosen_name:
-                    continue
-                chosen_cid = cat_id_by_name.get(chosen_name)
-                if chosen_cid is None:
-                    continue
-                add_label(conn, int(r["id"]), chosen_cid, "user")
-                n_promoted += 1
-            st.success(f"saved {n_promoted} user label(s)")
-
-        if done:
-            _reset_import_state()
-            st.rerun()
-
-
-# ---------------------------------------------------------------------------
-# Tab 4: Data
-# ---------------------------------------------------------------------------
+#
+# Upload + ingest now lives in an "Import CSV" expander at the top of this
+# tab. After a successful ingest, the new expense IDs are pinned in
+# session_state["data_pinned_ids"] so the filter shows exactly those rows.
+# Labeling happens through the selection-driven Auto-Label flow below.
 
 def _build_data_query(
     date_from, date_to, cats: list[str], source: str,
     search: str, amount_min: float, amount_max: float,
     include_income: bool,
+    pinned_ids: list[int] | None = None,
 ) -> tuple[str, list]:
-    """Return (SQL, params) for the Data table given filter widgets."""
+    """Return (SQL, params) for the Data table given filter widgets.
+
+    If ``pinned_ids`` is provided, ONLY rows with those IDs are shown
+    (other filters are ignored). Used right after a CSV ingest to scope
+    the Data table to the just-imported records.
+    """
     parts: list[str] = []
     params: list = []
+    if pinned_ids:
+        ph_pin = ",".join("?" * len(pinned_ids))
+        parts.append(f"e.id IN ({ph_pin})")
+        params.extend(int(x) for x in pinned_ids)
+        # Build SELECT and return early -- other filters don't apply when
+        # we're pinning to a specific id set.
+        where = " WHERE " + " AND ".join(parts)
+        sql = (
+            """
+            WITH latest_label AS (
+                SELECT l.expense_id, l.category_id, l.source, l.confidence
+                FROM labels l
+                JOIN (
+                    SELECT expense_id, MAX(id) AS max_id
+                    FROM labels GROUP BY expense_id
+                ) m ON l.id = m.max_id
+            )
+            SELECT
+                e.id, e.buchungsdatum, e.counterparty, e.verwendungszweck,
+                e.betrag_cents / 100.0 AS "betrag_€",
+                c.name AS category, ll.category_id AS category_id,
+                ll.source AS label_source, ll.confidence,
+                e.umsatztyp, e.iban_country, e.iban_is_foreign,
+                e.cluster_id,
+                e.has_glaeubiger_id, e.mandatsreferenz_present
+            FROM expenses e
+            LEFT JOIN latest_label ll ON ll.expense_id = e.id
+            LEFT JOIN categories c ON c.id = ll.category_id
+            """
+            + where
+            + " ORDER BY e.buchungsdatum DESC, e.id DESC"
+        )
+        return sql, params
     if date_from is not None:
         parts.append("e.buchungsdatum >= ?")
         params.append(date_from.isoformat())
@@ -913,6 +699,62 @@ def _build_data_query(
 
 with tab_data:
     st.header("Data")
+
+    # --- Import CSV (collapsed) ---------------------------------------------
+    with st.expander("Import CSV", expanded=False):
+        st.caption(
+            "Drop one or more German bank-export CSVs (`;` separator, comma "
+            "decimal). On Ingest each new row's text/IBAN/numeric features "
+            "and sentence-transformer embedding are computed and stored; the "
+            "table below then pins to those new rows so you can review and "
+            "label them with the Auto-Label flow."
+        )
+        files = st.file_uploader(
+            "CSV file(s)", accept_multiple_files=True, type=["csv"],
+            key="data_import_files",
+        )
+        ingest_clicked = st.button(
+            "Ingest", type="primary", disabled=not files, key="data_ingest_btn",
+        )
+        if ingest_clicked and files:
+            import tempfile
+
+            emb = _embedder()
+            new_ids: list[int] = []
+            with st.status("Importing…", expanded=True) as status:
+                for f in files:
+                    status.write(f"parsing {f.name}…")
+                    with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tmp:
+                        tmp.write(f.read())
+                        p = Path(tmp.name)
+                    status.write(f"ingesting + embedding {f.name}…")
+                    r = ingest_csv(conn, p, embedder=emb)
+                    new_ids.extend(r.new_ids)
+                    status.write(
+                        f"{f.name}: parsed={r.parsed} new={r.inserted} "
+                        f"duplicate={r.duplicates} embedded={r.embedded}"
+                    )
+                status.update(
+                    label=f"Imported {len(new_ids)} new row(s).",
+                    state="complete",
+                )
+            if new_ids:
+                st.session_state["data_pinned_ids"] = new_ids
+                st.rerun()
+            else:
+                st.info("Nothing new — all records were duplicates.")
+
+    pinned_ids: list[int] = st.session_state.get("data_pinned_ids") or []
+    if pinned_ids:
+        pin_cols = st.columns([5, 1])
+        pin_cols[0].info(
+            f"📌 Showing **{len(pinned_ids)} record(s)** from your last import. "
+            "Filters below are ignored while pinned."
+        )
+        if pin_cols[1].button("Unpin", key="data_unpin_btn"):
+            st.session_state.pop("data_pinned_ids", None)
+            st.rerun()
+
     # Alphabetical order so the filter multiselect doesn't reshuffle every
     # time stats change (same reasoning as the inline Category dropdown).
     cat_options = sorted(c.name for c in list_categories(conn)) + ["(unkategorisiert)"]
@@ -947,6 +789,7 @@ with tab_data:
         picked_cats, source, search.strip(),
         amount_min if amount_min > 0 else None, amount_max,
         include_income,
+        pinned_ids=pinned_ids if pinned_ids else None,
     )
     df = pd.read_sql_query(sql, conn, params=params)
     if not df.empty:
