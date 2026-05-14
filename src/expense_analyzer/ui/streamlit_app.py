@@ -810,19 +810,6 @@ with tab_data:
         except (TypeError, ValueError):
             return 0.0
 
-    # Counts on the freshly-queried df. "(unkategorisiert)" is the fillna
-    # sentinel for an unlabeled row.
-    if not df.empty:
-        n_unlabeled = int(
-            ((df["label_source"] == "") | (df["category"] == "(unkategorisiert)")).sum()
-        )
-        n_model = int((df["label_source"] == "model").sum())
-        model_conf_series = df.loc[df["label_source"] == "model", "confidence"].apply(_to_conf)
-    else:
-        n_unlabeled = 0
-        n_model = 0
-        model_conf_series = pd.Series(dtype=float)
-
     # Surface source + confidence in the BASE column set (icon prefix added
     # later in display_df). Keeps prediction status visible without needing
     # the Extended toggle.
@@ -877,36 +864,80 @@ with tab_data:
             )
         st.rerun()
 
-    # --- Batch actions (respect current filters) ---------------------------
-    action_cols = st.columns([2, 2, 3])
-    with action_cols[0]:
-        if n_unlabeled > 0 and st.button(
-            f"Auto-label {n_unlabeled} uncategorized",
-            type="primary",
-            key="data_auto_label_btn",
-        ):
-            _run_autolabel(
-                [int(x) for x in df.loc[df["label_source"] == "", "id"].tolist()],
-                f"auto-labeling {n_unlabeled} uncategorized record(s)…",
-            )
-    with action_cols[1]:
-        if n_model > 0 and st.button(
-            f"Re-auto-label {n_model} model-source",
-            key="data_relabel_model_btn",
-            help=("Re-run the cascade on rows currently labeled by the model. "
-                  "Useful after you've added more user labels so the classifier "
-                  "is smarter."),
-        ):
-            _run_autolabel(
-                [int(x) for x in df.loc[df["label_source"] == "model", "id"].tolist()],
-                f"re-auto-labeling {n_model} model-source record(s)…",
-            )
-    with action_cols[2]:
-        st.caption(
-            "Both actions operate on the current snapshot, fit the cascade "
-            "on the latest user labels, and persist results as `source='model'`. "
-            "Use the slider below the table to accept predictions in bulk."
+    # --- Selection-driven Auto-Label ---------------------------------------
+    # The button count comes from the *previous* render's checkbox state
+    # (data_editor stores ticks in session_state). It's recomputed every
+    # time the user ticks/unticks because Streamlit reruns the script.
+    def _selected_idxs_from_state() -> list[int]:
+        st_state = st.session_state.get("data_editor", {}) or {}
+        if not isinstance(st_state, dict):
+            return []
+        edited = st_state.get("edited_rows") or {}
+        return [
+            int(idx) for idx, row_edits in edited.items()
+            if isinstance(row_edits, dict) and row_edits.get("Select")
+        ]
+
+    def _set_all_visible_selected(value: bool, n_rows: int) -> None:
+        st_state = st.session_state.setdefault(
+            "data_editor",
+            {"edited_rows": {}, "added_rows": [], "deleted_rows": []},
         )
+        edited = st_state.setdefault("edited_rows", {})
+        if value:
+            for i in range(n_rows):
+                row = edited.setdefault(i, {})
+                row["Select"] = True
+        else:
+            for i in list(edited.keys()):
+                if isinstance(edited[i], dict):
+                    edited[i].pop("Select", None)
+                    if not edited[i]:
+                        del edited[i]
+
+    pre_render_selected_idxs = _selected_idxs_from_state()
+    n_pre_selected = sum(1 for i in pre_render_selected_idxs if 0 <= i < len(df))
+
+    action_cols = st.columns([2, 1.2, 1.2, 2.6])
+    with action_cols[0]:
+        auto_label_clicked = st.button(
+            f"Auto-Label {n_pre_selected} record(s)"
+            if n_pre_selected
+            else "Auto-Label (select rows first)",
+            type="primary",
+            disabled=n_pre_selected == 0,
+            key="data_auto_label_btn",
+        )
+    with action_cols[1]:
+        if st.button(
+            f"☑ Select all ({len(df)})",
+            disabled=df.empty,
+            key="data_select_all_btn",
+        ):
+            _set_all_visible_selected(True, len(df))
+            st.rerun()
+    with action_cols[2]:
+        if st.button(
+            "☐ Clear selection",
+            disabled=n_pre_selected == 0,
+            key="data_clear_sel_btn",
+        ):
+            _set_all_visible_selected(False, len(df))
+            st.rerun()
+    with action_cols[3]:
+        st.caption(
+            "Tick rows in the **Sel** column then **Auto-Label** runs the "
+            "cascade on those. Predictions land as `source='model'`; promote "
+            "them to user labels via the threshold slider below the table."
+        )
+
+    if auto_label_clicked and n_pre_selected:
+        target_eids = [int(df.iloc[i]["id"]) for i in pre_render_selected_idxs if 0 <= i < len(df)]
+        _run_autolabel(target_eids, f"auto-labeling {n_pre_selected} record(s)…")
+        st.session_state["data_just_predicted_ids"] = target_eids
+        # _run_autolabel already calls st.rerun() at its tail, but call it
+        # again as a no-op safety net to keep this branch explicit.
+        st.rerun()
 
     st.caption(
         f"{len(df)} record(s) match the filters · "
@@ -1048,42 +1079,72 @@ with tab_data:
                 st.session_state.pop("data_editor", None)
                 st.rerun()
 
-    # --- Accept predictions by confidence threshold ------------------------
-    if not df.empty and n_model > 0:
+    # --- Promote predictions to user labels --------------------------------
+    # Visible only after a recent Auto-Label run. The accept button counts
+    # rows that are (a) still selected, (b) in the just-predicted set,
+    # (c) have model-source label, and (d) have confidence >= threshold.
+    just_predicted_ids: list[int] = list(
+        st.session_state.get("data_just_predicted_ids") or []
+    )
+    if just_predicted_ids and not df.empty:
+        # Read POST-render selection from the data_editor's returned df.
+        post_sel_mask = edited_df["Select"].fillna(False).astype(bool)
+        selected_eids_now = {
+            int(df.iloc[i]["id"]) for i, sel in enumerate(post_sel_mask) if sel
+        }
+        eligible_pool = {int(x) for x in just_predicted_ids} & selected_eids_now
+
         st.markdown("##### Promote predictions to user labels")
         threshold = st.slider(
             "Confidence threshold",
             min_value=0.0,
             max_value=1.0,
-            value=st.session_state.get("data_accept_threshold", ACCEPT_CONFIDENT_THRESHOLD),
+            value=st.session_state.get(
+                "data_accept_threshold", ACCEPT_CONFIDENT_THRESHOLD
+            ),
             step=0.01,
             key="data_accept_threshold",
-            help="Slide to pick a cutoff. The button below shows how many "
-            "model-source predictions in the current snapshot meet it.",
+            help=(
+                "Only rows still selected AND in the most recent Auto-Label "
+                "batch AND with confidence ≥ this value will be saved as "
+                "user labels."
+            ),
         )
-        n_above = int((model_conf_series >= threshold).sum())
+
+        # Walk rows once: count eligibility under the threshold and collect
+        # the IDs we'd actually save on Accept.
+        accept_targets: list[tuple[int, int]] = []  # (expense_id, category_id)
+        for i in range(len(df)):
+            eid = int(df.iloc[i]["id"])
+            if eid not in eligible_pool:
+                continue
+            if df.iloc[i]["label_source"] != "model":
+                continue
+            conf = _to_conf(df.iloc[i]["confidence"])
+            if conf < threshold:
+                continue
+            cid_raw = df.iloc[i].get("category_id")
+            if pd.isna(cid_raw):
+                continue
+            accept_targets.append((eid, int(cid_raw)))
+        n_accept = len(accept_targets)
+
         accept_cols = st.columns([3, 1])
         accept_cols[0].caption(
-            f"**{n_above}** of {n_model} model-source rows have confidence "
-            f"≥ {threshold:.2f}."
+            f"**{n_accept}** of {len(eligible_pool)} selected predictions "
+            f"meet the threshold (≥ {threshold:.2f})."
         )
         if accept_cols[1].button(
-            f"Accept {n_above} as user labels",
+            f"Accept {n_accept} as user labels",
             type="primary",
-            disabled=n_above == 0,
+            disabled=n_accept == 0,
             key="data_accept_slider_btn",
         ):
-            mask = (df["label_source"] == "model") & df["confidence"].apply(_to_conf).ge(
-                threshold
-            )
-            n_promoted = 0
-            for idx in df.index[mask]:
-                cid = df.at[idx, "category_id"]
-                if pd.isna(cid):
-                    continue
-                add_label(conn, int(df.at[idx, "id"]), int(cid), "user")
-                n_promoted += 1
-            st.toast(f"promoted {n_promoted} prediction(s) to user labels")
+            for eid, cid in accept_targets:
+                add_label(conn, eid, cid, "user")
+            st.session_state.pop("data_just_predicted_ids", None)
+            st.toast(f"promoted {n_accept} prediction(s) to user labels")
+            st.rerun()
 
     # --- Optional row drawer (notes + all-fields inspection) ---------------
     sel_id_text = st.text_input(
