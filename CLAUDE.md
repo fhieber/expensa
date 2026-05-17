@@ -65,11 +65,20 @@ See the "Proposed feature set per expense" section of `../../.claude/plans/build
 
 ### 2026-05-10 — GPU acceleration deferred to follow-up
 
-User has Windows 11 with RTX 5090 (Blackwell) and Ryzen 9800X3D. Initial build ships CPU-friendly defaults so the package is portable and tests stay fast. Follow-up items:
+Initial build ships CPU-friendly defaults so the package is portable and
+tests stay fast. The `device: auto` config auto-picks `cuda` (NVIDIA),
+`mps` (Apple Silicon) or `cpu`. Follow-up items for users with a real
+GPU:
 
-- Add `requirements-cuda.txt` extras pinning a `torch` build with CUDA ≥ 12.8 (Blackwell minimum).
-- Promote `aari1995/German_Semantic_V3` (1024-d, German-specialized, 8K context) to default once the GPU path is wired up.
-- Add opt-in `enrichment/local_llm.py` for a quantized 7–8B local LLM (Llama 3.1 / Qwen 2.5 in 4-bit via `bitsandbytes` or `llama-cpp-python`) for vendor description and category suggestion on ambiguous records. Off by default, fully offline, never touches cloud APIs.
+- Add `requirements-cuda.txt` extras pinning a `torch` build with a CUDA
+  version matching the user's hardware (e.g. CUDA 12.8+ for Blackwell).
+- Promote `aari1995/German_Semantic_V3` (1024-d, German-specialized, 8K
+  context) to default once the GPU path is wired up — it's the strongest
+  German-aware embedder but heavy on CPU.
+- Add opt-in `enrichment/local_llm.py` for a quantized 7–8B local LLM
+  (Llama 3.1 / Qwen 2.5 in 4-bit via `bitsandbytes` or `llama-cpp-python`)
+  for vendor description and category suggestion on ambiguous records.
+  Off by default, fully offline, never touches cloud APIs.
 - Document GPU detection / CPU fallback in README.
 
 ## Where to extend
