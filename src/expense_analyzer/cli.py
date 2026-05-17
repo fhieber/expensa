@@ -252,7 +252,7 @@ def ingest(ctx: click.Context, csvs: tuple[Path, ...], no_embed: bool) -> None:
     """Ingest one or more German bank-export CSVs (dedup-aware).
 
     By default also computes sentence-transformer embeddings for every newly
-    inserted row, so downstream label/predict/cluster commands are fast.
+    inserted row, so downstream label/predict commands are fast.
     """
     if not csvs:
         click.echo("no files given", err=True)
@@ -435,28 +435,6 @@ def predict(ctx: click.Context, threshold: float | None, dry_run: bool) -> None:
                 add_label(conn, p.expense_id, p.category_id, "model", confidence=p.confidence)
                 n_persisted += 1
         click.echo(f"persisted {n_persisted} model labels")
-    finally:
-        conn.close()
-
-
-# --- cluster -----------------------------------------------------------------
-
-@cli.command()
-@click.pass_context
-def cluster(ctx: click.Context) -> None:
-    """Re-run UMAP+HDBSCAN clustering and persist cluster_id."""
-    cfg: Config = ctx.obj[_CTX_KEY]["config"]
-    conn = _connect(cfg)
-    try:
-        from expense_analyzer.ml.clustering import cluster_all
-
-        click.echo(f"loading embedding model `{cfg.embedding_model}`...")
-        emb = _embedder(cfg)
-        click.echo("computing embeddings + UMAP + HDBSCAN (this may take a minute)...")
-        report = cluster_all(conn, cfg, emb)
-        click.echo(
-            f"clusters={report.n_clusters} outliers={report.n_outliers} of {report.n_points} points"
-        )
     finally:
         conn.close()
 

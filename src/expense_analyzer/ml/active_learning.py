@@ -5,8 +5,7 @@ the *kind* of information gain they target:
 
   * uncertainty: lowest classifier confidence
   * diverse:     max-min distance in embedding space (kicks off well)
-  * outliers:    HDBSCAN cluster_id = -1
-  * mixed:       round-robin across the three above
+  * mixed:       round-robin across the two above
 """
 
 from __future__ import annotations
@@ -20,7 +19,7 @@ from expense_analyzer.config import Config
 from expense_analyzer.features.embeddings import Embedder, load_embeddings
 from expense_analyzer.ml.classifier import CategorizationCascade
 
-Strategy = Literal["uncertainty", "diverse", "outliers", "mixed"]
+Strategy = Literal["uncertainty", "diverse", "mixed"]
 
 
 def _unlabeled_ids(conn: sqlite3.Connection) -> list[int]:
@@ -28,18 +27,6 @@ def _unlabeled_ids(conn: sqlite3.Connection) -> list[int]:
         """
         SELECT id FROM expenses
         WHERE id NOT IN (SELECT DISTINCT expense_id FROM labels WHERE source = 'user')
-        ORDER BY id
-        """
-    ).fetchall()
-    return [int(r["id"]) for r in rows]
-
-
-def _outlier_ids(conn: sqlite3.Connection) -> list[int]:
-    rows = conn.execute(
-        """
-        SELECT id FROM expenses
-        WHERE cluster_id = -1
-          AND id NOT IN (SELECT DISTINCT expense_id FROM labels WHERE source = 'user')
         ORDER BY id
         """
     ).fetchall()
@@ -58,10 +45,6 @@ def select_uncertain(
     # Score = confidence; we want the lowest confidences.
     preds.sort(key=lambda p: p.confidence)
     return [p.expense_id for p in preds[:n]]
-
-
-def select_outliers(conn: sqlite3.Connection, n: int) -> list[int]:
-    return _outlier_ids(conn)[:n]
 
 
 def select_diverse(
@@ -101,17 +84,14 @@ def pick_candidates(
     strategy = strategy or config.active_learning.default_strategy
     if strategy == "uncertainty":
         return select_uncertain(conn, cascade, n)
-    if strategy == "outliers":
-        return select_outliers(conn, n)
     if strategy == "diverse":
         return select_diverse(conn, embedder, n)
     if strategy == "mixed":
-        per = max(1, n // 3)
+        per = max(1, n // 2)
         out: list[int] = []
         seen: set[int] = set()
         for src in (
             select_uncertain(conn, cascade, per),
-            select_outliers(conn, per),
             select_diverse(conn, embedder, per),
         ):
             for x in src:

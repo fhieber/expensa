@@ -10,6 +10,7 @@ everything is precomputed.
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -112,23 +113,35 @@ def ingest_csv(
     conn: sqlite3.Connection,
     path: Path,
     embedder: Embedder | None = None,
+    progress_callback: Callable[[str, int, int], None] | None = None,
 ) -> IngestReport:
     """Parse one CSV, insert rows, and (if an embedder is passed) immediately
     compute and persist their sentence-transformer embeddings.
 
+    If ``progress_callback`` is provided it's invoked as
+    ``cb(phase, done, total)`` where phase is one of
+    ``"parse" | "insert" | "embed"``. The UI uses this to drive a
+    ``st.progress`` bar inside the ``st.status`` panel.
+
     Returns counts of new vs. duplicate, plus the list of new expense IDs so
     callers can show "rows just imported" tables without re-querying.
     """
+    cb = progress_callback or (lambda *_: None)
+    cb("parse", 0, 1)
     parsed = parse_csv(path)
+    cb("parse", 1, 1)
     own_ibans = _load_own_ibans(conn)
     new_ids: list[int] = []
-    for row in parsed:
+    total_rows = len(parsed)
+    for i, row in enumerate(parsed):
         params = _row_to_params(row, own_ibans)
         cur = conn.execute(_INSERT_SQL, params)
         if cur.rowcount > 0:
             new_ids.append(int(cur.lastrowid))
+        # Cheap: emit every row, the UI throttles render rate itself.
+        cb("insert", i + 1, total_rows)
     inserted = len(new_ids)
-    duplicates = len(parsed) - inserted
+    duplicates = total_rows - inserted
 
     embedded = 0
     if embedder is not None and new_ids:
@@ -138,13 +151,15 @@ def ingest_csv(
         rows = conn.execute(
             f"SELECT id, combined_text FROM expenses WHERE id IN ({ph})", new_ids
         ).fetchall()
+        cb("embed", 0, len(rows))
         embedded = store_embeddings(
             conn, embedder, [(r["id"], r["combined_text"] or "") for r in rows]
         )
+        cb("embed", len(rows), len(rows))
 
     return IngestReport(
         file=path.name,
-        parsed=len(parsed),
+        parsed=total_rows,
         inserted=inserted,
         duplicates=duplicates,
         embedded=embedded,

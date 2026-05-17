@@ -99,7 +99,16 @@ class SentenceTransformerEmbedder(Embedder):
         try:
             import torch  # type: ignore
 
-            return "cuda" if torch.cuda.is_available() else "cpu"
+            if torch.cuda.is_available():
+                return "cuda"
+            # Apple Silicon (M1/M2/M3/...): MPS gives ~5-10x speedup over
+            # CPU for sentence-transformer encode. Available on macOS 12.3+
+            # with PyTorch 1.12+. Guarded with hasattr so we don't crash on
+            # older torch builds where the attribute doesn't exist.
+            mps = getattr(torch.backends, "mps", None)
+            if mps is not None and mps.is_available():
+                return "mps"
+            return "cpu"
         except ImportError:
             return "cpu"
 

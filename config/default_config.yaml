@@ -8,7 +8,7 @@ db_filename: db.sqlite
 embedding_model: T-Systems-onsite/cross-en-de-roberta-sentence-transformer
 zeroshot_model: MoritzLaurer/mDeBERTa-v3-base-mnli-xnli
 embedding_batch_size: 32
-device: auto  # auto | cpu | cuda
+device: auto  # auto | cpu | cuda | mps  (mps = Apple Silicon Metal)
 
 # --- Categorization cascade ---
 classifier:
@@ -37,16 +37,10 @@ category_similarity:
   min_margin: 0.03
   use_vendor_industry: true
 
-# --- Clustering ---
-clustering:
-  umap_n_components: 10
-  umap_n_neighbors: 15
-  hdbscan_min_cluster_size: 5
-
 # --- Active learning ---
 active_learning:
   default_batch_size: 10
-  default_strategy: uncertainty  # uncertainty | diverse | outliers | mixed
+  default_strategy: uncertainty  # uncertainty | diverse | mixed
 
 # --- Privacy: vendor web lookup is OFF by default ---
 vendor_lookup:

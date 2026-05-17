@@ -1,6 +1,7 @@
 """Visualizations: SQL data views + Plotly chart factories + file export."""
 
 from expense_analyzer.viz.charts import (
+    bar_spend_by_category,
     bar_top_counterparties,
     calendar_heatmap,
     histogram_amounts,
@@ -29,6 +30,7 @@ CHART_BUILDERS = {
 
 __all__ = [
     "amount_distribution",
+    "bar_spend_by_category",
     "bar_top_counterparties",
     "calendar_heatmap",
     "CHART_BUILDERS",

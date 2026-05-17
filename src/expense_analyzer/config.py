@@ -52,15 +52,9 @@ class CategorySimilarityConfig(BaseModel):
     use_vendor_industry: bool = True
 
 
-class ClusteringConfig(BaseModel):
-    umap_n_components: int = 10
-    umap_n_neighbors: int = 15
-    hdbscan_min_cluster_size: int = 5
-
-
 class ActiveLearningConfig(BaseModel):
     default_batch_size: int = 10
-    default_strategy: Literal["uncertainty", "diverse", "outliers", "mixed"] = "uncertainty"
+    default_strategy: Literal["uncertainty", "diverse", "mixed"] = "uncertainty"
 
 
 class VendorLookupConfig(BaseModel):
@@ -93,14 +87,15 @@ class Config(BaseModel):
     embedding_model: str = "T-Systems-onsite/cross-en-de-roberta-sentence-transformer"
     zeroshot_model: str = "MoritzLaurer/mDeBERTa-v3-base-mnli-xnli"
     embedding_batch_size: int = 32
-    device: Literal["auto", "cpu", "cuda"] = "auto"
+    # "auto" picks the best available: CUDA on NVIDIA, MPS on Apple
+    # Silicon, otherwise CPU. Override explicitly per host if needed.
+    device: Literal["auto", "cpu", "cuda", "mps"] = "auto"
 
     classifier: ClassifierConfig = Field(default_factory=ClassifierConfig)
     vendor_exact_match: VendorExactMatchConfig = Field(default_factory=VendorExactMatchConfig)
     knn: KnnConfig = Field(default_factory=KnnConfig)
     zeroshot: ZeroshotConfig = Field(default_factory=ZeroshotConfig)
     category_similarity: CategorySimilarityConfig = Field(default_factory=CategorySimilarityConfig)
-    clustering: ClusteringConfig = Field(default_factory=ClusteringConfig)
     active_learning: ActiveLearningConfig = Field(default_factory=ActiveLearningConfig)
     vendor_lookup: VendorLookupConfig = Field(default_factory=VendorLookupConfig)
     streamlit: StreamlitConfig = Field(default_factory=StreamlitConfig)

@@ -21,7 +21,6 @@ from expense_analyzer.features.embeddings import (
 from expense_analyzer.ingestion import ingest_csv
 from expense_analyzer.ml.active_learning import pick_candidates
 from expense_analyzer.ml.classifier import CategorizationCascade
-from expense_analyzer.ml.clustering import cluster_all
 from expense_analyzer.storage.categories import (
     add_label,
     upsert_category,
@@ -39,7 +38,6 @@ from expense_analyzer.viz import (
 def _config(tmp_path: Path) -> Config:
     cfg = Config(data_dir=tmp_path)
     cfg.zeroshot.enabled = False  # never reach for HF unless explicitly tested
-    cfg.clustering.hdbscan_min_cluster_size = 3
     return cfg
 
 
@@ -120,10 +118,6 @@ def _full_pipeline(
     assert rewe_pred is not None
     assert rewe_pred.stage == "vendor_exact_match"
 
-    # Cluster.
-    creport = cluster_all(conn, cfg, embedder)
-    assert creport.n_points == 50 + 7
-
     # Active learning still has work to surface.
     candidates = pick_candidates(conn, cfg, embedder, cascade, n=5, strategy="uncertainty")
     assert len(candidates) > 0
@@ -140,14 +134,12 @@ def _full_pipeline(
     return conn, {
         "n_total": 57,
         "fit_score": fit.train_score,
-        "n_clusters": creport.n_clusters,
-        "n_outliers": creport.n_outliers,
     }
 
 
 def test_end_to_end_with_hash_embedder(tmp_path: Path, fixtures_dir: Path) -> None:
     """Fast end-to-end: ingest -> dedup -> seed labels -> train -> predict
-    -> cluster -> active learning -> viz. Uses the HashEmbedder."""
+    -> active learning -> viz. Uses the HashEmbedder."""
     conn, stats = _full_pipeline(tmp_path, fixtures_dir, HashEmbedder(dim=64))
     assert stats["n_total"] == 57
 
@@ -165,6 +157,3 @@ def test_end_to_end_with_real_embedder(tmp_path: Path, fixtures_dir: Path) -> No
     )
     conn, stats = _full_pipeline(tmp_path, fixtures_dir, embedder)
     assert stats["n_total"] == 57
-    # The real embedder should produce meaningful clusters: at least one
-    # non-noise cluster is expected on this fixture.
-    assert stats["n_clusters"] >= 1

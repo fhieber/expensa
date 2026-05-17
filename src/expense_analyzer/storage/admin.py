@@ -117,3 +117,16 @@ def delete_user_labels(conn: sqlite3.Connection) -> int:
     """
     cur = conn.execute("DELETE FROM labels WHERE source = 'user'")
     return cur.rowcount or 0
+
+
+def clear_labels_for_expense(conn: sqlite3.Connection, expense_id: int) -> int:
+    """Delete EVERY label row (user + model) for a single expense.
+
+    Used by the UI when the user explicitly blanks the Category cell --
+    they want the row to read as uncategorized. We can't express "no label"
+    via INSERT because ``labels.category_id`` is NOT NULL, so we drop the
+    existing rows instead. The latest_label CTE will then return nothing
+    for this expense and the row shows as ``(unkategorisiert)``.
+    """
+    cur = conn.execute("DELETE FROM labels WHERE expense_id = ?", (int(expense_id),))
+    return cur.rowcount or 0

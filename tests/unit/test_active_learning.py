@@ -11,18 +11,15 @@ from expense_analyzer.ingestion import ingest_csv
 from expense_analyzer.ml.active_learning import (
     pick_candidates,
     select_diverse,
-    select_outliers,
     select_uncertain,
 )
 from expense_analyzer.ml.classifier import CategorizationCascade
-from expense_analyzer.ml.clustering import cluster_all
 from expense_analyzer.storage.categories import add_label, upsert_category
 
 
 def _cfg(tmp_path: Path) -> Config:
     cfg = Config(data_dir=tmp_path)
     cfg.zeroshot.enabled = False
-    cfg.clustering.hdbscan_min_cluster_size = 2
     return cfg
 
 
@@ -55,18 +52,6 @@ def test_select_diverse_returns_unique(
     assert len(set(cands)) == 8
 
 
-def test_select_outliers_uses_cluster_id_minus_one(
-    tmp_db: sqlite3.Connection, fixtures_dir: Path, tmp_path: Path
-) -> None:
-    ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
-    cluster_all(tmp_db, _cfg(tmp_path), HashEmbedder(dim=64))
-    cands = select_outliers(tmp_db, n=5)
-    # All returned should be -1 cluster.
-    for eid in cands:
-        cid = tmp_db.execute("SELECT cluster_id FROM expenses WHERE id=?", (eid,)).fetchone()["cluster_id"]
-        assert cid == -1
-
-
 def test_pick_candidates_dispatch(
     tmp_db: sqlite3.Connection, fixtures_dir: Path, tmp_path: Path
 ) -> None:
@@ -76,8 +61,7 @@ def test_pick_candidates_dispatch(
 
     rows = tmp_db.execute("SELECT id, combined_text FROM expenses").fetchall()
     store_embeddings(tmp_db, e, [(r["id"], r["combined_text"]) for r in rows])
-    cluster_all(tmp_db, _cfg(tmp_path), e)
     cascade = CategorizationCascade(tmp_db, _cfg(tmp_path), e)
-    for s in ("uncertainty", "diverse", "outliers", "mixed"):
+    for s in ("uncertainty", "diverse", "mixed"):
         out = pick_candidates(tmp_db, _cfg(tmp_path), e, cascade, n=5, strategy=s)
         assert len(out) <= 5
