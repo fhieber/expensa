@@ -57,4 +57,4 @@ pytest -q -m slow       # full pipeline with the real embedder
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Apache 2.0 — see [LICENSE](LICENSE).

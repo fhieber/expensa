@@ -42,10 +42,15 @@ This file is read by Claude Code at the start of each session. Keep it concise a
 
 ## Commit policy
 
-- `git init` with no remote (per user request).
+- Remote: <https://github.com/fhieber/expensa> (`origin`). The original
+  spec said "no remote"; the user provisioned this GitHub repo later.
+- **Work via pull requests** going forward: branch off `main`, push the
+  branch, open a PR with `gh pr create`, never push directly to `main`.
 - Conventional commits: `feat:`, `fix:`, `test:`, `docs:`, `chore:`, `refactor:`.
 - Commit at logical milestones (scaffolding, ingestion, features, ML, viz, UI, tests). Small, frequent commits so the user can revert cleanly.
 - Never `--amend` published commits; never `--no-verify`.
+- License is Apache 2.0 (GitHub repo initialised with it; supersedes the
+  original MIT spec).
 
 ## Glossary of computed features
 

@@ -14,7 +14,7 @@ keywords = ["expenses", "german", "banking", "categorization", "embeddings", "hu
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: End Users/Desktop",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
     "Natural Language :: German",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
