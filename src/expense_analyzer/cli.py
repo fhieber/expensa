@@ -198,6 +198,75 @@ def categories_remove(ctx: click.Context, name: str, force: bool, yes: bool) -> 
         conn.close()
 
 
+# --- own-iban ----------------------------------------------------------------
+
+@cli.group("own-iban")
+def own_iban() -> None:
+    """Manage your own IBANs (drives the ``iban_is_known_self`` flag)."""
+
+
+@own_iban.command("list")
+@click.pass_context
+def own_iban_list(ctx: click.Context) -> None:
+    cfg: Config = ctx.obj[_CTX_KEY]["config"]
+    conn = _connect(cfg)
+    try:
+        from expense_analyzer.storage.own_ibans import list_own_ibans
+
+        rows = list_own_ibans(conn)
+        if not rows:
+            click.echo("(no own IBANs registered)")
+            return
+        for r in rows:
+            click.echo(f"  {r.iban}  {r.label or ''}")
+    finally:
+        conn.close()
+
+
+@own_iban.command("add")
+@click.argument("iban")
+@click.option("--label", default="", help="Friendly name (e.g. 'Main checking').")
+@click.pass_context
+def own_iban_add(ctx: click.Context, iban: str, label: str) -> None:
+    """Register an IBAN and retroactively flag every matching expense."""
+    cfg: Config = ctx.obj[_CTX_KEY]["config"]
+    conn = _connect(cfg)
+    try:
+        from expense_analyzer.storage.own_ibans import add_own_iban
+
+        try:
+            rep = add_own_iban(conn, iban, label=label or None)
+        except ValueError as e:
+            click.echo(f"refusing: {e}", err=True)
+            ctx.exit(2)
+        click.echo(
+            f"added; flagged {rep.n_now_self} existing expense(s) as internal."
+        )
+    finally:
+        conn.close()
+
+
+@own_iban.command("remove")
+@click.argument("iban")
+@click.option("--yes", "yes", is_flag=True, help="Skip the confirmation prompt.")
+@click.pass_context
+def own_iban_remove(ctx: click.Context, iban: str, yes: bool) -> None:
+    """Drop an own IBAN and clear the flag on every matching expense."""
+    cfg: Config = ctx.obj[_CTX_KEY]["config"]
+    conn = _connect(cfg)
+    try:
+        from expense_analyzer.storage.own_ibans import remove_own_iban
+
+        if not yes:
+            click.confirm(f"Remove own IBAN {iban}?", abort=True)
+        rep = remove_own_iban(conn, iban)
+        click.echo(
+            f"removed; cleared the flag on {rep.n_was_self} expense(s)."
+        )
+    finally:
+        conn.close()
+
+
 # --- reset -------------------------------------------------------------------
 
 @cli.command()
