@@ -44,7 +44,7 @@ from expense_analyzer.viz import (
     bar_spend_by_category,
     monthly_flow_by_category,
     spend_by_category,
-    trend_lines,
+    stacked_monthly_by_category,
 )
 
 # Shared CTE used by the Dashboard drill-down queries.
@@ -312,8 +312,11 @@ with tab_dash:
                 selection_mode=("points", "box", "lasso"),
                 key="dashboard_daily_chart",
             )
+        # Diverging stacked bar (income above 0, expenses below 0).
+        # Lines were misleading because positive-vs-negative trajectories
+        # were drawn on the same axis with no zero emphasis.
         trend_event = st.plotly_chart(
-            trend_lines(
+            stacked_monthly_by_category(
                 monthly_flow_by_category(conn, since=since, until=until),
                 color_map=category_color_map,
             ),
