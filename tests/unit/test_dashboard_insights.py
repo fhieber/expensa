@@ -1,0 +1,203 @@
+"""Tests for the three new Dashboard insight data fns in viz/data.py."""
+
+from __future__ import annotations
+
+import sqlite3
+from datetime import date
+from pathlib import Path
+
+import pandas as pd
+
+from expense_analyzer.ingestion import ingest_csv
+from expense_analyzer.storage.categories import add_label, upsert_category
+from expense_analyzer.viz import (
+    anomalies,
+    monthly_income_vs_expense,
+    recurring_subscriptions,
+)
+
+# ---------------------------------------------------------------- recurring
+
+
+def test_recurring_subscriptions_empty_db_returns_empty(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    df = recurring_subscriptions(tmp_db)
+    assert isinstance(df, pd.DataFrame)
+    assert df.empty
+    assert set(df.columns) == {
+        "name", "last_seen", "typical_amount", "n_months", "annualised",
+    }
+
+
+def test_recurring_subscriptions_detects_monthly_charges(
+    tmp_db: sqlite3.Connection, fixtures_dir: Path
+) -> None:
+    """sample_de.csv spans two calendar months; use min_months=2 so the
+    fixture's recurring vendors (REWE, Edeka, Vermieter, Spotify, ...) get
+    surfaced. The strict min_months=3 case is covered by the next test."""
+    ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
+    df = recurring_subscriptions(tmp_db, min_months=2)
+    assert not df.empty
+    # Each row covers >= min_months distinct calendar months by definition.
+    assert (df["n_months"] >= 2).all()
+    # Annualised = 12 * typical_amount.
+    for _, r in df.iterrows():
+        assert abs(r["annualised"] - r["typical_amount"] * 12) < 1e-6
+    # Sorted DESC by annualised cost.
+    assert (df["annualised"].diff().dropna() <= 0).all()
+
+
+def test_recurring_subscriptions_min_months_filters_out_one_offs(
+    tmp_db: sqlite3.Connection, fixtures_dir: Path
+) -> None:
+    ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
+    n_at_3 = len(recurring_subscriptions(tmp_db, min_months=3))
+    n_at_99 = len(recurring_subscriptions(tmp_db, min_months=99))
+    # No vendor can hit 99 distinct months in a tiny fixture.
+    assert n_at_99 == 0
+    assert n_at_3 >= n_at_99
+
+
+# ----------------------------------------------------- income vs expense
+
+
+def test_monthly_income_vs_expense_shape(
+    tmp_db: sqlite3.Connection, fixtures_dir: Path
+) -> None:
+    ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
+    df = monthly_income_vs_expense(tmp_db)
+    assert not df.empty
+    assert set(df.columns) == {
+        "ym", "income", "expenses", "net", "savings_rate",
+    }
+    # Income and expenses are both expressed as non-negative magnitudes
+    # in this representation (the SUM of |betrag_cents| for expenses
+    # already strips the sign).
+    assert (df["income"] >= 0).all()
+    assert (df["expenses"] >= 0).all()
+    # net = income - expenses; check the invariant.
+    assert ((df["income"] - df["expenses"] - df["net"]).abs() < 1e-6).all()
+
+
+def test_monthly_income_vs_expense_savings_rate_formula(
+    tmp_db: sqlite3.Connection, fixtures_dir: Path
+) -> None:
+    ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
+    df = monthly_income_vs_expense(tmp_db)
+    for _, r in df.iterrows():
+        if r["income"] > 0:
+            expected = (r["income"] - r["expenses"]) / r["income"]
+            assert abs(r["savings_rate"] - expected) < 1e-9
+        else:
+            assert pd.isna(r["savings_rate"])
+
+
+def test_monthly_income_vs_expense_excludes_internal_transfers(
+    tmp_db: sqlite3.Connection, fixtures_dir: Path
+) -> None:
+    """When exclude_internal=True (default), expense rows whose IBAN is
+    in `own_ibans` should not count as expenses."""
+    ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
+    # Flag every row as internal -- the bluntest possible exclusion.
+    tmp_db.execute("UPDATE expenses SET iban_is_known_self = 1")
+    df_excl = monthly_income_vs_expense(tmp_db, exclude_internal=True)
+    df_incl = monthly_income_vs_expense(tmp_db, exclude_internal=False)
+    if df_excl.empty:
+        # Everything filtered out as expected.
+        assert not df_incl.empty
+    else:
+        # If there are any rows at all in `df_excl`, every income / expense
+        # column must be zero (since all rows are internal).
+        assert df_excl["income"].sum() == 0
+        assert df_excl["expenses"].sum() == 0
+
+
+# ----------------------------------------------------------- anomalies
+
+
+def test_anomalies_empty_when_no_data(tmp_db: sqlite3.Connection) -> None:
+    df = anomalies(tmp_db)
+    assert isinstance(df, pd.DataFrame)
+    assert df.empty
+
+
+def test_anomalies_returns_only_above_threshold(
+    tmp_db: sqlite3.Connection, fixtures_dir: Path
+) -> None:
+    """Synthesize a clear anomaly: insert several identical small REWE
+    charges, then one giant REWE charge. The big one should surface."""
+    ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
+    # Drop everything we don't care about to make the assertion tight.
+    tmp_db.execute("DELETE FROM expenses WHERE counterparty_normalized != 'rewe markt'")
+    # Now add an outlier row -- 5x the typical REWE bill.
+    typical = tmp_db.execute(
+        "SELECT AVG(ABS(betrag_cents)) FROM expenses"
+    ).fetchone()[0]
+    outlier_cents = int(typical * 5)
+    cur = tmp_db.execute(
+        """
+        INSERT INTO expenses (
+            buchungsdatum, betrag_cents, counterparty,
+            counterparty_normalized, is_income, dedup_hash
+        )
+        VALUES (?, ?, 'REWE Markt', 'rewe markt', 0, ?)
+        """,
+        (date.today().isoformat(), -outlier_cents, "synthetic_outlier_hash"),
+    )
+    new_eid = cur.lastrowid
+
+    df = anomalies(tmp_db, z_threshold=2.0, min_history=3)
+    assert not df.empty
+    # The synthetic outlier should be one of the results.
+    assert (df["id"] == new_eid).any()
+    # All returned rows have z above threshold.
+    assert (df["zscore"] > 2.0).all()
+    # vs_typical computed correctly.
+    for _, r in df.iterrows():
+        assert abs(r["vs_typical"] - r["amount"] / r["typical"]) < 1e-6
+
+
+def test_anomalies_respects_min_history(
+    tmp_db: sqlite3.Connection, fixtures_dir: Path
+) -> None:
+    """A vendor with < min_history records cannot produce anomalies."""
+    ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
+    df = anomalies(tmp_db, min_history=1000)  # absurdly high
+    assert df.empty
+
+
+def test_anomalies_columns_include_category_when_labeled(
+    tmp_db: sqlite3.Connection, fixtures_dir: Path
+) -> None:
+    ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
+    cid = upsert_category(tmp_db, "Lebensmittel")
+    # Label every REWE row to ensure the JOIN finds something.
+    for r in tmp_db.execute(
+        "SELECT id FROM expenses WHERE counterparty_normalized = 'rewe markt'"
+    ):
+        add_label(tmp_db, int(r["id"]), cid, "user")
+    # Synthesize an outlier so the table isn't empty.
+    typical = tmp_db.execute(
+        "SELECT AVG(ABS(betrag_cents)) FROM expenses "
+        "WHERE counterparty_normalized = 'rewe markt'"
+    ).fetchone()[0]
+    cur = tmp_db.execute(
+        """
+        INSERT INTO expenses (
+            buchungsdatum, betrag_cents, counterparty,
+            counterparty_normalized, is_income, dedup_hash
+        )
+        VALUES (?, ?, 'REWE Markt', 'rewe markt', 0, ?)
+        """,
+        (date.today().isoformat(), -int(typical * 5), "synthetic_outlier_2"),
+    )
+    # Label the synthetic outlier as Lebensmittel too so the JOIN picks
+    # up the category for this row.
+    add_label(tmp_db, int(cur.lastrowid), cid, "user")
+
+    df = anomalies(tmp_db, z_threshold=2.0, min_history=3)
+    assert not df.empty
+    assert "category" in df.columns
+    # At least one of the anomalies should have the category we just set.
+    assert (df["category"] == "Lebensmittel").any()

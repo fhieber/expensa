@@ -377,6 +377,156 @@ with tab_dash:
         )
         has_chart_selection = n_filters > 0
 
+        # ====================================================================
+        # Insights row: savings rate + net flow + recurring subs + anomalies.
+        # Computed independently of the chart-selection filter so the user
+        # always sees their structural / health view.
+        # ====================================================================
+        from datetime import date as _date
+        from datetime import timedelta as _td
+
+        from expense_analyzer.viz import (
+            anomalies,
+            income_vs_expense_chart,
+            monthly_income_vs_expense,
+            recurring_subscriptions,
+        )
+
+        st.divider()
+        st.subheader("Insights")
+
+        # ---- Savings-rate metric strip (last month / 90 days / YTD) -----
+        def _savings_rate(d_from, d_to):
+            ivex = monthly_income_vs_expense(conn, since=d_from, until=d_to)
+            if ivex.empty or ivex["income"].sum() <= 0:
+                return None
+            total_income = float(ivex["income"].sum())
+            total_exp = float(ivex["expenses"].sum())
+            return (total_income - total_exp) / total_income
+
+        _today = _date.today()
+        sr_last_month = _savings_rate(_today - _td(days=30), _today)
+        sr_90d = _savings_rate(_today - _td(days=90), _today)
+        sr_ytd = _savings_rate(_date(_today.year, 1, 1), _today)
+
+        def _sr_display(sr: float | None) -> tuple[str, str]:
+            """Returns (display_value, color_dot). Dots: green ≥20%,
+            amber 0..20%, red negative."""
+            if sr is None:
+                return "—", ""
+            pct = sr * 100
+            if pct >= 20:
+                return f"🟢 {pct:.0f}%", ""
+            if pct < 0:
+                return f"🔴 {pct:.0f}%", ""
+            return f"🟡 {pct:.0f}%", ""
+
+        sr_cols = st.columns(3)
+        sr_cols[0].metric("Savings rate — last 30 days",
+                          _sr_display(sr_last_month)[0])
+        sr_cols[1].metric("Savings rate — last 90 days",
+                          _sr_display(sr_90d)[0])
+        sr_cols[2].metric("Savings rate — YTD",
+                          _sr_display(sr_ytd)[0])
+        st.caption(
+            "🟢 ≥20% · 🟡 0–20% · 🔴 negative. Internal transfers "
+            "(`iban_is_known_self`) are excluded so the rate reflects "
+            "real income vs real consumption."
+        )
+
+        # ---- Income vs Expenses chart over the visible date range -------
+        ivex_df = monthly_income_vs_expense(conn, since=since, until=until)
+        st.plotly_chart(
+            income_vs_expense_chart(ivex_df),
+            width="stretch",
+            key="dashboard_ivex_chart",
+        )
+
+        # ---- Two-column row: recurring subs | anomalies -----------------
+        sub_cols = st.columns([1, 1])
+
+        with sub_cols[0]:
+            st.markdown("**Recurring expenses**")
+            st.caption(
+                "Vendors that charge at least 3 different months in this "
+                "view. Sorted by annualised cost. Use it to spot "
+                "subscription creep."
+            )
+            recurring_df = recurring_subscriptions(conn, since=since, until=until)
+            if recurring_df.empty:
+                st.info(
+                    "No recurring vendors detected. Pick a longer date "
+                    "range (e.g. Last 6 months) to give the heuristic "
+                    "enough months to compare."
+                )
+            else:
+                st.dataframe(
+                    recurring_df,
+                    hide_index=True,
+                    width="stretch",
+                    column_config={
+                        "name": st.column_config.TextColumn("Vendor"),
+                        "last_seen": st.column_config.DateColumn(
+                            "Last seen", format="DD.MM.YYYY"
+                        ),
+                        "typical_amount": st.column_config.NumberColumn(
+                            "Typical (€)", format="%.2f"
+                        ),
+                        "n_months": st.column_config.NumberColumn(
+                            "Months", format="%d"
+                        ),
+                        "annualised": st.column_config.NumberColumn(
+                            "Annualised (€)", format="%.2f"
+                        ),
+                    },
+                )
+
+        with sub_cols[1]:
+            st.markdown("**Unusual amounts**")
+            st.caption(
+                "Recent rows whose amount is more than 2σ above the "
+                "vendor's historical average. Surfaces price hikes, "
+                "double-charges, and suspected fraud. Baseline statistics "
+                "use the vendor's FULL history (not just this date range)."
+            )
+            anom_df = anomalies(conn, since=since, until=until)
+            if anom_df.empty:
+                st.info(
+                    "No anomalies above z=2 in this view. Either every "
+                    "expense is in line with its vendor's typical amount, "
+                    "or there's not enough history yet — vendors need "
+                    "≥3 prior records to score."
+                )
+            else:
+                # Drop columns we don't need to show in the cramped view.
+                display = anom_df.drop(columns=["id", "n_history"])
+                st.dataframe(
+                    display,
+                    hide_index=True,
+                    width="stretch",
+                    column_config={
+                        "date": st.column_config.DateColumn(
+                            "Date", format="DD.MM.YYYY"
+                        ),
+                        "counterparty": st.column_config.TextColumn("Vendor"),
+                        "category": st.column_config.TextColumn("Category"),
+                        "amount": st.column_config.NumberColumn(
+                            "Amount (€)", format="%.2f"
+                        ),
+                        "typical": st.column_config.NumberColumn(
+                            "Typical (€)", format="%.2f"
+                        ),
+                        "vs_typical": st.column_config.NumberColumn(
+                            "× typical", format="%.1fx"
+                        ),
+                        "zscore": st.column_config.NumberColumn(
+                            "z", format="%.1f"
+                        ),
+                    },
+                )
+
+        st.divider()
+
         # ---- Single records table --------------------------------------
         # Header line: shows what filters are active, plus a Clear button.
         hdr_cols = st.columns([5, 1])

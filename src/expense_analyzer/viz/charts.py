@@ -131,6 +131,50 @@ def trend_lines(
     return fig
 
 
+def income_vs_expense_chart(df) -> go.Figure:
+    """Diverging bar chart of monthly income vs expenses.
+
+    Income (positive total) plots **above** zero in green; expenses
+    (positive total too, flipped via ``y = -expenses``) plot **below**
+    zero in red. The y=0 line emphasises the split. Net flow per month
+    is whatever sticks out on each side relative to the other.
+
+    Different from ``stacked_monthly_by_category`` because it doesn't
+    split by category -- two flat traces (income / expense) per month,
+    no Plotly auto-stack juggling. Built directly with ``go`` because
+    we need the explicit y-sign flip on the expense trace.
+    """
+    if df.empty:
+        return go.Figure(
+            layout={"title": "Einkommen vs Ausgaben (keine Daten)"}
+        )
+    fig = go.Figure()
+    fig.add_bar(
+        x=df["ym"], y=df["income"],
+        name="Einkommen",
+        marker_color="#22c55e",
+        hovertemplate="<b>%{x}</b><br>Einkommen: %{y:,.2f} €<extra></extra>",
+    )
+    fig.add_bar(
+        x=df["ym"], y=-df["expenses"],
+        name="Ausgaben",
+        marker_color="#ef4444",
+        # Show the original (positive) value in the tooltip; the negated
+        # y is just a layout trick.
+        customdata=df["expenses"],
+        hovertemplate="<b>%{x}</b><br>Ausgaben: %{customdata:,.2f} €<extra></extra>",
+    )
+    fig.update_layout(
+        title="Einkommen vs Ausgaben (monatlich)",
+        barmode="relative",
+        yaxis_title="Betrag (€)",
+        xaxis_title="Monat",
+        legend_title_text="",
+    )
+    fig.add_hline(y=0, line_width=1, line_color="rgba(128,128,128,0.6)")
+    return fig
+
+
 def calendar_heatmap(cal_df) -> go.Figure:
     """A simple per-date bar series. Real calendar heatmaps need x=week,
     y=weekday — but a date-bar gives a clean overview without extra deps."""
