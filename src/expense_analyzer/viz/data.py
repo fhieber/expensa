@@ -173,6 +173,281 @@ def daily_calendar(
     return df
 
 
+# Cadence buckets used by recurring_subscriptions. Median day-gap snaps
+# to the geometrically-nearest of these. ``charges_per_year`` is what we
+# multiply ``typical_amount`` by to get the annualised cost.
+_CADENCE_BUCKETS: tuple[tuple[str, float], ...] = (
+    ("weekly",      7.0),
+    ("bi-weekly",   14.0),
+    ("monthly",     30.4),    # avg days/month
+    ("quarterly",   91.3),
+    ("semi-annual", 182.6),
+    ("annual",      365.25),
+)
+
+
+def _classify_cadence(median_gap_days: float) -> tuple[str, float]:
+    """Snap a median inter-charge gap to the geometrically-closest
+    cadence bucket. Returns ``(label, charges_per_year)``."""
+    import math
+
+    if median_gap_days is None or median_gap_days <= 0:
+        return ("irregular", 0.0)
+    best_label, best_days = min(
+        _CADENCE_BUCKETS,
+        key=lambda b: abs(math.log(median_gap_days / b[1])),
+    )
+    return (best_label, 365.25 / best_days)
+
+
+def recurring_subscriptions(
+    conn: sqlite3.Connection,
+    since: date | None = None,
+    until: date | None = None,
+    min_charges: int = 3,
+) -> pd.DataFrame:
+    """Vendors that show a consistent **cadence** (weekly / bi-weekly /
+    monthly / quarterly / semi-annual / annual) over their transaction
+    history. Cadence is inferred from the median day-gap between
+    consecutive charges; ``charges_per_year`` falls out of that, and
+    ``annualised = typical_amount * charges_per_year``.
+
+    Returns one row per vendor with at least ``min_charges`` transactions,
+    sorted DESC by annualised cost.
+
+    Columns: ``name``, ``cadence``, ``last_seen``, ``typical_amount``,
+    ``charges_per_year``, ``annualised``, ``n_charges``.
+    """
+    extra, params = _date_filter_clause("buchungsdatum", since, until)
+    sql = f"""
+        SELECT counterparty_normalized AS cpn,
+               counterparty AS name,
+               buchungsdatum AS d,
+               ABS(betrag_cents) / 100.0 AS amount
+        FROM expenses
+        WHERE counterparty_normalized IS NOT NULL
+          AND counterparty_normalized <> ''
+          AND is_income = 0
+          {extra}
+        ORDER BY counterparty_normalized, buchungsdatum
+    """
+    rows = conn.execute(sql, params).fetchall()
+    if not rows:
+        return pd.DataFrame(
+            columns=["name", "cadence", "last_seen", "typical_amount",
+                     "charges_per_year", "annualised", "n_charges"]
+        )
+    raw = pd.DataFrame([dict(r) for r in rows])
+    raw["d"] = pd.to_datetime(raw["d"])
+
+    out: list[dict] = []
+    for cpn, g in raw.groupby("cpn"):
+        if len(g) < min_charges:
+            continue
+        dates = g["d"].sort_values().reset_index(drop=True)
+        gaps = dates.diff().dt.days.dropna()
+        if gaps.empty:
+            continue
+        median_gap = float(gaps.median())
+        cadence_label, cpy = _classify_cadence(median_gap)
+        if cpy <= 0:
+            continue
+        typical = float(g["amount"].median())
+        annualised = typical * cpy
+        out.append({
+            # Prefer the most-recent display-friendly counterparty string;
+            # falls back to the normalised key if absent.
+            "name": str(g.sort_values("d", ascending=False).iloc[0]["name"]
+                        or cpn),
+            "cadence": cadence_label,
+            "last_seen": dates.iloc[-1].date(),
+            "typical_amount": typical,
+            "charges_per_year": cpy,
+            "annualised": annualised,
+            "n_charges": int(len(g)),
+        })
+    if not out:
+        return pd.DataFrame(
+            columns=["name", "cadence", "last_seen", "typical_amount",
+                     "charges_per_year", "annualised", "n_charges"]
+        )
+    df = pd.DataFrame(out).sort_values("annualised", ascending=False)
+    return df.reset_index(drop=True)
+
+
+def monthly_income_vs_expense(
+    conn: sqlite3.Connection,
+    since: date | None = None,
+    until: date | None = None,
+    exclude_internal: bool = True,
+) -> pd.DataFrame:
+    """Per-month income vs expense totals.
+
+    Returns: ``ym``, ``income``, ``expenses`` (both positive), ``net``,
+    ``savings_rate`` ((income − expenses) / income).
+
+    ``iban_is_known_self`` rows are excluded by default so that money
+    moved between your own accounts isn't counted as either income or
+    expense (which would inflate both sides and skew the savings rate).
+    """
+    extra, params = _date_filter_clause("buchungsdatum", since, until)
+    internal = (
+        " AND COALESCE(iban_is_known_self, 0) = 0" if exclude_internal else ""
+    )
+    sql = f"""
+        SELECT
+            strftime('%Y-%m', buchungsdatum) AS ym,
+            SUM(CASE WHEN is_income = 1 THEN betrag_cents ELSE 0 END) / 100.0
+                AS income,
+            SUM(CASE WHEN is_income = 0 THEN ABS(betrag_cents) ELSE 0 END) / 100.0
+                AS expenses
+        FROM expenses
+        WHERE 1=1 {extra} {internal}
+        GROUP BY ym
+        ORDER BY ym
+    """
+    rows = conn.execute(sql, params).fetchall()
+    df = pd.DataFrame([dict(r) for r in rows])
+    if df.empty:
+        return pd.DataFrame(
+            columns=["ym", "income", "expenses", "net", "savings_rate"]
+        )
+    df["net"] = df["income"] - df["expenses"]
+    df["savings_rate"] = df.apply(
+        lambda r: (r["net"] / r["income"]) if r["income"] > 0 else None,
+        axis=1,
+    )
+    return df
+
+
+def anomalies(
+    conn: sqlite3.Connection,
+    since: date | None = None,
+    until: date | None = None,
+    z_threshold: float = 2.0,
+    min_history: int = 3,
+    limit: int = 25,
+) -> pd.DataFrame:
+    """Recent expenses whose |amount| is unusually high for the vendor.
+
+    Statistics (mean, variance, count) are computed over the WHOLE
+    history of each counterparty -- not just the visible date range --
+    so a wider baseline gives more confident anomaly scores. Anomalies
+    themselves are filtered to ``since..until`` and the top ``limit``
+    most-recent + most-deviant rows are returned.
+
+    A row qualifies as an anomaly when:
+        * the vendor has ``min_history`` or more prior records,
+        * the across-history standard deviation is non-zero, and
+        * ``(|amount| - mean) / stddev > z_threshold``.
+
+    Returns columns: ``id``, ``date``, ``counterparty``, ``category``,
+    ``amount``, ``typical``, ``vs_typical`` (``amount / typical``),
+    ``zscore``, ``n_history``.
+    """
+    # SQLite's stdlib build doesn't ship SQRT (the math extension isn't
+    # compiled in by default). Pull AVG / mean-of-squares / count from
+    # SQL, do the z-score arithmetic + threshold filter in pandas.
+    extra, params = _date_filter_clause("e.buchungsdatum", since, until)
+    sql = (
+        _LATEST_LABEL_CTE
+        + f"""
+        , cp_stats AS (
+            SELECT counterparty_normalized,
+                   AVG(ABS(betrag_cents)) AS mean_cents,
+                   AVG(ABS(betrag_cents) * ABS(betrag_cents)) AS msq_cents,
+                   COUNT(*) AS n
+            FROM expenses
+            WHERE counterparty_normalized IS NOT NULL
+              AND counterparty_normalized <> ''
+              AND is_income = 0
+            GROUP BY counterparty_normalized
+            HAVING n >= ?
+        )
+        SELECT
+            e.id,
+            e.buchungsdatum AS date,
+            e.counterparty AS counterparty,
+            COALESCE(c.name, '(unkategorisiert)') AS category,
+            ABS(e.betrag_cents) / 100.0 AS amount,
+            s.mean_cents / 100.0 AS typical,
+            s.mean_cents AS _mean_cents,
+            s.msq_cents AS _msq_cents,
+            ABS(e.betrag_cents) AS _abs_cents,
+            s.n AS n_history
+        FROM expenses e
+        JOIN cp_stats s ON s.counterparty_normalized = e.counterparty_normalized
+        LEFT JOIN latest_label ll ON ll.expense_id = e.id
+        LEFT JOIN categories c ON c.id = ll.category_id
+        WHERE e.is_income = 0
+          AND s.msq_cents - s.mean_cents * s.mean_cents > 0
+          {extra}
+    """
+    )
+    full_params = [min_history] + params
+    rows = conn.execute(sql, full_params).fetchall()
+    if not rows:
+        return pd.DataFrame(
+            columns=["id", "date", "counterparty", "category",
+                     "amount", "typical", "vs_typical", "zscore", "n_history"]
+        )
+    df = pd.DataFrame([dict(r) for r in rows])
+    # Population variance: msq - mean^2 (> 0 by SQL guard above).
+    var = (df["_msq_cents"] - df["_mean_cents"] ** 2).clip(lower=0)
+    std = var ** 0.5
+    df["zscore"] = (df["_abs_cents"] - df["_mean_cents"]) / std
+    df = df[df["zscore"] > z_threshold].copy()
+    if df.empty:
+        return pd.DataFrame(
+            columns=["id", "date", "counterparty", "category",
+                     "amount", "typical", "vs_typical", "zscore", "n_history"]
+        )
+    df["vs_typical"] = df["amount"] / df["typical"]
+    df["date"] = pd.to_datetime(df["date"]).dt.date
+    df = df.sort_values(["date", "zscore"], ascending=[False, False])
+    df = df.head(limit).reset_index(drop=True)
+    return df[
+        ["id", "date", "counterparty", "category",
+         "amount", "typical", "vs_typical", "zscore", "n_history"]
+    ]
+
+
+def weekly_by_category(
+    conn: sqlite3.Connection,
+    since: date | None = None,
+    until: date | None = None,
+) -> pd.DataFrame:
+    """One row per (ISO-ish week, category) with the spend total.
+
+    Less fine-grained than ``daily_by_category`` -- the daily bars get
+    unreadably narrow over multi-month ranges, which is the common
+    Dashboard case. Week label is ``YYYY-Www`` using
+    ``strftime('%Y-W%W')`` (Monday-based week number, zero-padded),
+    sorts correctly as a string.
+    """
+    extra, params = _date_filter_clause("e.buchungsdatum", since, until)
+    sql = (
+        _LATEST_LABEL_CTE
+        + f"""
+        SELECT strftime('%Y-W%W', e.buchungsdatum) AS w,
+               COALESCE(c.name, '(unkategorisiert)') AS name,
+               COALESCE(c.color, '#bbbbbb') AS color,
+               SUM(ABS(e.betrag_cents)) / 100.0 AS amount
+        FROM expenses e
+        LEFT JOIN latest_label ll ON ll.expense_id = e.id
+        LEFT JOIN categories c ON c.id = ll.category_id
+        WHERE e.is_income = 0 {extra}
+        GROUP BY w, name, color
+        ORDER BY w, name
+        """
+    )
+    rows = conn.execute(sql, params).fetchall()
+    df = pd.DataFrame([dict(r) for r in rows])
+    if df.empty:
+        df = pd.DataFrame(columns=["w", "name", "color", "amount"])
+    return df
+
+
 def daily_by_category(
     conn: sqlite3.Connection,
     since: date | None = None,
