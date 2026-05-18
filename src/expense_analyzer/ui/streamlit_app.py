@@ -61,7 +61,7 @@ _LATEST_LABEL_CTE_DASHBOARD = """
         e.id, e.buchungsdatum, e.counterparty, e.verwendungszweck,
         e.betrag_cents / 100.0 AS "betrag_€",
         COALESCE(c.name, '(unkategorisiert)') AS category,
-        e.iban_country
+        e.iban
     FROM expenses e
     LEFT JOIN latest_label ll ON ll.expense_id = e.id
     LEFT JOIN categories c ON c.id = ll.category_id
@@ -480,8 +480,8 @@ with tab_dash:
                     options=dash_cat_options,
                     required=False,
                 ),
-                "iban_country": st.column_config.TextColumn(
-                    "IBAN cc", disabled=True
+                "iban": st.column_config.TextColumn(
+                    "IBAN", disabled=True
                 ),
             },
             disabled=[c for c in display_full_df.columns if c != "category"],
@@ -732,7 +732,7 @@ def _build_data_query(
                 e.betrag_cents / 100.0 AS "betrag_€",
                 c.name AS category, ll.category_id AS category_id,
                 ll.source AS label_source, ll.confidence,
-                e.umsatztyp, e.iban_country, e.iban_is_foreign,
+                e.umsatztyp, e.iban, e.iban_is_foreign,
                 e.has_glaeubiger_id, e.mandatsreferenz_present
             FROM expenses e
             LEFT JOIN latest_label ll ON ll.expense_id = e.id
@@ -797,7 +797,7 @@ def _build_data_query(
             e.betrag_cents / 100.0 AS "betrag_€",
             c.name AS category, ll.category_id AS category_id,
             ll.source AS label_source, ll.confidence,
-            e.umsatztyp, e.iban_country, e.iban_is_foreign,
+            e.umsatztyp, e.iban, e.iban_is_foreign,
             e.has_glaeubiger_id, e.mandatsreferenz_present
         FROM expenses e
         LEFT JOIN latest_label ll ON ll.expense_id = e.id
@@ -973,7 +973,7 @@ with tab_data:
         text_cols = [
             "id", "buchungsdatum", "counterparty", "zahlungspflichtiger",
             "verwendungszweck", "betrag_€", "category", "_orig_category",
-            "src", "umsatztyp", "iban_country",
+            "src", "umsatztyp", "iban",
         ]
         cols_present = [c for c in text_cols if c in df.columns]
 
@@ -1273,11 +1273,17 @@ with tab_data:
                         valueGetter=conf_value_getter,
                         cellStyle=pending_cell_style)
 
-    ext_columns = ("umsatztyp", "iban_country", "iban_is_foreign",
+    # IBAN: always visible (used to filter / search for a specific account).
+    # Country-code-only column was dropped: the country is encoded in the
+    # first two characters of the full IBAN, and `iban_is_foreign` already
+    # serves the "foreign vs DE" classifier signal.
+    gb.configure_column("iban", header_name="IBAN", width=220,
+                        filter="agTextColumnFilter")
+
+    ext_columns = ("umsatztyp", "iban_is_foreign",
                    "has_glaeubiger_id", "mandatsreferenz_present")
     if extended:
         gb.configure_column("umsatztyp", header_name="Umsatztyp", width=120)
-        gb.configure_column("iban_country", header_name="IBAN cc", width=80)
         gb.configure_column("iban_is_foreign", header_name="Foreign?", width=80)
         gb.configure_column("has_glaeubiger_id", header_name="Gläubiger?", width=90)
         gb.configure_column("mandatsreferenz_present", header_name="Mandat?", width=90)
