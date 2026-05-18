@@ -254,7 +254,10 @@ def _dashboard_date_range(preset: str, custom_from=None, custom_to=None):
 
 
 with tab_dash:
-    from expense_analyzer.viz import daily_by_category, stacked_daily_by_category
+    from expense_analyzer.viz import (
+        stacked_weekly_by_category,
+        weekly_by_category,
+    )
 
     st.header("Dashboard")
     n_exp = conn.execute("SELECT COUNT(*) AS n FROM expenses").fetchone()["n"]
@@ -304,13 +307,15 @@ with tab_dash:
                 key="dashboard_bar_chart",
             )
         with c2:
-            daily_df = daily_by_category(conn, since=since, until=until)
-            daily_event = st.plotly_chart(
-                stacked_daily_by_category(daily_df, color_map=category_color_map),
+            # Weekly aggregation -- daily bars get unreadably narrow over
+            # multi-month ranges, which is the common dashboard case.
+            weekly_df = weekly_by_category(conn, since=since, until=until)
+            weekly_event = st.plotly_chart(
+                stacked_weekly_by_category(weekly_df, color_map=category_color_map),
                 width="stretch",
                 on_select="rerun",
                 selection_mode=("points", "box", "lasso"),
-                key="dashboard_daily_chart",
+                key="dashboard_weekly_chart",
             )
         trend_event = st.plotly_chart(
             trend_lines(
@@ -328,7 +333,7 @@ with tab_dash:
 
         # ---- Collect chart selections into a single filter set ---------
         sel_categories: set[str] = set()
-        sel_dates: set[str] = set()    # ISO YYYY-MM-DD (from daily bars)
+        sel_weeks: set[str] = set()    # YYYY-Www (from weekly bars)
         sel_months: set[str] = set()   # YYYY-MM (from trend line)
 
         def _points(evt) -> list[dict]:
@@ -361,18 +366,18 @@ with tab_dash:
             x_val = p.get("x")
             if x_val:
                 sel_months.add(str(x_val)[:7])
-        # Daily stacked: x is a date, legendgroup = cat.
-        for p in _points(daily_event):
+        # Weekly stacked: x is "YYYY-Www" (string from data fn).
+        for p in _points(weekly_event):
             cat = p.get("legendgroup")
             if cat:
                 sel_categories.add(str(cat))
             x_val = p.get("x")
             if x_val:
-                sel_dates.add(str(x_val).split("T")[0])
+                sel_weeks.add(str(x_val))
 
         n_filters = (
             (1 if sel_categories else 0)
-            + (1 if sel_dates else 0)
+            + (1 if sel_weeks else 0)
             + (1 if sel_months else 0)
         )
         has_chart_selection = n_filters > 0
@@ -382,9 +387,6 @@ with tab_dash:
         # Computed independently of the chart-selection filter so the user
         # always sees their structural / health view.
         # ====================================================================
-        from datetime import date as _date
-        from datetime import timedelta as _td
-
         from expense_analyzer.viz import (
             anomalies,
             income_vs_expense_chart,
@@ -395,47 +397,44 @@ with tab_dash:
         st.divider()
         st.subheader("Insights")
 
-        # ---- Savings-rate metric strip (last month / 90 days / YTD) -----
-        def _savings_rate(d_from, d_to):
-            ivex = monthly_income_vs_expense(conn, since=d_from, until=d_to)
-            if ivex.empty or ivex["income"].sum() <= 0:
-                return None
-            total_income = float(ivex["income"].sum())
-            total_exp = float(ivex["expenses"].sum())
-            return (total_income - total_exp) / total_income
-
-        _today = _date.today()
-        sr_last_month = _savings_rate(_today - _td(days=30), _today)
-        sr_90d = _savings_rate(_today - _td(days=90), _today)
-        sr_ytd = _savings_rate(_date(_today.year, 1, 1), _today)
-
-        def _sr_display(sr: float | None) -> tuple[str, str]:
-            """Returns (display_value, color_dot). Dots: green ≥20%,
-            amber 0..20%, red negative."""
-            if sr is None:
-                return "—", ""
-            pct = sr * 100
+        # ---- Savings rate / income / expense totals for the SELECTED -----
+        # ---- time frame.  All three change together as the user moves the
+        # ---- date-range radio.
+        ivex_df = monthly_income_vs_expense(conn, since=since, until=until)
+        total_income = float(ivex_df["income"].sum()) if not ivex_df.empty else 0.0
+        total_exp = float(ivex_df["expenses"].sum()) if not ivex_df.empty else 0.0
+        if total_income > 0:
+            savings_rate = (total_income - total_exp) / total_income
+            pct = savings_rate * 100
             if pct >= 20:
-                return f"🟢 {pct:.0f}%", ""
-            if pct < 0:
-                return f"🔴 {pct:.0f}%", ""
-            return f"🟡 {pct:.0f}%", ""
+                dot = "🟢"
+            elif pct < 0:
+                dot = "🔴"
+            else:
+                dot = "🟡"
+            sr_value = f"{dot} {pct:.0f}%"
+        else:
+            sr_value = "—"
+
+        def _de_eur(v: float) -> str:
+            """Format a euro amount in DE locale: thousands `.`, decimal `,`."""
+            return (
+                f"{v:,.2f} €"
+                .replace(",", "X").replace(".", ",").replace("X", ".")
+            )
 
         sr_cols = st.columns(3)
-        sr_cols[0].metric("Savings rate — last 30 days",
-                          _sr_display(sr_last_month)[0])
-        sr_cols[1].metric("Savings rate — last 90 days",
-                          _sr_display(sr_90d)[0])
-        sr_cols[2].metric("Savings rate — YTD",
-                          _sr_display(sr_ytd)[0])
+        sr_cols[0].metric("Savings rate", sr_value)
+        sr_cols[1].metric("Income", _de_eur(total_income))
+        sr_cols[2].metric("Expenses", _de_eur(total_exp))
         st.caption(
-            "🟢 ≥20% · 🟡 0–20% · 🔴 negative. Internal transfers "
-            "(`iban_is_known_self`) are excluded so the rate reflects "
-            "real income vs real consumption."
+            "Reflects the currently selected date range above. "
+            "🟢 ≥20% · 🟡 0–20% · 🔴 negative. "
+            "Internal transfers (`iban_is_known_self`) are excluded so "
+            "the rate reflects real income vs real consumption."
         )
 
         # ---- Income vs Expenses chart over the visible date range -------
-        ivex_df = monthly_income_vs_expense(conn, since=since, until=until)
         st.plotly_chart(
             income_vs_expense_chart(ivex_df),
             width="stretch",
@@ -443,21 +442,25 @@ with tab_dash:
         )
 
         # ---- Two-column row: recurring subs | anomalies -----------------
+        # Both intentionally use the FULL data history regardless of the
+        # dashboard date range -- recurring patterns and price-spike
+        # anomalies are most informative when seen over everything.
         sub_cols = st.columns([1, 1])
 
         with sub_cols[0]:
-            st.markdown("**Recurring expenses**")
+            st.markdown("**Recurring expenses**  ·  _all-time_")
             st.caption(
-                "Vendors that charge at least 3 different months in this "
-                "view. Sorted by annualised cost. Use it to spot "
-                "subscription creep."
+                "Vendors with a detectable cadence (weekly / bi-weekly / "
+                "monthly / quarterly / semi-annual / annual). Cadence is "
+                "inferred from the median day-gap between charges; "
+                "annualised cost = typical amount × charges/year. Sorted "
+                "DESC by annualised cost."
             )
-            recurring_df = recurring_subscriptions(conn, since=since, until=until)
+            recurring_df = recurring_subscriptions(conn)
             if recurring_df.empty:
                 st.info(
-                    "No recurring vendors detected. Pick a longer date "
-                    "range (e.g. Last 6 months) to give the heuristic "
-                    "enough months to compare."
+                    "No vendors with ≥3 charges yet -- ingest more data "
+                    "so the cadence detector has gaps to measure."
                 )
             else:
                 st.dataframe(
@@ -466,30 +469,34 @@ with tab_dash:
                     width="stretch",
                     column_config={
                         "name": st.column_config.TextColumn("Vendor"),
+                        "cadence": st.column_config.TextColumn("Cadence"),
                         "last_seen": st.column_config.DateColumn(
                             "Last seen", format="DD.MM.YYYY"
                         ),
                         "typical_amount": st.column_config.NumberColumn(
                             "Typical (€)", format="%.2f"
                         ),
-                        "n_months": st.column_config.NumberColumn(
-                            "Months", format="%d"
+                        "charges_per_year": st.column_config.NumberColumn(
+                            "Charges/yr", format="%.1f"
                         ),
                         "annualised": st.column_config.NumberColumn(
                             "Annualised (€)", format="%.2f"
+                        ),
+                        "n_charges": st.column_config.NumberColumn(
+                            "Seen", format="%d"
                         ),
                     },
                 )
 
         with sub_cols[1]:
-            st.markdown("**Unusual amounts**")
+            st.markdown("**Unusual amounts**  ·  _all-time_")
             st.caption(
-                "Recent rows whose amount is more than 2σ above the "
-                "vendor's historical average. Surfaces price hikes, "
-                "double-charges, and suspected fraud. Baseline statistics "
-                "use the vendor's FULL history (not just this date range)."
+                "Rows whose amount is more than 2σ above the vendor's "
+                "historical average. Surfaces price hikes, double-charges "
+                "and suspected fraud. Baseline statistics use the vendor's "
+                "full history."
             )
-            anom_df = anomalies(conn, since=since, until=until)
+            anom_df = anomalies(conn)
             if anom_df.empty:
                 st.info(
                     "No anomalies above z=2 in this view. Either every "
@@ -536,8 +543,8 @@ with tab_dash:
                 parts.append("cat ∈ {" + ", ".join(sorted(sel_categories)) + "}")
             if sel_months:
                 parts.append("month ∈ {" + ", ".join(sorted(sel_months)) + "}")
-            if sel_dates:
-                parts.append("date ∈ {" + ", ".join(sorted(sel_dates)) + "}")
+            if sel_weeks:
+                parts.append("week ∈ {" + ", ".join(sorted(sel_weeks)) + "}")
             hdr_cols[0].caption(
                 "Filtered by chart selection: " + " · ".join(parts)
             )
@@ -546,7 +553,7 @@ with tab_dash:
                 # Drop selection state on every chart and rerun.
                 for k in (
                     "dashboard_bar_chart", "dashboard_trend_chart",
-                    "dashboard_daily_chart",
+                    "dashboard_weekly_chart",
                 ):
                     st.session_state.pop(k, None)
                 st.rerun()
@@ -576,10 +583,10 @@ with tab_dash:
                     cat_or.append("c.name = ?")
                     params.append(cat)
             clauses.append("(" + " OR ".join(cat_or) + ")")
-        if sel_dates:
-            ph = ",".join("?" * len(sel_dates))
-            clauses.append(f"e.buchungsdatum IN ({ph})")
-            params.extend(sorted(sel_dates))
+        if sel_weeks:
+            ph = ",".join("?" * len(sel_weeks))
+            clauses.append(f"strftime('%Y-W%W', e.buchungsdatum) IN ({ph})")
+            params.extend(sorted(sel_weeks))
         if sel_months:
             ph = ",".join("?" * len(sel_months))
             clauses.append(f"strftime('%Y-%m', e.buchungsdatum) IN ({ph})")
