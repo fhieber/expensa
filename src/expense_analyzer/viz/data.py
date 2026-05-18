@@ -74,9 +74,21 @@ def monthly_flow_by_category(
     conn: sqlite3.Connection,
     since: date | None = None,
     until: date | None = None,
+    exclude_internal: bool = True,
 ) -> pd.DataFrame:
-    """Monthly sums per category, signed. Useful for stacked / line charts."""
+    """Monthly sums per category, signed. Useful for stacked / line charts.
+
+    ``exclude_internal`` (default ``True``) drops rows where
+    ``iban_is_known_self = 1`` (transfers between the user's own
+    accounts), so this view stays numerically consistent with the
+    ``Einkommen vs Ausgaben`` chart -- the income side and expense side
+    should match exactly when the two are placed side by side. Set to
+    ``False`` to see internal flows split by category too.
+    """
     extra, params = _date_filter_clause("e.buchungsdatum", since, until)
+    internal = (
+        " AND COALESCE(e.iban_is_known_self, 0) = 0" if exclude_internal else ""
+    )
     sql = (
         _LATEST_LABEL_CTE
         + f"""
@@ -87,7 +99,7 @@ def monthly_flow_by_category(
         FROM expenses e
         LEFT JOIN latest_label ll ON ll.expense_id = e.id
         LEFT JOIN categories c ON c.id = ll.category_id
-        WHERE 1=1 {extra}
+        WHERE 1=1 {extra} {internal}
         GROUP BY ym, name
         ORDER BY ym
         """
