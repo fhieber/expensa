@@ -2019,6 +2019,96 @@ with tab_settings:
         st.info("Vendor lookup is OFF. Set `vendor_lookup.enabled: true` in your config to enable.")
 
     # -------------------------------------------------------------------
+    # H1: My Accounts (own IBANs)
+    # -------------------------------------------------------------------
+    st.title("My Accounts")
+    st.caption(
+        "Your own IBANs. Rows whose IBAN matches one listed here are "
+        "marked **internal** (`iban_is_known_self = 1`) and become a "
+        "signal the classifier can use to recognise transfers between "
+        "your own accounts. Adding or removing an IBAN here retroactively "
+        "re-flags every matching transaction."
+    )
+    from expense_analyzer.storage.own_ibans import (
+        add_own_iban as _add_own_iban,
+    )
+    from expense_analyzer.storage.own_ibans import (
+        list_own_ibans as _list_own_ibans,
+    )
+    from expense_analyzer.storage.own_ibans import (
+        remove_own_iban as _remove_own_iban,
+    )
+    from expense_analyzer.storage.own_ibans import (
+        update_label as _update_own_iban_label,
+    )
+
+    own_rows = _list_own_ibans(conn)
+    if not own_rows:
+        st.info(
+            "No own IBANs registered yet. Add one below to start tagging "
+            "internal transfers."
+        )
+    else:
+        # Header strip + one row per IBAN with an inline-editable label
+        # and a per-row delete.
+        own_widths = [4, 3, 0.6]
+        h = st.columns(own_widths)
+        h[0].markdown("**IBAN**")
+        h[1].markdown("**Label**")
+        h[2].markdown("")
+        for r in own_rows:
+            row = st.columns(own_widths)
+            row[0].code(r.iban, language=None)
+            new_lbl = row[1].text_input(
+                "label",
+                value=r.label or "",
+                key=f"own_iban_lbl_{r.iban}",
+                label_visibility="collapsed",
+                placeholder="(no label)",
+            )
+            if new_lbl != (r.label or ""):
+                _update_own_iban_label(conn, r.iban, new_lbl)
+            if row[2].button("✕", key=f"own_iban_del_{r.iban}",
+                             help=f"Remove {r.iban}"):
+                rep = _remove_own_iban(conn, r.iban)
+                st.toast(
+                    f"removed; cleared the flag on {rep.n_was_self} "
+                    "transaction(s)."
+                )
+                st.rerun()
+
+    # --- Add a new own-IBAN row ---------------------------------------
+    st.markdown("**Add own IBAN**")
+    add_cols = st.columns([4, 3, 1])
+    new_iban = add_cols[0].text_input(
+        "new iban",
+        key="new_own_iban_iban",
+        label_visibility="collapsed",
+        placeholder="DE89 3704 0044 0532 0130 00",
+    )
+    new_label = add_cols[1].text_input(
+        "new label",
+        key="new_own_iban_label",
+        label_visibility="collapsed",
+        placeholder="Friendly name (optional)",
+    )
+    if add_cols[2].button("Add", type="primary", key="new_own_iban_add",
+                          disabled=not new_iban.strip()):
+        try:
+            rep = _add_own_iban(conn, new_iban, label=new_label or None)
+        except ValueError as e:
+            st.error(f"refusing: {e}")
+        else:
+            st.toast(
+                f"added; flagged {rep.n_now_self} existing transaction(s) "
+                "as internal."
+            )
+            # Clear the inputs.
+            for k in ("new_own_iban_iban", "new_own_iban_label"):
+                st.session_state.pop(k, None)
+            st.rerun()
+
+    # -------------------------------------------------------------------
     # H1: Database
     # -------------------------------------------------------------------
     st.title("Database")
