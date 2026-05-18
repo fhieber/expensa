@@ -14,9 +14,16 @@ from expense_analyzer.viz import (
     anomalies,
     monthly_income_vs_expense,
     recurring_subscriptions,
+    weekly_by_category,
 )
 
 # ---------------------------------------------------------------- recurring
+
+
+RECURRING_COLS = {
+    "name", "cadence", "last_seen", "typical_amount",
+    "charges_per_year", "annualised", "n_charges",
+}
 
 
 def test_recurring_subscriptions_empty_db_returns_empty(
@@ -25,38 +32,80 @@ def test_recurring_subscriptions_empty_db_returns_empty(
     df = recurring_subscriptions(tmp_db)
     assert isinstance(df, pd.DataFrame)
     assert df.empty
-    assert set(df.columns) == {
-        "name", "last_seen", "typical_amount", "n_months", "annualised",
-    }
+    assert set(df.columns) == RECURRING_COLS
 
 
-def test_recurring_subscriptions_detects_monthly_charges(
+def test_recurring_subscriptions_detects_recurring_vendors(
     tmp_db: sqlite3.Connection, fixtures_dir: Path
 ) -> None:
-    """sample_de.csv spans two calendar months; use min_months=2 so the
-    fixture's recurring vendors (REWE, Edeka, Vermieter, Spotify, ...) get
-    surfaced. The strict min_months=3 case is covered by the next test."""
+    """sample_de.csv has multiple vendors with >=3 transactions
+    (REWE / Edeka / etc.). The cadence detector should surface them."""
     ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
-    df = recurring_subscriptions(tmp_db, min_months=2)
+    df = recurring_subscriptions(tmp_db, min_charges=3)
     assert not df.empty
-    # Each row covers >= min_months distinct calendar months by definition.
-    assert (df["n_months"] >= 2).all()
-    # Annualised = 12 * typical_amount.
+    assert set(df.columns) == RECURRING_COLS
+    # Each vendor has the floor number of charges.
+    assert (df["n_charges"] >= 3).all()
+    # Cadence is one of the supported labels.
+    assert df["cadence"].isin({
+        "weekly", "bi-weekly", "monthly", "quarterly",
+        "semi-annual", "annual",
+    }).all()
+    # annualised = typical_amount * charges_per_year (within float tol).
     for _, r in df.iterrows():
-        assert abs(r["annualised"] - r["typical_amount"] * 12) < 1e-6
+        assert abs(r["annualised"]
+                   - r["typical_amount"] * r["charges_per_year"]) < 1e-6
     # Sorted DESC by annualised cost.
     assert (df["annualised"].diff().dropna() <= 0).all()
 
 
-def test_recurring_subscriptions_min_months_filters_out_one_offs(
+def test_recurring_subscriptions_min_charges_floor(
     tmp_db: sqlite3.Connection, fixtures_dir: Path
 ) -> None:
     ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
-    n_at_3 = len(recurring_subscriptions(tmp_db, min_months=3))
-    n_at_99 = len(recurring_subscriptions(tmp_db, min_months=99))
-    # No vendor can hit 99 distinct months in a tiny fixture.
+    n_at_3 = len(recurring_subscriptions(tmp_db, min_charges=3))
+    n_at_99 = len(recurring_subscriptions(tmp_db, min_charges=99))
     assert n_at_99 == 0
     assert n_at_3 >= n_at_99
+
+
+def test_weekly_by_category_groups_by_iso_week(
+    tmp_db: sqlite3.Connection, fixtures_dir: Path
+) -> None:
+    ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
+    df = weekly_by_category(tmp_db)
+    assert not df.empty
+    assert set(df.columns) == {"w", "name", "color", "amount"}
+    # All week labels match the YYYY-Www pattern.
+    import re
+
+    pat = re.compile(r"^\d{4}-W\d{2}$")
+    assert df["w"].map(lambda x: bool(pat.match(x))).all()
+    # Amounts are non-negative (we already take ABS in SQL).
+    assert (df["amount"] >= 0).all()
+
+
+def test_classify_cadence_snaps_to_buckets() -> None:
+    from expense_analyzer.viz.data import _classify_cadence
+
+    # Each of the canonical buckets should map back to itself.
+    label, cpy = _classify_cadence(7)
+    assert label == "weekly"
+    assert abs(cpy - 365.25 / 7) < 1e-6
+
+    label, cpy = _classify_cadence(30)  # ~monthly
+    assert label == "monthly"
+
+    label, cpy = _classify_cadence(91)
+    assert label == "quarterly"
+
+    label, cpy = _classify_cadence(365)
+    assert label == "annual"
+
+    # Edge / degenerate inputs.
+    assert _classify_cadence(0)[0] == "irregular"
+    assert _classify_cadence(-5)[0] == "irregular"
+    assert _classify_cadence(None)[0] == "irregular"
 
 
 # ----------------------------------------------------- income vs expense

@@ -209,3 +209,25 @@ def stacked_daily_by_category(
     )
     fig.update_layout(barmode="stack", legend_title_text="Kategorie")
     return fig
+
+
+def stacked_weekly_by_category(
+    df, color_map: dict[str, str] | None = None
+) -> go.Figure:
+    """Stacked bars per week. Less fine-grained than the daily variant
+    -- the bars stay readable over multi-month windows. Same colour
+    plumbing as the daily/monthly stacked charts."""
+    if df.empty:
+        return go.Figure(layout={"title": "Wöchentliche Ausgaben nach Kategorie (keine Daten)"})
+    cmap = _resolve_color_map(df, color_map)
+    fig = px.bar(
+        df,
+        x="w",
+        y="amount",
+        color="name",
+        color_discrete_map=cmap,
+        title="Wöchentliche Ausgaben nach Kategorie",
+        labels={"w": "Woche", "amount": "Betrag (€)", "name": "Kategorie"},
+    )
+    fig.update_layout(barmode="stack", legend_title_text="Kategorie")
+    return fig

@@ -8,6 +8,7 @@ from expense_analyzer.viz.charts import (
     income_vs_expense_chart,
     pie_chart,
     stacked_daily_by_category,
+    stacked_weekly_by_category,
     trend_lines,
 )
 from expense_analyzer.viz.data import (
@@ -20,6 +21,7 @@ from expense_analyzer.viz.data import (
     recurring_subscriptions,
     spend_by_category,
     top_counterparties,
+    weekly_by_category,
 )
 from expense_analyzer.viz.exporter import save_figure
 
@@ -50,6 +52,8 @@ __all__ = [
     "save_figure",
     "spend_by_category",
     "stacked_daily_by_category",
+    "stacked_weekly_by_category",
     "top_counterparties",
     "trend_lines",
+    "weekly_by_category",
 ]

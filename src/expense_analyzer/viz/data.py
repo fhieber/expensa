@@ -173,68 +173,106 @@ def daily_calendar(
     return df
 
 
+# Cadence buckets used by recurring_subscriptions. Median day-gap snaps
+# to the geometrically-nearest of these. ``charges_per_year`` is what we
+# multiply ``typical_amount`` by to get the annualised cost.
+_CADENCE_BUCKETS: tuple[tuple[str, float], ...] = (
+    ("weekly",      7.0),
+    ("bi-weekly",   14.0),
+    ("monthly",     30.4),    # avg days/month
+    ("quarterly",   91.3),
+    ("semi-annual", 182.6),
+    ("annual",      365.25),
+)
+
+
+def _classify_cadence(median_gap_days: float) -> tuple[str, float]:
+    """Snap a median inter-charge gap to the geometrically-closest
+    cadence bucket. Returns ``(label, charges_per_year)``."""
+    import math
+
+    if median_gap_days is None or median_gap_days <= 0:
+        return ("irregular", 0.0)
+    best_label, best_days = min(
+        _CADENCE_BUCKETS,
+        key=lambda b: abs(math.log(median_gap_days / b[1])),
+    )
+    return (best_label, 365.25 / best_days)
+
+
 def recurring_subscriptions(
     conn: sqlite3.Connection,
     since: date | None = None,
     until: date | None = None,
-    min_months: int = 3,
+    min_charges: int = 3,
 ) -> pd.DataFrame:
-    """Vendors that look like recurring subscriptions: appear in
-    ``min_months`` or more distinct calendar months within the visible
-    date range. Returns one row per vendor sorted by annualised cost.
+    """Vendors that show a consistent **cadence** (weekly / bi-weekly /
+    monthly / quarterly / semi-annual / annual) over their transaction
+    history. Cadence is inferred from the median day-gap between
+    consecutive charges; ``charges_per_year`` falls out of that, and
+    ``annualised = typical_amount * charges_per_year``.
 
-    Columns: ``name``, ``last_seen``, ``typical_amount``, ``n_months``,
-    ``annualised``.
+    Returns one row per vendor with at least ``min_charges`` transactions,
+    sorted DESC by annualised cost.
 
-    The schema has an ``is_likely_recurring`` column, but the ingestion
-    pipeline doesn't populate it (the per-row heuristic is recomputed
-    on demand in ``features/temporal.py``). So we re-detect here via a
-    pure SQL aggregate -- ``HAVING COUNT(DISTINCT ym) >= ?`` -- and use
-    the per-month mean as the typical-amount estimate.
+    Columns: ``name``, ``cadence``, ``last_seen``, ``typical_amount``,
+    ``charges_per_year``, ``annualised``, ``n_charges``.
     """
     extra, params = _date_filter_clause("buchungsdatum", since, until)
     sql = f"""
-        WITH cp_monthly AS (
-            SELECT counterparty_normalized,
-                   strftime('%Y-%m', buchungsdatum) AS ym,
-                   AVG(ABS(betrag_cents)) AS avg_cents
-            FROM expenses
-            WHERE counterparty_normalized IS NOT NULL
-              AND counterparty_normalized <> ''
-              AND is_income = 0
-              {extra}
-            GROUP BY counterparty_normalized, ym
-        ),
-        cp_stats AS (
-            SELECT counterparty_normalized,
-                   COUNT(DISTINCT ym) AS n_months,
-                   AVG(avg_cents) AS typical_cents
-            FROM cp_monthly
-            GROUP BY counterparty_normalized
-            HAVING n_months >= ?
-        )
-        SELECT
-            e.counterparty AS name,
-            MAX(e.buchungsdatum) AS last_seen,
-            s.typical_cents / 100.0 AS typical_amount,
-            s.n_months,
-            (s.typical_cents * 12) / 100.0 AS annualised
-        FROM expenses e
-        JOIN cp_stats s ON s.counterparty_normalized = e.counterparty_normalized
-        WHERE e.is_income = 0 {extra}
-        GROUP BY e.counterparty_normalized, s.typical_cents, s.n_months
-        ORDER BY annualised DESC
+        SELECT counterparty_normalized AS cpn,
+               counterparty AS name,
+               buchungsdatum AS d,
+               ABS(betrag_cents) / 100.0 AS amount
+        FROM expenses
+        WHERE counterparty_normalized IS NOT NULL
+          AND counterparty_normalized <> ''
+          AND is_income = 0
+          {extra}
+        ORDER BY counterparty_normalized, buchungsdatum
     """
-    full_params = params + [min_months] + params
-    rows = conn.execute(sql, full_params).fetchall()
-    df = pd.DataFrame([dict(r) for r in rows])
-    if df.empty:
+    rows = conn.execute(sql, params).fetchall()
+    if not rows:
         return pd.DataFrame(
-            columns=["name", "last_seen", "typical_amount",
-                     "n_months", "annualised"]
+            columns=["name", "cadence", "last_seen", "typical_amount",
+                     "charges_per_year", "annualised", "n_charges"]
         )
-    df["last_seen"] = pd.to_datetime(df["last_seen"]).dt.date
-    return df
+    raw = pd.DataFrame([dict(r) for r in rows])
+    raw["d"] = pd.to_datetime(raw["d"])
+
+    out: list[dict] = []
+    for cpn, g in raw.groupby("cpn"):
+        if len(g) < min_charges:
+            continue
+        dates = g["d"].sort_values().reset_index(drop=True)
+        gaps = dates.diff().dt.days.dropna()
+        if gaps.empty:
+            continue
+        median_gap = float(gaps.median())
+        cadence_label, cpy = _classify_cadence(median_gap)
+        if cpy <= 0:
+            continue
+        typical = float(g["amount"].median())
+        annualised = typical * cpy
+        out.append({
+            # Prefer the most-recent display-friendly counterparty string;
+            # falls back to the normalised key if absent.
+            "name": str(g.sort_values("d", ascending=False).iloc[0]["name"]
+                        or cpn),
+            "cadence": cadence_label,
+            "last_seen": dates.iloc[-1].date(),
+            "typical_amount": typical,
+            "charges_per_year": cpy,
+            "annualised": annualised,
+            "n_charges": int(len(g)),
+        })
+    if not out:
+        return pd.DataFrame(
+            columns=["name", "cadence", "last_seen", "typical_amount",
+                     "charges_per_year", "annualised", "n_charges"]
+        )
+    df = pd.DataFrame(out).sort_values("annualised", ascending=False)
+    return df.reset_index(drop=True)
 
 
 def monthly_income_vs_expense(
@@ -372,6 +410,42 @@ def anomalies(
         ["id", "date", "counterparty", "category",
          "amount", "typical", "vs_typical", "zscore", "n_history"]
     ]
+
+
+def weekly_by_category(
+    conn: sqlite3.Connection,
+    since: date | None = None,
+    until: date | None = None,
+) -> pd.DataFrame:
+    """One row per (ISO-ish week, category) with the spend total.
+
+    Less fine-grained than ``daily_by_category`` -- the daily bars get
+    unreadably narrow over multi-month ranges, which is the common
+    Dashboard case. Week label is ``YYYY-Www`` using
+    ``strftime('%Y-W%W')`` (Monday-based week number, zero-padded),
+    sorts correctly as a string.
+    """
+    extra, params = _date_filter_clause("e.buchungsdatum", since, until)
+    sql = (
+        _LATEST_LABEL_CTE
+        + f"""
+        SELECT strftime('%Y-W%W', e.buchungsdatum) AS w,
+               COALESCE(c.name, '(unkategorisiert)') AS name,
+               COALESCE(c.color, '#bbbbbb') AS color,
+               SUM(ABS(e.betrag_cents)) / 100.0 AS amount
+        FROM expenses e
+        LEFT JOIN latest_label ll ON ll.expense_id = e.id
+        LEFT JOIN categories c ON c.id = ll.category_id
+        WHERE e.is_income = 0 {extra}
+        GROUP BY w, name, color
+        ORDER BY w, name
+        """
+    )
+    rows = conn.execute(sql, params).fetchall()
+    df = pd.DataFrame([dict(r) for r in rows])
+    if df.empty:
+        df = pd.DataFrame(columns=["w", "name", "color", "amount"])
+    return df
 
 
 def daily_by_category(
