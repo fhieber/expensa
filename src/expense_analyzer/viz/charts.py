@@ -131,6 +131,42 @@ def trend_lines(
     return fig
 
 
+def stacked_monthly_by_category(
+    monthly_df, color_map: dict[str, str] | None = None
+) -> go.Figure:
+    """Stacked bar of monthly per-category amount.
+
+    Uses Plotly's ``barmode='relative'`` so **negative amounts stack
+    *below* zero** (expenses pulling the bar down) and **positive amounts
+    stack *above* zero** (income pushing it up). The net month-over-month
+    visual is whatever sticks out from y=0 on each side.
+
+    Cleaner read than `trend_lines` when the user cares about
+    composition + net-flow rather than per-category trajectory.
+    """
+    if monthly_df.empty:
+        return go.Figure(
+            layout={"title": "Monatlicher Saldo je Kategorie (keine Daten)"}
+        )
+    cmap = _resolve_color_map(monthly_df, color_map)
+    fig = px.bar(
+        monthly_df,
+        x="ym",
+        y="amount",
+        color="name",
+        color_discrete_map=cmap,
+        title="Monatlicher Saldo je Kategorie",
+        labels={"ym": "Monat", "amount": "Betrag (€)", "name": "Kategorie"},
+    )
+    # 'relative' = stack positives above 0 / negatives below 0 (a.k.a.
+    # diverging stacked bars). 'stack' would put everything above zero
+    # regardless of sign, which loses the income-vs-expense distinction.
+    fig.update_layout(barmode="relative", legend_title_text="Kategorie")
+    # Zero-line emphasis so the income/expense split is obvious.
+    fig.add_hline(y=0, line_width=1, line_color="rgba(128,128,128,0.6)")
+    return fig
+
+
 def income_vs_expense_chart(df) -> go.Figure:
     """Diverging bar chart of monthly income vs expenses.
 
