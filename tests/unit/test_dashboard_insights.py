@@ -12,6 +12,7 @@ from expense_analyzer.ingestion import ingest_csv
 from expense_analyzer.storage.categories import add_label, upsert_category
 from expense_analyzer.viz import (
     anomalies,
+    monthly_flow_by_category,
     monthly_income_vs_expense,
     recurring_subscriptions,
     weekly_by_category,
@@ -250,3 +251,80 @@ def test_anomalies_columns_include_category_when_labeled(
     assert "category" in df.columns
     # At least one of the anomalies should have the category we just set.
     assert (df["category"] == "Lebensmittel").any()
+
+
+# ----------------- monthly_flow_by_category × monthly_income_vs_expense
+
+
+def test_monthly_flow_excludes_internal_transfers_by_default(
+    tmp_db: sqlite3.Connection, fixtures_dir: Path
+) -> None:
+    """When `exclude_internal=True` (default), the per-category monthly
+    flow must NOT count transactions whose iban is in own_ibans. This
+    keeps it numerically consistent with monthly_income_vs_expense."""
+    ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
+    # Mark every row as internal — the bluntest exclusion.
+    tmp_db.execute("UPDATE expenses SET iban_is_known_self = 1")
+
+    df_excluded = monthly_flow_by_category(tmp_db)        # default True
+    df_included = monthly_flow_by_category(tmp_db, exclude_internal=False)
+
+    # All rows internal -> default call should return empty (no per-cat
+    # rows survive the filter).
+    assert df_excluded.empty or df_excluded["amount"].abs().sum() == 0
+    # Disabling the filter brings them back.
+    assert not df_included.empty
+
+
+def test_monthly_flow_and_income_vs_expense_agree_on_net(
+    tmp_db: sqlite3.Connection, fixtures_dir: Path
+) -> None:
+    """The per-category stacked chart and the income/expense summary
+    chart should expose the SAME net flow per month -- modulo how rows
+    are grouped (by category vs by sign).  This only holds if BOTH
+    apply the same internal-transfer filter, which is the point of
+    this PR: ``monthly_flow_by_category`` now defaults to
+    ``exclude_internal=True``, matching ``monthly_income_vs_expense``.
+
+    Note: pos / neg can NOT be matched per row, because the by-category
+    fn nets each category's rows together. A category with a refund
+    (+) and regular spend (-) becomes one row with the net amount, so
+    the positive vs negative buckets won't reconcile per-row across
+    the two queries. Net totals always reconcile.
+    """
+    ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
+
+    by_cat = monthly_flow_by_category(tmp_db)              # excl_internal=True
+    ivex = monthly_income_vs_expense(tmp_db)               # excl_internal=True
+
+    net_by_month_cat = by_cat.groupby("ym")["amount"].sum()
+    ivex_indexed = ivex.set_index("ym")
+
+    all_months = set(net_by_month_cat.index) | set(ivex_indexed.index)
+    for ym in all_months:
+        net_cat = float(net_by_month_cat.get(ym, 0.0))
+        net_ive = (
+            float(ivex_indexed.loc[ym, "net"])
+            if ym in ivex_indexed.index else 0.0
+        )
+        assert abs(net_cat - net_ive) < 0.01, (
+            f"net mismatch for {ym}: by_cat={net_cat} vs ivex={net_ive}"
+        )
+
+
+def test_monthly_flow_net_changes_when_internals_included(
+    tmp_db: sqlite3.Connection, fixtures_dir: Path
+) -> None:
+    """When internal transfers exist, ``exclude_internal=True`` should
+    yield a different (smaller-in-magnitude) net than
+    ``exclude_internal=False`` -- proving the flag actually filters."""
+    ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
+    # Mark every salary row (positive amounts only) as internal so we
+    # know which side will move when we toggle the flag.
+    tmp_db.execute("UPDATE expenses SET iban_is_known_self = 1 WHERE is_income = 1")
+    excl = monthly_flow_by_category(tmp_db, exclude_internal=True)
+    incl = monthly_flow_by_category(tmp_db, exclude_internal=False)
+    # `incl` should have at least one more row OR a larger absolute net.
+    incl_total = float(incl["amount"].sum())
+    excl_total = float(excl["amount"].sum())
+    assert incl_total != excl_total
