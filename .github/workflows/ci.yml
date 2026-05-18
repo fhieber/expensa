@@ -1,0 +1,54 @@
+name: CI
+
+# Builds the project and runs the fast (non-`slow`-marked) unit tests +
+# ruff on every pull request to `main` and every push to `main` itself.
+# Slow tests (`@pytest.mark.slow`, which download the real ~1 GB HF
+# embedder) are deliberately skipped here -- run them locally.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# Cancel an older run for the same PR/branch when a new push lands.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.os }} · py${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python-version: ['3.11', '3.12']
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements.txt
+
+      # Force CPU-only torch wheels: the project doesn't need CUDA in
+      # tests (HashEmbedder is used everywhere fast tests touch ML),
+      # and the default index can drag a ~2 GB CUDA wheel.
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install --index-url https://download.pytorch.org/whl/cpu torch
+          pip install -e ".[dev]"
+
+      - name: Ruff
+        run: ruff check src/ tests/
+
+      - name: Pytest (fast tests only)
+        run: pytest tests/unit -q --no-header -m "not slow"
