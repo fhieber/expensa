@@ -7,6 +7,7 @@ from expense_analyzer.viz.charts import (
     histogram_amounts,
     pie_chart,
     stacked_daily_by_category,
+    stacked_monthly_by_category,
     trend_lines,
 )
 from expense_analyzer.viz.data import (
@@ -42,6 +43,7 @@ __all__ = [
     "save_figure",
     "spend_by_category",
     "stacked_daily_by_category",
+    "stacked_monthly_by_category",
     "top_counterparties",
     "trend_lines",
 ]
