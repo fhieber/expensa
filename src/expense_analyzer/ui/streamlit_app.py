@@ -279,118 +279,14 @@ with tab_dash:
         else:
             since, until = _dashboard_date_range(preset)
 
-        # ---- Build a single category-color map used by every chart -----
-        # The categories table is the source of truth. Falls back to grey
-        # for the synthetic "(unkategorisiert)" bucket.
-        dash_cats = list_categories(conn)
-        category_color_map: dict[str, str] = {c.name: c.color for c in dash_cats}
-        category_color_map["(unkategorisiert)"] = "#bbbbbb"
-
-        # ---- Charts (all clickable; their selections feed the table) ---
-        # Row 1: pie (left) + stacked daily-by-category (right).
-        # Row 2: monthly trend (full width).
-        c1, c2 = st.columns([1, 1])
-        with c1:
-            # Streamlit's selection callback only fires for trace types
-            # that expose `selectedpoints` (scatter / bar / hist / box).
-            # Pies don't -- so we use a clickable horizontal bar chart of
-            # the SAME data ("Ausgaben nach Kategorie"). Same colours,
-            # sorted by amount, fully clickable.
-            bar_event = st.plotly_chart(
-                bar_spend_by_category(
-                    spend_by_category(conn, since=since, until=until),
-                    color_map=category_color_map,
-                ),
-                width="stretch",
-                on_select="rerun",
-                selection_mode="points",
-                key="dashboard_bar_chart",
-            )
-        with c2:
-            # Weekly aggregation -- daily bars get unreadably narrow over
-            # multi-month ranges, which is the common dashboard case.
-            weekly_df = weekly_by_category(conn, since=since, until=until)
-            weekly_event = st.plotly_chart(
-                stacked_weekly_by_category(weekly_df, color_map=category_color_map),
-                width="stretch",
-                on_select="rerun",
-                selection_mode=("points", "box", "lasso"),
-                key="dashboard_weekly_chart",
-            )
-        # Diverging stacked bar (income above 0, expenses below 0).
-        # Lines were misleading because positive-vs-negative trajectories
-        # were drawn on the same axis with no zero emphasis.
-        trend_event = st.plotly_chart(
-            stacked_monthly_by_category(
-                monthly_flow_by_category(conn, since=since, until=until),
-                color_map=category_color_map,
-            ),
-            width="stretch",
-            on_select="rerun",
-            selection_mode=("points", "box", "lasso"),
-            key="dashboard_trend_chart",
-        )
-        # Histogram dropped per spec; placeholder so the unioning loop below
-        # doesn't choke on a missing variable.
-        hist_event = None
-
-        # ---- Collect chart selections into a single filter set ---------
-        sel_categories: set[str] = set()
-        sel_weeks: set[str] = set()    # YYYY-Www (from weekly bars)
-        sel_months: set[str] = set()   # YYYY-MM (from trend line)
-
-        def _points(evt) -> list[dict]:
-            if evt and getattr(evt, "selection", None):
-                return evt.selection.points or []
-            return []
-
-        # Bar (horizontal, one-trace-per-category): the category lives in
-        # `legendgroup`, with `y` and `label` as fallbacks depending on
-        # how Plotly serialised the selection event.
-        for p in _points(bar_event):
-            cat = (
-                p.get("legendgroup")
-                or p.get("y")
-                or p.get("label")
-                or (p.get("data") or {}).get("name")
-            )
-            if cat:
-                sel_categories.add(str(cat))
-        # Histogram: per-category traces, category in legendgroup.
-        for p in _points(hist_event):
-            cat = p.get("legendgroup")
-            if cat:
-                sel_categories.add(str(cat))
-        # Trend: x is "YYYY-MM" (string from data fn); legendgroup = cat.
-        for p in _points(trend_event):
-            cat = p.get("legendgroup")
-            if cat:
-                sel_categories.add(str(cat))
-            x_val = p.get("x")
-            if x_val:
-                sel_months.add(str(x_val)[:7])
-        # Weekly stacked: x is "YYYY-Www" (string from data fn).
-        for p in _points(weekly_event):
-            cat = p.get("legendgroup")
-            if cat:
-                sel_categories.add(str(cat))
-            x_val = p.get("x")
-            if x_val:
-                sel_weeks.add(str(x_val))
-
-        n_filters = (
-            (1 if sel_categories else 0)
-            + (1 if sel_weeks else 0)
-            + (1 if sel_months else 0)
-        )
-        has_chart_selection = n_filters > 0
-
         # ====================================================================
-        # Insights row: savings rate + net flow + recurring subs + anomalies.
-        # Computed independently of the chart-selection filter so the user
-        # always sees their structural / health view.
+        # Headline stats live AT THE TOP, immediately below the date range
+        # selector. The user said: when scanning the dashboard the savings
+        # rate / income / expenses totals should be the first thing seen,
+        # not buried beneath the per-category charts.
         # ====================================================================
         from expense_analyzer.viz import (
+            DEFAULT_SAVINGS_CATEGORIES,
             anomalies,
             income_vs_expense_chart,
             monthly_income_vs_expense,
@@ -398,12 +294,6 @@ with tab_dash:
             savings_flow,
         )
 
-        st.divider()
-        st.subheader("Insights")
-
-        # ---- Savings rate / income / expense / to-savings totals for the -
-        # ---- SELECTED time frame. All four change together as the user
-        # ---- moves the date-range radio.
         ivex_df = monthly_income_vs_expense(conn, since=since, until=until)
         sav_df = savings_flow(conn, since=since, until=until)
         total_income = float(ivex_df["income"].sum()) if not ivex_df.empty else 0.0
@@ -452,6 +342,68 @@ with tab_dash:
             "both the income and expense sides — so the savings rate "
             "captures real income vs real consumption."
         )
+
+        st.divider()
+
+        # ---- Build a single category-color map used by every chart -----
+        # The categories table is the source of truth. Falls back to grey
+        # for the synthetic "(unkategorisiert)" bucket.
+        dash_cats = list_categories(conn)
+        category_color_map: dict[str, str] = {c.name: c.color for c in dash_cats}
+        category_color_map["(unkategorisiert)"] = "#bbbbbb"
+
+        # ---- Charts (display-only) -------------------------------------
+        # Two-up row: spend-by-category bar + weekly stacked. Sparen is
+        # pre-hidden on both because it represents transfers to the
+        # user's own accounts -- including it visually inflates the
+        # "consumption" picture. Re-enableable via the legend.
+        # Click-to-filter has been removed: charts no longer drive the
+        # records table at the bottom (planned: merge Dashboard + Data
+        # into a single tab, where the table will own its own filters).
+        c1, c2 = st.columns([1, 1])
+        with c1:
+            st.plotly_chart(
+                bar_spend_by_category(
+                    spend_by_category(conn, since=since, until=until),
+                    color_map=category_color_map,
+                    hidden_categories=DEFAULT_SAVINGS_CATEGORIES,
+                ),
+                width="stretch",
+                key="dashboard_bar_chart",
+            )
+        with c2:
+            # Weekly aggregation -- daily bars get unreadably narrow over
+            # multi-month ranges, which is the common dashboard case.
+            weekly_df = weekly_by_category(conn, since=since, until=until)
+            st.plotly_chart(
+                stacked_weekly_by_category(
+                    weekly_df,
+                    color_map=category_color_map,
+                    hidden_categories=DEFAULT_SAVINGS_CATEGORIES,
+                ),
+                width="stretch",
+                key="dashboard_weekly_chart",
+            )
+        # Diverging stacked bar (income above 0, expenses below 0).
+        # Sparen rows are already excluded upstream by
+        # `monthly_flow_by_category(savings_categories=...)`, so no
+        # `hidden_categories` plumbing is needed here.
+        st.plotly_chart(
+            stacked_monthly_by_category(
+                monthly_flow_by_category(conn, since=since, until=until),
+                color_map=category_color_map,
+            ),
+            width="stretch",
+            key="dashboard_trend_chart",
+        )
+
+        # ====================================================================
+        # Insights row: income vs expense chart + recurring subs + anomalies.
+        # The summary metrics that used to live here were promoted to the
+        # top of the tab.
+        # ====================================================================
+        st.divider()
+        st.subheader("Insights")
 
         # ---- Income vs Expenses chart over the visible date range -------
         st.plotly_chart(
@@ -554,37 +506,13 @@ with tab_dash:
         st.divider()
 
         # ---- Single records table --------------------------------------
-        # Header line: shows what filters are active, plus a Clear button.
-        hdr_cols = st.columns([5, 1])
-        if has_chart_selection:
-            parts: list[str] = []
-            if sel_categories:
-                parts.append("cat ∈ {" + ", ".join(sorted(sel_categories)) + "}")
-            if sel_months:
-                parts.append("month ∈ {" + ", ".join(sorted(sel_months)) + "}")
-            if sel_weeks:
-                parts.append("week ∈ {" + ", ".join(sorted(sel_weeks)) + "}")
-            hdr_cols[0].caption(
-                "Filtered by chart selection: " + " · ".join(parts)
-            )
-            if hdr_cols[1].button("Clear chart selection", type="tertiary",
-                                   key="dashboard_clear_selection"):
-                # Drop selection state on every chart and rerun.
-                for k in (
-                    "dashboard_bar_chart", "dashboard_trend_chart",
-                    "dashboard_weekly_chart",
-                ):
-                    st.session_state.pop(k, None)
-                st.rerun()
-        else:
-            date_label = ("all dates" if since is None and until is None
-                          else f"{since} … {until}")
-            hdr_cols[0].caption(
-                f"Showing all records in this view ({date_label}). "
-                "Click any chart slice / bar / point to filter the table."
-            )
+        # Date-range only (chart click-to-filter was removed; planned
+        # follow-up: merge this table into the Data tab so it owns the
+        # full filtering UI).
+        date_label = ("all dates" if since is None and until is None
+                      else f"{since} … {until}")
+        st.caption(f"Showing all expense records in this view ({date_label}).")
 
-        # Build SQL: date range gate + optional selection gate.
         params: list = []
         clauses = ["e.is_income = 0"]
         if since is not None:
@@ -593,23 +521,6 @@ with tab_dash:
         if until is not None:
             clauses.append("e.buchungsdatum <= ?")
             params.append(until.isoformat())
-        if sel_categories:
-            cat_or: list[str] = []
-            for cat in sorted(sel_categories):
-                if cat == "(unkategorisiert)":
-                    cat_or.append("c.id IS NULL")
-                else:
-                    cat_or.append("c.name = ?")
-                    params.append(cat)
-            clauses.append("(" + " OR ".join(cat_or) + ")")
-        if sel_weeks:
-            ph = ",".join("?" * len(sel_weeks))
-            clauses.append(f"strftime('%Y-W%W', e.buchungsdatum) IN ({ph})")
-            params.extend(sorted(sel_weeks))
-        if sel_months:
-            ph = ",".join("?" * len(sel_months))
-            clauses.append(f"strftime('%Y-%m', e.buchungsdatum) IN ({ph})")
-            params.extend(sorted(sel_months))
 
         sql = (
             _LATEST_LABEL_CTE_DASHBOARD
