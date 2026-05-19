@@ -10,8 +10,25 @@ a different colour per chart, defeating visual cross-referencing).
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 import plotly.express as px
 import plotly.graph_objects as go
+
+
+def _hide_traces(fig: go.Figure, hidden_categories: Iterable[str] | None) -> None:
+    """Pre-hide the given category traces by flipping them to ``legendonly``.
+
+    The legend entry stays visible so the user can re-enable a hidden
+    category with a single click. Used by the Dashboard to start Sparen
+    (and any other configured neutral/transfer category) out-of-view
+    without permanently dropping its data."""
+    if not hidden_categories:
+        return
+    hide = {str(c) for c in hidden_categories}
+    for tr in fig.data:
+        if tr.name in hide:
+            tr.visible = "legendonly"
 
 
 def _resolve_color_map(df, color_map: dict[str, str] | None) -> dict[str, str]:
@@ -33,14 +50,22 @@ def _resolve_color_map(df, color_map: dict[str, str] | None) -> dict[str, str]:
 
 
 def bar_spend_by_category(
-    spend_df, color_map: dict[str, str] | None = None
+    spend_df,
+    color_map: dict[str, str] | None = None,
+    hidden_categories: Iterable[str] | None = None,
 ) -> go.Figure:
     """Horizontal bar of spend per category, sorted desc. Same data as the
-    pie -- but clickable. Streamlit's `st.plotly_chart(on_select=...)`
-    only captures selection events from traces that expose a
-    ``selectedpoints`` attribute (scatter, bar, histogram, box). Pie
-    traces don't, so a bar is the cleanest path to a clickable Ausgaben-
-    nach-Kategorie visual."""
+    pie -- but historically clickable. Streamlit's
+    `st.plotly_chart(on_select=...)` only captures selection events from
+    traces that expose a ``selectedpoints`` attribute (scatter, bar,
+    histogram, box). Pie traces don't, so a bar is the cleanest path to
+    an Ausgaben-nach-Kategorie visual.
+
+    ``hidden_categories`` lets the caller pre-hide specific category
+    bars (re-enableable by clicking the legend). One trace per category
+    is emitted (``color='name'``), so legend toggling is per-category.
+    Used by the Dashboard to hide *Sparen* (transfers to own accounts)
+    by default so the chart reflects real consumption."""
     if spend_df.empty:
         return go.Figure(layout={"title": "Ausgaben nach Kategorie (keine Daten)"})
     cmap = _resolve_color_map(spend_df, color_map)
@@ -52,10 +77,12 @@ def bar_spend_by_category(
         color="name",
         orientation="h",
         color_discrete_map=cmap,
-        title="Ausgaben nach Kategorie",
+        title="Summe Ausgaben nach Kategorie",
         labels={"amount": "Summe (€)", "name": "Kategorie"},
     )
-    fig.update_layout(showlegend=False)
+    # Keep legend visible so hidden categories (Sparen) can be re-enabled.
+    fig.update_layout(showlegend=bool(hidden_categories))
+    _hide_traces(fig, hidden_categories)
     return fig
 
 
@@ -248,11 +275,17 @@ def stacked_daily_by_category(
 
 
 def stacked_weekly_by_category(
-    df, color_map: dict[str, str] | None = None
+    df,
+    color_map: dict[str, str] | None = None,
+    hidden_categories: Iterable[str] | None = None,
 ) -> go.Figure:
     """Stacked bars per week. Less fine-grained than the daily variant
     -- the bars stay readable over multi-month windows. Same colour
-    plumbing as the daily/monthly stacked charts."""
+    plumbing as the daily/monthly stacked charts.
+
+    ``hidden_categories`` pre-hides specific category stacks (still
+    re-enableable via the legend). Used by the Dashboard to start
+    *Sparen* hidden so the visible bars match real consumption."""
     if df.empty:
         return go.Figure(layout={"title": "Wöchentliche Ausgaben nach Kategorie (keine Daten)"})
     cmap = _resolve_color_map(df, color_map)
@@ -266,4 +299,5 @@ def stacked_weekly_by_category(
         labels={"w": "Woche", "amount": "Betrag (€)", "name": "Kategorie"},
     )
     fig.update_layout(barmode="stack", legend_title_text="Kategorie")
+    _hide_traces(fig, hidden_categories)
     return fig
