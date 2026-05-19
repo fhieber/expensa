@@ -224,9 +224,14 @@ def _format_eur(cents: int) -> str:
 # ---------------------------------------------------------------------------
 
 _DASHBOARD_PRESETS = [
-    "All", "YTD", "Last month", "Last 3 months",
-    "Last 6 months", "Last year", "Last 2 years", "Custom",
+    # Default is "Last 3 months" -- a 30/90/180-day cluster of short
+    # windows at the front, followed by the annual-ish bucket
+    # (YTD -> Last year -> Last 2 years), and Custom last. Order
+    # picked so adjacent options are semantically close.
+    "All", "Last month", "Last 3 months", "Last 6 months",
+    "YTD", "Last year", "Last 2 years", "Custom",
 ]
+_DASHBOARD_DEFAULT_PRESET = "Last 3 months"
 
 
 def _dashboard_date_range(preset: str, custom_from=None, custom_to=None):
@@ -265,17 +270,28 @@ with tab_dash:
     if n_exp == 0:
         st.info("Import a CSV from the **Data** tab's *Import CSV* expander to get started.")
     else:
-        preset = st.radio(
-            "Date range",
-            _DASHBOARD_PRESETS,
-            index=0,
-            horizontal=True,
-            key="dashboard_date_preset",
-        )
+        # Radio + (when Custom) From/To inputs on a SINGLE row. Giving
+        # the radio the wide column keeps the horizontal labels from
+        # wrapping at typical viewport widths; From/To get just enough
+        # room for a `YYYY-MM-DD` input each.
+        preset_col, from_col, to_col = st.columns([6, 1.5, 1.5])
+        with preset_col:
+            preset = st.radio(
+                "Date range",
+                _DASHBOARD_PRESETS,
+                index=_DASHBOARD_PRESETS.index(_DASHBOARD_DEFAULT_PRESET),
+                horizontal=True,
+                key="dashboard_date_preset",
+            )
         if preset == "Custom":
-            cfrom_col, cto_col = st.columns(2)
-            custom_from = cfrom_col.date_input("From", value=None, key="dashboard_from")
-            custom_to = cto_col.date_input("To", value=None, key="dashboard_to")
+            with from_col:
+                custom_from = st.date_input(
+                    "From", value=None, key="dashboard_from"
+                )
+            with to_col:
+                custom_to = st.date_input(
+                    "To", value=None, key="dashboard_to"
+                )
             since, until = _dashboard_date_range(preset, custom_from, custom_to)
         else:
             since, until = _dashboard_date_range(preset)
