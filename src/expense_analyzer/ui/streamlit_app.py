@@ -973,30 +973,50 @@ with tab_data:
             st.session_state.pop("data_pinned_ids", None)
             st.rerun()
 
-    # Compact SQL gates (date range) + a global free-form search. Categories
-    # / Source / Amount filtering still happens client-side via each AgGrid
-    # column header's built-in filter (Amount has a number range filter --
-    # set min >= 0 for income only, max <= 0 for expenses only).
-    flt_cols = st.columns([1.4, 1.4, 4])
-    with flt_cols[0]:
-        date_from = st.date_input("From", value=None, key="data_from",
-                                  label_visibility="visible")
-    with flt_cols[1]:
-        date_to = st.date_input("To", value=None, key="data_to")
-    with flt_cols[2]:
-        search_text = st.text_input(
-            "Search all fields",
-            value="",
-            key="data_quick_search",
-            placeholder="e.g. food, *aldi*, REWE*Berlin",
-            help=(
-                "Case-insensitive substring match across Counterparty, "
-                "Verwendungszweck, Category, Source, IBAN, Umsatztyp, ID "
-                "and Amount. Use `*` as a wildcard (e.g. `rewe*berlin`). "
-                "Multiple terms separated by space must all match somewhere "
-                "in the row."
-            ),
+    # Date range: same preset row as the Dashboard tab so the UI stays
+    # consistent. Default is "All-time" here (the Data tab is for
+    # exploration / relabelling, where loading the full history is the
+    # natural starting point), whereas the Dashboard defaults to a
+    # 3-month window for glance-readability.
+    data_preset_col, data_from_col, data_to_col = st.columns([6, 1.5, 1.5])
+    with data_preset_col:
+        data_preset = st.radio(
+            "Date range",
+            _DASHBOARD_PRESETS,
+            index=_DASHBOARD_PRESETS.index("All-time"),
+            horizontal=True,
+            key="data_date_preset",
         )
+    if data_preset == "Custom":
+        with data_from_col:
+            custom_from = st.date_input(
+                "From", value=None, key="data_from"
+            )
+        with data_to_col:
+            custom_to = st.date_input(
+                "To", value=None, key="data_to"
+            )
+        date_from, date_to = _dashboard_date_range(
+            data_preset, custom_from, custom_to
+        )
+    else:
+        date_from, date_to = _dashboard_date_range(data_preset)
+
+    # Free-form search lives on its own row below the date picker so the
+    # picker isn't squeezed when the preset row stays full-width.
+    search_text = st.text_input(
+        "Search all fields",
+        value="",
+        key="data_quick_search",
+        placeholder="e.g. food, *aldi*, REWE*Berlin",
+        help=(
+            "Case-insensitive substring match across Counterparty, "
+            "Verwendungszweck, Category, Source, IBAN, Umsatztyp, ID "
+            "and Amount. Use `*` as a wildcard (e.g. `rewe*berlin`). "
+            "Multiple terms separated by space must all match somewhere "
+            "in the row."
+        ),
+    )
     include_income = True  # always loaded; filter via Amount column header
 
     # Extended-columns toggle was here but moved into the top action bar so
@@ -1009,6 +1029,19 @@ with tab_data:
     # holding onto its prior data via the client_wins sync.
     if st.session_state.get("data_quick_search_prev") != search_text:
         st.session_state["data_quick_search_prev"] = search_text
+        st.session_state["data_aggrid_seed"] = (
+            st.session_state.get("data_aggrid_seed", 0) + 1
+        )
+    # Same trick for the date-range preset: one radio click can swap
+    # multiple SQL params at once, so force the grid to reload instead
+    # of carrying over the prior date window's rows.
+    date_range_signature = (
+        data_preset,
+        date_from.isoformat() if date_from else None,
+        date_to.isoformat() if date_to else None,
+    )
+    if st.session_state.get("data_date_range_prev") != date_range_signature:
+        st.session_state["data_date_range_prev"] = date_range_signature
         st.session_state["data_aggrid_seed"] = (
             st.session_state.get("data_aggrid_seed", 0) + 1
         )
