@@ -395,17 +395,22 @@ with tab_dash:
             income_vs_expense_chart,
             monthly_income_vs_expense,
             recurring_subscriptions,
+            savings_flow,
         )
 
         st.divider()
         st.subheader("Insights")
 
-        # ---- Savings rate / income / expense totals for the SELECTED -----
-        # ---- time frame.  All three change together as the user moves the
-        # ---- date-range radio.
+        # ---- Savings rate / income / expense / to-savings totals for the -
+        # ---- SELECTED time frame. All four change together as the user
+        # ---- moves the date-range radio.
         ivex_df = monthly_income_vs_expense(conn, since=since, until=until)
+        sav_df = savings_flow(conn, since=since, until=until)
         total_income = float(ivex_df["income"].sum()) if not ivex_df.empty else 0.0
         total_exp = float(ivex_df["expenses"].sum()) if not ivex_df.empty else 0.0
+        total_to_sav = float(sav_df["to_savings"].sum()) if not sav_df.empty else 0.0
+        total_from_sav = float(sav_df["from_savings"].sum()) if not sav_df.empty else 0.0
+        net_to_sav = total_to_sav - total_from_sav
         if total_income > 0:
             savings_rate = (total_income - total_exp) / total_income
             pct = savings_rate * 100
@@ -426,15 +431,26 @@ with tab_dash:
                 .replace(",", "X").replace(".", ",").replace("X", ".")
             )
 
-        sr_cols = st.columns(3)
+        sr_cols = st.columns(4)
         sr_cols[0].metric("Savings rate", sr_value)
         sr_cols[1].metric("Income", _de_eur(total_income))
         sr_cols[2].metric("Expenses", _de_eur(total_exp))
+        sr_cols[3].metric(
+            "💰 To savings (net)",
+            _de_eur(net_to_sav),
+            help=(
+                f"Money moved to your own accounts (category Sparen) "
+                f"minus what came back. Gross out: {_de_eur(total_to_sav)} · "
+                f"gross in: {_de_eur(total_from_sav)}."
+            ),
+        )
         st.caption(
             "Reflects the currently selected date range above. "
             "🟢 ≥20% · 🟡 0–20% · 🔴 negative. "
-            "Internal transfers (`iban_is_known_self`) are excluded so "
-            "the rate reflects real income vs real consumption."
+            "Rows categorised **Sparen** and rows matching a registered "
+            "own IBAN (`iban_is_known_self`) are treated as neutral on "
+            "both the income and expense sides — so the savings rate "
+            "captures real income vs real consumption."
         )
 
         # ---- Income vs Expenses chart over the visible date range -------

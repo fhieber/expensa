@@ -15,6 +15,7 @@ from expense_analyzer.viz import (
     monthly_flow_by_category,
     monthly_income_vs_expense,
     recurring_subscriptions,
+    savings_flow,
     weekly_by_category,
 )
 
@@ -328,3 +329,140 @@ def test_monthly_flow_net_changes_when_internals_included(
     incl_total = float(incl["amount"].sum())
     excl_total = float(excl["amount"].sum())
     assert incl_total != excl_total
+
+
+# ---------------------------- savings category neutralisation
+
+
+def _label_first_n_as(
+    conn: sqlite3.Connection,
+    category_name: str,
+    n: int,
+    is_income: int | None = None,
+) -> list[int]:
+    """Helper: label the first N rows (optionally constrained by
+    is_income) with category_name. Returns the labelled expense IDs."""
+    cid = upsert_category(conn, category_name)
+    where = "WHERE 1=1"
+    if is_income is not None:
+        where += f" AND is_income = {int(is_income)}"
+    rows = conn.execute(
+        f"SELECT id FROM expenses {where} ORDER BY id LIMIT {n}"
+    ).fetchall()
+    eids = [int(r["id"]) for r in rows]
+    for eid in eids:
+        add_label(conn, eid, cid, "user")
+    return eids
+
+
+def test_monthly_income_vs_expense_drops_sparen_rows(
+    tmp_db: sqlite3.Connection, fixtures_dir: Path
+) -> None:
+    """Rows labelled `Sparen` should NOT count toward income or expenses."""
+    ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
+    # Baseline first.
+    base = monthly_income_vs_expense(tmp_db)
+    base_income = float(base["income"].sum())
+    base_expense = float(base["expenses"].sum())
+
+    # Label a handful of expense rows as Sparen.
+    sparen_eids = _label_first_n_as(tmp_db, "Sparen", 5, is_income=0)
+    sparen_total = float(
+        tmp_db.execute(
+            "SELECT SUM(ABS(betrag_cents)) / 100.0 FROM expenses "
+            f"WHERE id IN ({','.join('?'*len(sparen_eids))})",
+            sparen_eids,
+        ).fetchone()[0]
+    )
+
+    after = monthly_income_vs_expense(tmp_db)
+    after_income = float(after["income"].sum())
+    after_expense = float(after["expenses"].sum())
+
+    # Income unaffected (we only relabelled expense rows).
+    assert abs(after_income - base_income) < 0.01
+    # Expenses dropped by exactly the labelled total.
+    assert abs((base_expense - after_expense) - sparen_total) < 0.01
+
+
+def test_monthly_income_vs_expense_custom_savings_categories(
+    tmp_db: sqlite3.Connection, fixtures_dir: Path
+) -> None:
+    """The `savings_categories` parameter overrides the default."""
+    ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
+    _label_first_n_as(tmp_db, "Sparen", 3, is_income=0)
+    _label_first_n_as(tmp_db, "Investments", 2, is_income=0)
+    # With the default, Investments rows DO count as expenses; only
+    # Sparen rows are dropped.
+    df_default = monthly_income_vs_expense(tmp_db)
+    df_both = monthly_income_vs_expense(
+        tmp_db, savings_categories=("Sparen", "Investments"),
+    )
+    assert float(df_both["expenses"].sum()) < float(df_default["expenses"].sum())
+    # Disabling savings filter via empty tuple brings everything back.
+    df_off = monthly_income_vs_expense(tmp_db, savings_categories=())
+    assert float(df_off["expenses"].sum()) > float(df_default["expenses"].sum())
+
+
+def test_monthly_flow_by_category_drops_sparen_rows(
+    tmp_db: sqlite3.Connection, fixtures_dir: Path
+) -> None:
+    """Sparen-labelled rows shouldn't appear in the per-category chart."""
+    ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
+    _label_first_n_as(tmp_db, "Sparen", 5, is_income=0)
+    df = monthly_flow_by_category(tmp_db)
+    # No row should be named "Sparen" -- the filter removed them entirely.
+    assert "Sparen" not in df["name"].unique().tolist()
+
+
+# ---------------------------------------------------------- savings_flow
+
+
+def test_savings_flow_empty_when_no_sparen_label(
+    tmp_db: sqlite3.Connection, fixtures_dir: Path
+) -> None:
+    ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
+    df = savings_flow(tmp_db)
+    assert isinstance(df, pd.DataFrame)
+    assert df.empty
+    assert set(df.columns) == {"ym", "to_savings", "from_savings", "net"}
+
+
+def test_savings_flow_counts_outflows_and_inflows(
+    tmp_db: sqlite3.Connection, fixtures_dir: Path
+) -> None:
+    ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
+    expense_eids = _label_first_n_as(tmp_db, "Sparen", 3, is_income=0)
+    income_eids = _label_first_n_as(tmp_db, "Sparen", 1, is_income=1)
+    df = savings_flow(tmp_db)
+    assert not df.empty
+    # Sum of |amount| for labelled expense rows.
+    exp_total = float(tmp_db.execute(
+        "SELECT SUM(ABS(betrag_cents)) / 100.0 FROM expenses "
+        f"WHERE id IN ({','.join('?'*len(expense_eids))})",
+        expense_eids,
+    ).fetchone()[0])
+    # Sum of betrag for labelled income rows.
+    inc_total = float(tmp_db.execute(
+        "SELECT SUM(betrag_cents) / 100.0 FROM expenses "
+        f"WHERE id IN ({','.join('?'*len(income_eids))})",
+        income_eids,
+    ).fetchone()[0])
+    assert abs(df["to_savings"].sum() - exp_total) < 0.01
+    assert abs(df["from_savings"].sum() - inc_total) < 0.01
+    # net = to - from
+    assert ((df["to_savings"] - df["from_savings"] - df["net"]).abs() < 1e-6).all()
+
+
+def test_savings_flow_respects_custom_category(
+    tmp_db: sqlite3.Connection, fixtures_dir: Path
+) -> None:
+    """A different category name only counts when listed."""
+    ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
+    _label_first_n_as(tmp_db, "Investments", 2, is_income=0)
+    # Default category list -> empty
+    assert savings_flow(tmp_db).empty
+    # Custom category list -> picks them up
+    df = savings_flow(tmp_db, savings_categories=("Investments",))
+    assert not df.empty
+    assert df["to_savings"].sum() > 0

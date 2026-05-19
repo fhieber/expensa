@@ -13,6 +13,7 @@ from expense_analyzer.viz.charts import (
     trend_lines,
 )
 from expense_analyzer.viz.data import (
+    DEFAULT_SAVINGS_CATEGORIES,
     amount_distribution,
     anomalies,
     daily_by_category,
@@ -20,6 +21,7 @@ from expense_analyzer.viz.data import (
     monthly_flow_by_category,
     monthly_income_vs_expense,
     recurring_subscriptions,
+    savings_flow,
     spend_by_category,
     top_counterparties,
     weekly_by_category,
@@ -44,6 +46,7 @@ __all__ = [
     "CHART_BUILDERS",
     "daily_by_category",
     "daily_calendar",
+    "DEFAULT_SAVINGS_CATEGORIES",
     "histogram_amounts",
     "income_vs_expense_chart",
     "monthly_flow_by_category",
@@ -51,6 +54,7 @@ __all__ = [
     "pie_chart",
     "recurring_subscriptions",
     "save_figure",
+    "savings_flow",
     "spend_by_category",
     "stacked_daily_by_category",
     "stacked_monthly_by_category",

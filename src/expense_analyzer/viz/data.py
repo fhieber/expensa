@@ -24,6 +24,27 @@ WITH latest_label AS (
 """
 
 
+# Category names that represent transfers between the user's own accounts
+# (rather than real income / consumption). Treated as NEUTRAL by all the
+# Dashboard income / expense aggregates: a row labelled with one of these
+# names is excluded from both the income side and the expense side of
+# ``monthly_income_vs_expense`` and from per-category sums. Pass a custom
+# tuple to override on a per-call basis.
+DEFAULT_SAVINGS_CATEGORIES: tuple[str, ...] = ("Sparen",)
+
+
+def _savings_clause(
+    savings_categories: tuple[str, ...] | None,
+) -> tuple[str, list]:
+    """Build an ``AND COALESCE(c.name, '') NOT IN (?, ?, ...)`` clause for
+    excluding rows in any of ``savings_categories``. Returns ``("", [])``
+    when no categories are supplied (no filter)."""
+    if not savings_categories:
+        return "", []
+    ph = ",".join("?" * len(savings_categories))
+    return f" AND COALESCE(c.name, '') NOT IN ({ph})", list(savings_categories)
+
+
 def _date_filter_clause(
     column: str, since: date | None, until: date | None
 ) -> tuple[str, list]:
@@ -75,20 +96,27 @@ def monthly_flow_by_category(
     since: date | None = None,
     until: date | None = None,
     exclude_internal: bool = True,
+    savings_categories: tuple[str, ...] = DEFAULT_SAVINGS_CATEGORIES,
 ) -> pd.DataFrame:
     """Monthly sums per category, signed. Useful for stacked / line charts.
 
     ``exclude_internal`` (default ``True``) drops rows where
     ``iban_is_known_self = 1`` (transfers between the user's own
-    accounts), so this view stays numerically consistent with the
-    ``Einkommen vs Ausgaben`` chart -- the income side and expense side
-    should match exactly when the two are placed side by side. Set to
-    ``False`` to see internal flows split by category too.
+    accounts).
+
+    ``savings_categories`` (default ``("Sparen",)``) drops rows labelled
+    as savings -- the user marks money-moved-to-own-bank-accounts with
+    that category so it doesn't count as consumption. Combined with
+    ``exclude_internal`` the view stays numerically consistent with
+    ``monthly_income_vs_expense``.
+
+    Set either flag to ``False`` / empty to see those flows.
     """
     extra, params = _date_filter_clause("e.buchungsdatum", since, until)
     internal = (
         " AND COALESCE(e.iban_is_known_self, 0) = 0" if exclude_internal else ""
     )
+    savings_sql, savings_params = _savings_clause(savings_categories)
     sql = (
         _LATEST_LABEL_CTE
         + f"""
@@ -99,12 +127,12 @@ def monthly_flow_by_category(
         FROM expenses e
         LEFT JOIN latest_label ll ON ll.expense_id = e.id
         LEFT JOIN categories c ON c.id = ll.category_id
-        WHERE 1=1 {extra} {internal}
+        WHERE 1=1 {extra} {internal} {savings_sql}
         GROUP BY ym, name
         ORDER BY ym
         """
     )
-    rows = conn.execute(sql, params).fetchall()
+    rows = conn.execute(sql, params + savings_params).fetchall()
     df = pd.DataFrame([dict(r) for r in rows])
     if df.empty:
         df = pd.DataFrame(columns=["ym", "name", "color", "amount"])
@@ -287,38 +315,108 @@ def recurring_subscriptions(
     return df.reset_index(drop=True)
 
 
+def savings_flow(
+    conn: sqlite3.Connection,
+    since: date | None = None,
+    until: date | None = None,
+    savings_categories: tuple[str, ...] = DEFAULT_SAVINGS_CATEGORIES,
+) -> pd.DataFrame:
+    """Per-month money the user moved to / from their own savings.
+
+    A row counts as savings flow when its **category** is in
+    ``savings_categories`` (the user's own labelling). ``is_income``
+    decides direction:
+
+    * ``is_income = 0`` -> ``to_savings`` (money leaving this account
+      to a savings account)
+    * ``is_income = 1`` -> ``from_savings`` (money coming back from a
+      savings account; common when funnelling between sub-accounts)
+
+    Returns columns: ``ym``, ``to_savings``, ``from_savings``, ``net``
+    (= ``to_savings - from_savings``, the actual net amount you put
+    aside this month).
+    """
+    if not savings_categories:
+        return pd.DataFrame(
+            columns=["ym", "to_savings", "from_savings", "net"]
+        )
+    extra, params = _date_filter_clause("e.buchungsdatum", since, until)
+    ph = ",".join("?" * len(savings_categories))
+    sql = (
+        _LATEST_LABEL_CTE
+        + f"""
+        SELECT
+            strftime('%Y-%m', e.buchungsdatum) AS ym,
+            SUM(CASE WHEN e.is_income = 0 THEN ABS(e.betrag_cents) ELSE 0 END)
+                / 100.0 AS to_savings,
+            SUM(CASE WHEN e.is_income = 1 THEN e.betrag_cents ELSE 0 END)
+                / 100.0 AS from_savings
+        FROM expenses e
+        LEFT JOIN latest_label ll ON ll.expense_id = e.id
+        LEFT JOIN categories c ON c.id = ll.category_id
+        WHERE COALESCE(c.name, '') IN ({ph}) {extra}
+        GROUP BY ym
+        ORDER BY ym
+        """
+    )
+    rows = conn.execute(sql, list(savings_categories) + params).fetchall()
+    df = pd.DataFrame([dict(r) for r in rows])
+    if df.empty:
+        return pd.DataFrame(
+            columns=["ym", "to_savings", "from_savings", "net"]
+        )
+    df["net"] = df["to_savings"] - df["from_savings"]
+    return df
+
+
 def monthly_income_vs_expense(
     conn: sqlite3.Connection,
     since: date | None = None,
     until: date | None = None,
     exclude_internal: bool = True,
+    savings_categories: tuple[str, ...] = DEFAULT_SAVINGS_CATEGORIES,
 ) -> pd.DataFrame:
     """Per-month income vs expense totals.
 
     Returns: ``ym``, ``income``, ``expenses`` (both positive), ``net``,
     ``savings_rate`` ((income − expenses) / income).
 
-    ``iban_is_known_self`` rows are excluded by default so that money
-    moved between your own accounts isn't counted as either income or
-    expense (which would inflate both sides and skew the savings rate).
+    Rows that look like internal account-to-account transfers are
+    excluded by default so the savings rate reflects real income vs
+    real consumption. Two complementary filters apply:
+
+    * ``iban_is_known_self`` -- automatic match against registered own
+      IBANs. Catches transfers where the user has wired up
+      ``Settings → My Accounts``.
+    * ``savings_categories`` -- the user marks Sparen-bound charges
+      with a designated category name (default ``("Sparen",)``). Catches
+      transfers to / from own banks even when the destination IBAN
+      isn't registered. Income rows in this category are also dropped
+      (a return-trip from savings isn't fresh income).
     """
-    extra, params = _date_filter_clause("buchungsdatum", since, until)
+    extra, params = _date_filter_clause("e.buchungsdatum", since, until)
     internal = (
-        " AND COALESCE(iban_is_known_self, 0) = 0" if exclude_internal else ""
+        " AND COALESCE(e.iban_is_known_self, 0) = 0" if exclude_internal else ""
     )
-    sql = f"""
+    savings_sql, savings_params = _savings_clause(savings_categories)
+    sql = (
+        _LATEST_LABEL_CTE
+        + f"""
         SELECT
-            strftime('%Y-%m', buchungsdatum) AS ym,
-            SUM(CASE WHEN is_income = 1 THEN betrag_cents ELSE 0 END) / 100.0
+            strftime('%Y-%m', e.buchungsdatum) AS ym,
+            SUM(CASE WHEN e.is_income = 1 THEN e.betrag_cents ELSE 0 END) / 100.0
                 AS income,
-            SUM(CASE WHEN is_income = 0 THEN ABS(betrag_cents) ELSE 0 END) / 100.0
+            SUM(CASE WHEN e.is_income = 0 THEN ABS(e.betrag_cents) ELSE 0 END) / 100.0
                 AS expenses
-        FROM expenses
-        WHERE 1=1 {extra} {internal}
+        FROM expenses e
+        LEFT JOIN latest_label ll ON ll.expense_id = e.id
+        LEFT JOIN categories c ON c.id = ll.category_id
+        WHERE 1=1 {extra} {internal} {savings_sql}
         GROUP BY ym
         ORDER BY ym
-    """
-    rows = conn.execute(sql, params).fetchall()
+        """
+    )
+    rows = conn.execute(sql, params + savings_params).fetchall()
     df = pd.DataFrame([dict(r) for r in rows])
     if df.empty:
         return pd.DataFrame(
