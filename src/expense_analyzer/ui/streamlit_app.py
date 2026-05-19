@@ -5,7 +5,7 @@ Tabs, in order:
   2. Categories — types table with per-category stats, add/remove.
   3. Data       — sortable/filterable table; inline category edit;
                   selection-driven Auto-Label flow. Upload+ingest lives in
-                  a collapsed "Import CSV" expander at the top.
+                  a collapsed "Import Data" expander at the top.
   4. Settings   — model info, privacy, danger zone.
 
 No sidebar by design — everything lives in tabs.
@@ -269,7 +269,7 @@ with tab_dash:
     st.header("Dashboard")
     n_exp = conn.execute("SELECT COUNT(*) AS n FROM expenses").fetchone()["n"]
     if n_exp == 0:
-        st.info("Import a CSV from the **Data** tab's *Import CSV* expander to get started.")
+        st.info("Import a CSV from the **Data** tab's *Import Data* expander to get started.")
     else:
         # Radio + (when Custom) From/To inputs on a SINGLE row. Giving
         # the radio the wide column keeps the horizontal labels from
@@ -778,7 +778,7 @@ with tab_cats:
 # Tab 3: Data
 # ---------------------------------------------------------------------------
 #
-# Upload + ingest now lives in an "Import CSV" expander at the top of this
+# Upload + ingest now lives in an "Import Data" expander at the top of this
 # tab. After a successful ingest, the new expense IDs are pinned in
 # session_state["data_pinned_ids"] so the filter shows exactly those rows.
 # Labeling happens through the selection-driven Auto-Label flow below.
@@ -898,10 +898,8 @@ def _build_data_query(
 
 
 with tab_data:
-    st.header("Data")
-
-    # --- Import CSV (collapsed) ---------------------------------------------
-    with st.expander("Import CSV", expanded=False):
+    # --- Import Data (collapsed) --------------------------------------------
+    with st.expander("Import Data", expanded=False):
         st.caption(
             "Drop one or more German bank-export CSVs (`;` separator, comma "
             "decimal). On Ingest each new row's text/IBAN/numeric features "
