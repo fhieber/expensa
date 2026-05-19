@@ -339,29 +339,30 @@ with tab_dash:
                 .replace(",", "X").replace(".", ",").replace("X", ".")
             )
 
-        sr_cols = st.columns(4)
-        sr_cols[0].metric("Savings rate", sr_value)
-        sr_cols[1].metric("Income", _de_eur(total_income))
-        sr_cols[2].metric("Expenses", _de_eur(total_exp))
-        sr_cols[3].metric(
-            "💰 To savings (net)",
-            _de_eur(net_to_sav),
-            help=(
-                f"Money moved to your own accounts (category Sparen) "
-                f"minus what came back. Gross out: {_de_eur(total_to_sav)} · "
-                f"gross in: {_de_eur(total_from_sav)}."
-            ),
-        )
-        st.caption(
-            "Reflects the currently selected date range above. "
-            "🟢 ≥20% · 🟡 0–20% · 🔴 negative. "
-            "Rows categorised **Sparen** and rows matching a registered "
-            "own IBAN (`iban_is_known_self`) are treated as neutral on "
-            "both the income and expense sides — so the savings rate "
-            "captures real income vs real consumption."
-        )
-
-        st.divider()
+        # Bounded container so the headline tiles read as a single
+        # unit, matching the chart-expander frames below.
+        with st.container(border=True):
+            sr_cols = st.columns(4)
+            sr_cols[0].metric("Savings rate", sr_value)
+            sr_cols[1].metric("Income", _de_eur(total_income))
+            sr_cols[2].metric("Expenses", _de_eur(total_exp))
+            sr_cols[3].metric(
+                "💰 To savings (net)",
+                _de_eur(net_to_sav),
+                help=(
+                    f"Money moved to your own accounts (category Sparen) "
+                    f"minus what came back. Gross out: {_de_eur(total_to_sav)} · "
+                    f"gross in: {_de_eur(total_from_sav)}."
+                ),
+            )
+            st.caption(
+                "Reflects the currently selected date range above. "
+                "🟢 ≥20% · 🟡 0–20% · 🔴 negative. "
+                "Rows categorised **Sparen** and rows matching a registered "
+                "own IBAN (`iban_is_known_self`) are treated as neutral on "
+                "both the income and expense sides — so the savings rate "
+                "captures real income vs real consumption."
+            )
 
         # ---- Build a single category-color map used by every chart -----
         # The categories table is the source of truth. Falls back to grey
