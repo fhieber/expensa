@@ -226,10 +226,11 @@ def _format_eur(cents: int) -> str:
 _DASHBOARD_PRESETS = [
     # Default is "Last 3 months" -- a 30/90/180-day cluster of short
     # windows at the front, followed by the annual-ish bucket
-    # (YTD -> Last year -> Last 2 years), and Custom last. Order
-    # picked so adjacent options are semantically close.
-    "All", "Last month", "Last 3 months", "Last 6 months",
-    "YTD", "Last year", "Last 2 years", "Custom",
+    # (YTD -> Last year -> Last 2 years), with "All-time" and Custom
+    # at the end. Order picked so adjacent options are semantically
+    # close.
+    "Last month", "Last 3 months", "Last 6 months",
+    "YTD", "Last year", "Last 2 years", "All-time", "Custom",
 ]
 _DASHBOARD_DEFAULT_PRESET = "Last 3 months"
 
@@ -239,7 +240,7 @@ def _dashboard_date_range(preset: str, custom_from=None, custom_to=None):
     from datetime import timedelta
 
     today = _date.today()
-    if preset == "All":
+    if preset == "All-time":
         return None, None
     if preset == "YTD":
         return _date(today.year, 1, 1), today
@@ -381,7 +382,14 @@ with tab_dash:
         # chart legend once a chart is expanded.
         def _chart_expander(label: str, fig, expanded: bool, key: str) -> None:
             with st.expander(label, expanded=expanded):
-                fig.update_layout(title=None)
+                # `title=None` renders as the literal string "undefined"
+                # in some Plotly/Streamlit version combos. Setting an
+                # empty title with zero top margin removes both the
+                # text and the reserved gap above the chart.
+                fig.update_layout(
+                    title_text="",
+                    margin={"t": 20, "b": 20, "l": 0, "r": 0},
+                )
                 st.plotly_chart(fig, width="stretch", key=key)
 
         _chart_expander(
