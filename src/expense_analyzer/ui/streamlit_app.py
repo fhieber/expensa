@@ -254,6 +254,7 @@ def _dashboard_date_range(preset: str, custom_from=None, custom_to=None):
 
 
 with tab_dash:
+    from expense_analyzer.utils.colors import readable_text_color
     from expense_analyzer.viz import (
         stacked_weekly_by_category,
         weekly_by_category,
@@ -352,74 +353,142 @@ with tab_dash:
         category_color_map: dict[str, str] = {c.name: c.color for c in dash_cats}
         category_color_map["(unkategorisiert)"] = "#bbbbbb"
 
-        # ---- Charts (display-only) -------------------------------------
-        # Two-up row: spend-by-category bar + weekly stacked. Sparen is
-        # pre-hidden on both because it represents transfers to the
-        # user's own accounts -- including it visually inflates the
-        # "consumption" picture. Re-enableable via the legend.
-        # Click-to-filter has been removed: charts no longer drive the
-        # records table at the bottom (planned: merge Dashboard + Data
-        # into a single tab, where the table will own its own filters).
-        c1, c2 = st.columns([1, 1])
-        with c1:
-            st.plotly_chart(
-                bar_spend_by_category(
-                    spend_by_category(conn, since=since, until=until),
-                    color_map=category_color_map,
-                    hidden_categories=DEFAULT_SAVINGS_CATEGORIES,
-                ),
-                width="stretch",
-                key="dashboard_bar_chart",
-            )
-        with c2:
-            # Weekly aggregation -- daily bars get unreadably narrow over
-            # multi-month ranges, which is the common dashboard case.
-            weekly_df = weekly_by_category(conn, since=since, until=until)
-            st.plotly_chart(
-                stacked_weekly_by_category(
-                    weekly_df,
-                    color_map=category_color_map,
-                    hidden_categories=DEFAULT_SAVINGS_CATEGORIES,
-                ),
-                width="stretch",
-                key="dashboard_weekly_chart",
-            )
+        # ---- Charts (display-only, each in a collapsible expander) -----
+        # The expander label IS the chart title, so we suppress the
+        # in-chart title to avoid double-rendering. By default only the
+        # two "structural" charts (Summe Ausgaben + Monatlicher Saldo)
+        # are expanded; Wöchentliche + Einkommen-vs-Ausgaben start
+        # collapsed so the page is scannable at first glance.
+        # Sparen is pre-hidden on the per-category charts because it
+        # represents transfers to the user's own accounts; including it
+        # would inflate the "consumption" picture. Re-enableable via the
+        # chart legend once a chart is expanded.
+        def _chart_expander(label: str, fig, expanded: bool, key: str) -> None:
+            with st.expander(label, expanded=expanded):
+                fig.update_layout(title=None)
+                st.plotly_chart(fig, width="stretch", key=key)
+
+        _chart_expander(
+            "Summe Ausgaben nach Kategorie",
+            bar_spend_by_category(
+                spend_by_category(conn, since=since, until=until),
+                color_map=category_color_map,
+                hidden_categories=DEFAULT_SAVINGS_CATEGORIES,
+            ),
+            expanded=True,
+            key="dashboard_bar_chart",
+        )
+        _chart_expander(
+            "Wöchentliche Ausgaben nach Kategorie",
+            stacked_weekly_by_category(
+                weekly_by_category(conn, since=since, until=until),
+                color_map=category_color_map,
+                hidden_categories=DEFAULT_SAVINGS_CATEGORIES,
+            ),
+            expanded=False,
+            key="dashboard_weekly_chart",
+        )
         # Diverging stacked bar (income above 0, expenses below 0).
         # Sparen rows are already excluded upstream by
         # `monthly_flow_by_category(savings_categories=...)`, so no
         # `hidden_categories` plumbing is needed here.
-        st.plotly_chart(
+        _chart_expander(
+            "Monatlicher Saldo je Kategorie",
             stacked_monthly_by_category(
                 monthly_flow_by_category(conn, since=since, until=until),
                 color_map=category_color_map,
             ),
-            width="stretch",
+            expanded=True,
             key="dashboard_trend_chart",
         )
-
-        # ====================================================================
-        # Insights row: income vs expense chart + recurring subs + anomalies.
-        # The summary metrics that used to live here were promoted to the
-        # top of the tab.
-        # ====================================================================
-        st.divider()
-        st.subheader("Insights")
-
-        # ---- Income vs Expenses chart over the visible date range -------
-        st.plotly_chart(
+        # Income vs Expenses chart over the visible date range. Used to
+        # live under an "Insights" subheader; the subheader was removed
+        # because the section above is now headline-level on its own.
+        _chart_expander(
+            "Einkommen vs Ausgaben (monatlich)",
             income_vs_expense_chart(ivex_df),
-            width="stretch",
+            expanded=False,
             key="dashboard_ivex_chart",
         )
 
-        # ---- Two-column row: recurring subs | anomalies -----------------
-        # Both intentionally use the FULL data history regardless of the
-        # dashboard date range -- recurring patterns and price-spike
-        # anomalies are most informative when seen over everything.
-        sub_cols = st.columns([1, 1])
+        st.divider()
 
-        with sub_cols[0]:
-            st.markdown("**Recurring expenses**  ·  _all-time_")
+        # ---- Single records table --------------------------------------
+        # Read-only (relabel happens on the Data tab). Date-range driven.
+        # Category cells are coloured with the user-chosen category
+        # colour from the Categories tab; text colour is auto-picked
+        # (black/white) to stay legible on any background.
+        params: list = []
+        clauses = ["e.is_income = 0"]
+        if since is not None:
+            clauses.append("e.buchungsdatum >= ?")
+            params.append(since.isoformat())
+        if until is not None:
+            clauses.append("e.buchungsdatum <= ?")
+            params.append(until.isoformat())
+
+        sql = (
+            _LATEST_LABEL_CTE_DASHBOARD
+            + " WHERE " + " AND ".join(clauses)
+            + " ORDER BY e.buchungsdatum DESC, e.id DESC LIMIT 5000"
+        )
+        full_df = pd.read_sql_query(sql, conn, params=params)
+        if not full_df.empty:
+            full_df["buchungsdatum"] = pd.to_datetime(full_df["buchungsdatum"])
+            full_df["category"] = full_df["category"].fillna("(unkategorisiert)")
+
+        date_label = ("all dates" if since is None and until is None
+                      else f"{since} … {until}")
+        st.caption(
+            f"{len(full_df)} record(s) · date range: {date_label}"
+        )
+
+        # Cell-level colouring via pandas Styler. `applymap` is the right
+        # tool here -- per-cell function -> CSS string. Streamlit's
+        # st.dataframe consumes Stylers directly. The category lookup
+        # falls back to neutral grey for "(unkategorisiert)" so empty
+        # cells still get *some* fill rather than a jarring transparent
+        # gap mid-table.
+        def _style_category(val: str) -> str:
+            name = (val or "").strip()
+            if not name or name == "(unkategorisiert)":
+                return ""
+            bg = category_color_map.get(name, "#bbbbbb")
+            fg = readable_text_color(bg)
+            return f"background-color: {bg}; color: {fg};"
+
+        if full_df.empty:
+            styled = full_df
+        else:
+            styled = full_df.style.map(_style_category, subset=["category"])
+
+        st.dataframe(
+            styled,
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "id": st.column_config.NumberColumn("ID", width="small"),
+                "buchungsdatum": st.column_config.DateColumn(
+                    "Date", format="DD.MM.YYYY"
+                ),
+                "counterparty": st.column_config.TextColumn("Counterparty"),
+                "verwendungszweck": st.column_config.TextColumn("Verwendungszweck"),
+                "betrag_€": st.column_config.NumberColumn(
+                    "Amount €", format="%.2f"
+                ),
+                "category": st.column_config.TextColumn("Category"),
+                "iban": st.column_config.TextColumn("IBAN"),
+            },
+            key="dashboard_records_table",
+        )
+
+        # ---- All-time helper tables: recurring subs + anomalies ---------
+        # Placed BELOW the records table because they use the full
+        # history regardless of the dashboard date range, so they don't
+        # belong inline with the date-range-scoped views above. Both
+        # collapsed by default -- they're reference views, not always
+        # needed.
+        with st.expander("Recurring expenses (all-time)", expanded=False):
             st.caption(
                 "Vendors with a detectable cadence (weekly / bi-weekly / "
                 "monthly / quarterly / semi-annual / annual). Cadence is "
@@ -459,8 +528,7 @@ with tab_dash:
                     },
                 )
 
-        with sub_cols[1]:
-            st.markdown("**Unusual amounts**  ·  _all-time_")
+        with st.expander("Unusual amounts (all-time)", expanded=False):
             st.caption(
                 "Rows whose amount is more than 2σ above the vendor's "
                 "historical average. Surfaces price hikes, double-charges "
@@ -502,98 +570,6 @@ with tab_dash:
                         ),
                     },
                 )
-
-        st.divider()
-
-        # ---- Single records table --------------------------------------
-        # Date-range only (chart click-to-filter was removed; planned
-        # follow-up: merge this table into the Data tab so it owns the
-        # full filtering UI).
-        date_label = ("all dates" if since is None and until is None
-                      else f"{since} … {until}")
-        st.caption(f"Showing all expense records in this view ({date_label}).")
-
-        params: list = []
-        clauses = ["e.is_income = 0"]
-        if since is not None:
-            clauses.append("e.buchungsdatum >= ?")
-            params.append(since.isoformat())
-        if until is not None:
-            clauses.append("e.buchungsdatum <= ?")
-            params.append(until.isoformat())
-
-        sql = (
-            _LATEST_LABEL_CTE_DASHBOARD
-            + " WHERE " + " AND ".join(clauses)
-            + " ORDER BY e.buchungsdatum DESC, e.id DESC LIMIT 5000"
-        )
-        full_df = pd.read_sql_query(sql, conn, params=params)
-        if not full_df.empty:
-            full_df["buchungsdatum"] = pd.to_datetime(full_df["buchungsdatum"])
-            full_df["category"] = full_df["category"].fillna("(unkategorisiert)")
-        st.caption(
-            f"{len(full_df)} record(s) · click a Category cell to relabel"
-        )
-
-        # Inline Category editing (same pattern as Data tab): a
-        # SelectboxColumn with alphabetical category options.
-        dash_cat_id_by_name = {c.name: c.id for c in dash_cats}
-        dash_cat_options = [""] + sorted(c.name for c in dash_cats)
-        display_full_df = full_df.copy()
-        if not display_full_df.empty:
-            display_full_df.loc[
-                display_full_df["category"] == "(unkategorisiert)", "category"
-            ] = ""
-        dash_edited = st.data_editor(
-            display_full_df,
-            hide_index=True,
-            width="stretch",
-            column_config={
-                "id": st.column_config.NumberColumn("ID", disabled=True, width="small"),
-                "buchungsdatum": st.column_config.DateColumn(
-                    "Date", disabled=True, format="DD.MM.YYYY"
-                ),
-                "counterparty": st.column_config.TextColumn(
-                    "Counterparty", disabled=True
-                ),
-                "verwendungszweck": st.column_config.TextColumn(
-                    "Verwendungszweck", disabled=True
-                ),
-                "betrag_€": st.column_config.NumberColumn(
-                    "Amount €", disabled=True, format="%.2f"
-                ),
-                "category": st.column_config.SelectboxColumn(
-                    "Category",
-                    options=dash_cat_options,
-                    required=False,
-                ),
-                "iban": st.column_config.TextColumn(
-                    "IBAN", disabled=True
-                ),
-            },
-            disabled=[c for c in display_full_df.columns if c != "category"],
-            key="dashboard_records_editor",
-        )
-
-        # Diff against the source df; persist any category changes.
-        if not full_df.empty:
-            dash_changed = 0
-            for idx in full_df.index:
-                new_val = str(dash_edited.at[idx, "category"] or "").strip()
-                if not new_val:
-                    continue
-                old_val = str(full_df.at[idx, "category"] or "").strip()
-                if old_val == "(unkategorisiert)":
-                    old_val = ""
-                if new_val == old_val:
-                    continue
-                cid = dash_cat_id_by_name.get(new_val)
-                if cid is None:
-                    continue
-                add_label(conn, int(full_df.at[idx, "id"]), cid, "user")
-                dash_changed += 1
-            if dash_changed:
-                st.toast(f"saved {dash_changed} label change(s)")
 
 
 # ---------------------------------------------------------------------------
