@@ -41,7 +41,6 @@ _BASE_COLUMNS = [
     "iban_is_known_self",
     "has_glaeubiger_id",
     "mandatsreferenz_present",
-    "cluster_id",
 ]
 
 

@@ -36,8 +36,6 @@ CREATE TABLE IF NOT EXISTS expenses (
     mandatsreferenz_present     INTEGER,
     is_likely_recurring         INTEGER,
 
-    cluster_id                  INTEGER,
-
     source_file                 TEXT,
     imported_at                 TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     dedup_hash                  TEXT NOT NULL UNIQUE
@@ -46,7 +44,6 @@ CREATE TABLE IF NOT EXISTS expenses (
 CREATE INDEX IF NOT EXISTS idx_expenses_buchungsdatum ON expenses(buchungsdatum);
 CREATE INDEX IF NOT EXISTS idx_expenses_counterparty_norm ON expenses(counterparty_normalized);
 CREATE INDEX IF NOT EXISTS idx_expenses_iban ON expenses(iban);
-CREATE INDEX IF NOT EXISTS idx_expenses_cluster ON expenses(cluster_id);
 
 CREATE TABLE IF NOT EXISTS embeddings (
     expense_id   INTEGER PRIMARY KEY REFERENCES expenses(id) ON DELETE CASCADE,
@@ -110,4 +107,4 @@ CREATE TABLE IF NOT EXISTS schema_meta (
     key   TEXT PRIMARY KEY,
     value TEXT
 );
-INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('schema_version', '1');
+INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('schema_version', '2');

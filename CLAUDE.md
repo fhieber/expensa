@@ -63,6 +63,21 @@ See the "Proposed feature set per expense" section of `../../.claude/plans/build
 
 (Append new instructions here verbatim with date so context is preserved.)
 
+### 2026-05-21 — Clustering removed; deps trimmed
+
+The HDBSCAN/UMAP clustering module from the original plan was never
+implemented and the `cluster_id` column went unused. As part of the
+big-cleanup refactor:
+
+- Dropped deps from `pyproject.toml` + `requirements.txt`:
+  `umap-learn`, `hdbscan`, `matplotlib`, `sqlalchemy`. Made `kaleido`
+  an optional `[png-export]` extra (only needed for PNG/SVG/PDF chart
+  export; HTML export needs nothing extra).
+- Dropped `cluster_id` column + `idx_expenses_cluster` index from
+  `schema.sql`. Schema bumped to version 2.
+- If clustering is reintroduced later it should land as an opt-in
+  `[clustering]` extra with its own module under `ml/`.
+
 ### 2026-05-10 — GPU acceleration deferred to follow-up
 
 Initial build ships CPU-friendly defaults so the package is portable and
