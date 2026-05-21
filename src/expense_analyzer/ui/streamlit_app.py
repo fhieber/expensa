@@ -14,6 +14,9 @@ No sidebar by design — everything lives in tabs.
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Callable
+from datetime import date as _date_cls
+from datetime import timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -231,40 +234,38 @@ def _format_eur(cents: int) -> str:
 # Tab 1: Dashboard
 # ---------------------------------------------------------------------------
 
-_DASHBOARD_PRESETS = [
-    # Default is "Last 3 months" -- a 30/90/180-day cluster of short
-    # windows at the front, followed by the annual-ish bucket
-    # (YTD -> Last year -> Last 2 years), with "All-time" and Custom
-    # at the end. Order picked so adjacent options are semantically
-    # close.
-    "Last month", "Last 3 months", "Last 6 months",
-    "YTD", "Last year", "Last 2 years", "All-time", "Custom",
-]
-_DASHBOARD_DEFAULT_PRESET = "Last 3 months"
+# Date-range presets, table-driven so adding a preset means one line.
+# Each entry maps `today -> (since, until)`. "Custom" is special-cased
+# in the resolver. "Past N days" instead of "Last N months" because the
+# old labels suggested calendar-month semantics that the code didn't
+# actually implement (e.g. "Last month" returned today - 30 days, not
+# the previous calendar month).
+_PRESET_RANGES: dict[str, Callable[[_date_cls], tuple[_date_cls | None, _date_cls | None]]] = {
+    "Past 30 days":  lambda today: (today - timedelta(days=30), today),
+    "Past 90 days":  lambda today: (today - timedelta(days=90), today),
+    "Past 180 days": lambda today: (today - timedelta(days=180), today),
+    "YTD":           lambda today: (_date_cls(today.year, 1, 1), today),
+    "Past 12 months": lambda today: (today - timedelta(days=365), today),
+    "Past 24 months": lambda today: (today - timedelta(days=730), today),
+    "All-time":      lambda today: (None, None),
+}
+_DASHBOARD_PRESETS: list[str] = list(_PRESET_RANGES) + ["Custom"]
+_DASHBOARD_DEFAULT_PRESET = "Past 90 days"
 
 
-def _dashboard_date_range(preset: str, custom_from=None, custom_to=None):
-    from datetime import date as _date
-    from datetime import timedelta
+def _dashboard_date_range(
+    preset: str,
+    custom_from: _date_cls | None = None,
+    custom_to: _date_cls | None = None,
+) -> tuple[_date_cls | None, _date_cls | None]:
+    """Resolve a preset name to a (since, until) date pair.
 
-    today = _date.today()
-    if preset == "All-time":
-        return None, None
-    if preset == "YTD":
-        return _date(today.year, 1, 1), today
-    if preset == "Last month":
-        return today - timedelta(days=30), today
-    if preset == "Last 3 months":
-        return today - timedelta(days=90), today
-    if preset == "Last 6 months":
-        return today - timedelta(days=180), today
-    if preset == "Last year":
-        return today - timedelta(days=365), today
-    if preset == "Last 2 years":
-        return today - timedelta(days=730), today
+    Unknown preset names raise KeyError -- previously they silently
+    mapped to (None, None) which masked typos in the preset list.
+    """
     if preset == "Custom":
         return custom_from, custom_to
-    return None, None
+    return _PRESET_RANGES[preset](_date_cls.today())
 
 
 with tab_dash:
