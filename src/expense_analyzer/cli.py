@@ -610,12 +610,6 @@ def export(ctx: click.Context, fmt: str, out: Path | None) -> None:
     conn = _connect(cfg)
     try:
         sql = """
-            WITH latest_label AS (
-                SELECT l.expense_id, l.category_id, l.source AS label_source, l.confidence
-                FROM labels l
-                JOIN (SELECT expense_id, MAX(id) AS m FROM labels GROUP BY expense_id) x
-                  ON l.id = x.m
-            )
             SELECT e.*, c.name AS category, ll.label_source, ll.confidence,
                    n.text AS note
             FROM expenses e

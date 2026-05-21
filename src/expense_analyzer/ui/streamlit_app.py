@@ -47,21 +47,29 @@ from expense_analyzer.viz import (
     stacked_monthly_by_category,
 )
 
-# Shared CTE used by the Dashboard drill-down queries.
-_LATEST_LABEL_CTE_DASHBOARD = """
-    WITH latest_label AS (
-        SELECT l.expense_id, l.category_id
-        FROM labels l
-        JOIN (
-            SELECT expense_id, MAX(id) AS max_id
-            FROM labels GROUP BY expense_id
-        ) m ON l.id = m.max_id
-    )
+# Shared SELECTs — both join the most-recent label via the
+# `latest_label` view defined in schema.sql. SQLite inlines the view at
+# plan time, so this is just a list of selected columns.
+_DASHBOARD_RECORDS_SELECT = """
     SELECT
         e.id, e.buchungsdatum, e.counterparty, e.verwendungszweck,
         e.betrag_cents / 100.0 AS "betrag_€",
         COALESCE(c.name, '(unkategorisiert)') AS category,
         e.iban
+    FROM expenses e
+    LEFT JOIN latest_label ll ON ll.expense_id = e.id
+    LEFT JOIN categories c ON c.id = ll.category_id
+"""
+
+_DATA_RECORDS_SELECT = """
+    SELECT
+        e.id, e.buchungsdatum,
+        e.counterparty, e.zahlungspflichtiger, e.verwendungszweck,
+        e.betrag_cents / 100.0 AS "betrag_€",
+        c.name AS category, ll.category_id AS category_id,
+        ll.label_source AS label_source, ll.confidence,
+        e.umsatztyp, e.iban, e.iban_is_foreign,
+        e.has_glaeubiger_id, e.mandatsreferenz_present
     FROM expenses e
     LEFT JOIN latest_label ll ON ll.expense_id = e.id
     LEFT JOIN categories c ON c.id = ll.category_id
@@ -453,7 +461,7 @@ with tab_dash:
             params.append(until.isoformat())
 
         sql = (
-            _LATEST_LABEL_CTE_DASHBOARD
+            _DASHBOARD_RECORDS_SELECT
             + " WHERE " + " AND ".join(clauses)
             + " ORDER BY e.buchungsdatum DESC, e.id DESC LIMIT 5000"
         )
@@ -805,27 +813,7 @@ def _build_data_query(
         # we're pinning to a specific id set.
         where = " WHERE " + " AND ".join(parts)
         sql = (
-            """
-            WITH latest_label AS (
-                SELECT l.expense_id, l.category_id, l.source, l.confidence
-                FROM labels l
-                JOIN (
-                    SELECT expense_id, MAX(id) AS max_id
-                    FROM labels GROUP BY expense_id
-                ) m ON l.id = m.max_id
-            )
-            SELECT
-                e.id, e.buchungsdatum,
-                e.counterparty, e.zahlungspflichtiger, e.verwendungszweck,
-                e.betrag_cents / 100.0 AS "betrag_€",
-                c.name AS category, ll.category_id AS category_id,
-                ll.source AS label_source, ll.confidence,
-                e.umsatztyp, e.iban, e.iban_is_foreign,
-                e.has_glaeubiger_id, e.mandatsreferenz_present
-            FROM expenses e
-            LEFT JOIN latest_label ll ON ll.expense_id = e.id
-            LEFT JOIN categories c ON c.id = ll.category_id
-            """
+            _DATA_RECORDS_SELECT
             + where
             + " ORDER BY e.buchungsdatum DESC, e.id DESC"
         )
@@ -862,35 +850,15 @@ def _build_data_query(
             cat_conds.append("c.id IS NULL")
         parts.append("(" + " OR ".join(cat_conds) + ")")
     if source == "user":
-        parts.append("ll.source = 'user'")
+        parts.append("ll.label_source = 'user'")
     elif source == "model":
-        parts.append("ll.source = 'model'")
+        parts.append("ll.label_source = 'model'")
     elif source == "unlabeled":
         parts.append("ll.expense_id IS NULL")
 
     where = (" WHERE " + " AND ".join(parts)) if parts else ""
     sql = (
-        """
-        WITH latest_label AS (
-            SELECT l.expense_id, l.category_id, l.source, l.confidence
-            FROM labels l
-            JOIN (
-                SELECT expense_id, MAX(id) AS max_id
-                FROM labels GROUP BY expense_id
-            ) m ON l.id = m.max_id
-        )
-        SELECT
-            e.id, e.buchungsdatum,
-            e.counterparty, e.zahlungspflichtiger, e.verwendungszweck,
-            e.betrag_cents / 100.0 AS "betrag_€",
-            c.name AS category, ll.category_id AS category_id,
-            ll.source AS label_source, ll.confidence,
-            e.umsatztyp, e.iban, e.iban_is_foreign,
-            e.has_glaeubiger_id, e.mandatsreferenz_present
-        FROM expenses e
-        LEFT JOIN latest_label ll ON ll.expense_id = e.id
-        LEFT JOIN categories c ON c.id = ll.category_id
-        """
+        _DATA_RECORDS_SELECT
         + where
         + " ORDER BY e.buchungsdatum DESC, e.id DESC"
     )

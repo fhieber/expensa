@@ -72,8 +72,21 @@ CREATE INDEX IF NOT EXISTS idx_labels_expense ON labels(expense_id);
 CREATE INDEX IF NOT EXISTS idx_labels_category ON labels(category_id);
 CREATE INDEX IF NOT EXISTS idx_labels_source ON labels(source);
 
--- Materialized convenience: most-recent label per expense.
--- Queries should join: SELECT ... FROM labels l WHERE l.id = (SELECT MAX(id) FROM labels WHERE expense_id = ...)
+-- Most-recent label per expense. SQLite optimises views by inlining the
+-- subquery, so this is free at query time and removes the duplicated CTE
+-- from every consumer. Includes the "fat" set of columns (source +
+-- confidence) so callers that need them just SELECT what they want.
+CREATE VIEW IF NOT EXISTS latest_label AS
+SELECT l.expense_id,
+       l.category_id,
+       l.source AS label_source,
+       l.confidence
+FROM labels l
+JOIN (
+    SELECT expense_id, MAX(id) AS max_id
+    FROM labels
+    GROUP BY expense_id
+) m ON l.id = m.max_id;
 
 CREATE TABLE IF NOT EXISTS notes (
     expense_id INTEGER PRIMARY KEY REFERENCES expenses(id) ON DELETE CASCADE,
