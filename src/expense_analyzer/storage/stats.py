@@ -19,14 +19,6 @@ class CategoryStat:
 
 
 _CATEGORY_STATS_SQL = """
-WITH latest_label AS (
-    SELECT l.expense_id, l.category_id
-    FROM labels l
-    JOIN (
-        SELECT expense_id, MAX(id) AS max_id
-        FROM labels GROUP BY expense_id
-    ) m ON l.id = m.max_id
-)
 SELECT
     c.id, c.name, c.description, c.color,
     COUNT(e.id)                                                AS n_expenses,
@@ -64,14 +56,6 @@ def uncategorized_stat(conn: sqlite3.Connection) -> CategoryStat:
     """Pseudo-row for expenses with no label (or whose category was deleted)."""
     row = conn.execute(
         """
-        WITH latest_label AS (
-            SELECT l.expense_id, l.category_id
-            FROM labels l
-            JOIN (
-                SELECT expense_id, MAX(id) AS max_id
-                FROM labels GROUP BY expense_id
-            ) m ON l.id = m.max_id
-        )
         SELECT
             COUNT(e.id)                                  AS n,
             COALESCE(SUM(e.betrag_cents) / 100.0, 0.0)   AS total,

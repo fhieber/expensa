@@ -17,11 +17,8 @@ import pandas as pd
 from expense_analyzer.features.embeddings import Embedder, load_embeddings, store_embeddings
 from expense_analyzer.features.numeric import log_abs_amount
 from expense_analyzer.features.temporal import (
-    amount_zscore_within_counterparty,
     basic_calendar_features,
-    count_to_same_counterparty,
-    days_since_prev_to_same_counterparty,
-    is_likely_recurring,
+    compute_temporal_features_bulk,
 )
 
 _BASE_COLUMNS = [
@@ -41,7 +38,6 @@ _BASE_COLUMNS = [
     "iban_is_known_self",
     "has_glaeubiger_id",
     "mandatsreferenz_present",
-    "cluster_id",
 ]
 
 
@@ -76,19 +72,34 @@ def add_calendar_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def add_temporal_recurrence(conn: sqlite3.Connection, df: pd.DataFrame) -> pd.DataFrame:
+    """Attach recurrence + same-vendor count + amount-zscore features.
+
+    Runs as a single SQL pass using window functions, regardless of how
+    many rows are in ``df``. Replaces a former N+1 loop that issued
+    6 queries per row.
+    """
     if df.empty:
         return df
     df = df.copy()
+    feats = compute_temporal_features_bulk(conn, list(df.index))
     df["days_since_prev_same_cp"] = [
-        days_since_prev_to_same_counterparty(conn, eid) for eid in df.index
+        feats.get(eid, {}).get("days_since_prev_same_cp") for eid in df.index
     ]
-    df["count_same_cp_30d"] = [count_to_same_counterparty(conn, eid, 30) for eid in df.index]
-    df["count_same_cp_90d"] = [count_to_same_counterparty(conn, eid, 90) for eid in df.index]
-    df["count_same_cp_365d"] = [count_to_same_counterparty(conn, eid, 365) for eid in df.index]
+    df["count_same_cp_30d"] = [
+        feats.get(eid, {}).get("count_same_cp_30d", 0) for eid in df.index
+    ]
+    df["count_same_cp_90d"] = [
+        feats.get(eid, {}).get("count_same_cp_90d", 0) for eid in df.index
+    ]
+    df["count_same_cp_365d"] = [
+        feats.get(eid, {}).get("count_same_cp_365d", 0) for eid in df.index
+    ]
     df["amount_zscore_within_cp"] = [
-        amount_zscore_within_counterparty(conn, eid) for eid in df.index
+        feats.get(eid, {}).get("amount_zscore_within_cp") for eid in df.index
     ]
-    df["is_likely_recurring"] = [int(is_likely_recurring(conn, eid)) for eid in df.index]
+    df["is_likely_recurring"] = [
+        int(feats.get(eid, {}).get("is_likely_recurring", 0)) for eid in df.index
+    ]
     return df
 
 

@@ -12,17 +12,7 @@ from datetime import date
 
 import pandas as pd
 
-_LATEST_LABEL_CTE = """
-WITH latest_label AS (
-    SELECT l.expense_id, l.category_id
-    FROM labels l
-    JOIN (
-        SELECT expense_id, MAX(id) AS max_id
-        FROM labels GROUP BY expense_id
-    ) m ON l.id = m.max_id
-)
-"""
-
+from expense_analyzer.storage.sql import JOIN_LATEST_LABEL
 
 # Category names that represent transfers between the user's own accounts
 # (rather than real income / consumption). Treated as NEUTRAL by all the
@@ -70,18 +60,14 @@ def spend_by_category(
     """Sum of |betrag| per category. Returns columns: name, color, amount."""
     extra, params = _date_filter_clause("e.buchungsdatum", since, until)
     income_clause = "" if include_income else " AND e.is_income = 0"
-    sql = (
-        _LATEST_LABEL_CTE
-        + f"""
+    sql = f"""
         SELECT c.name, c.color, SUM(ABS(e.betrag_cents)) / 100.0 AS amount
         FROM expenses e
-        LEFT JOIN latest_label ll ON ll.expense_id = e.id
-        LEFT JOIN categories c ON c.id = ll.category_id
+        {JOIN_LATEST_LABEL}
         WHERE 1=1 {income_clause} {extra}
         GROUP BY COALESCE(c.id, -1), c.name, c.color
         ORDER BY amount DESC
-        """
-    )
+    """
     rows = conn.execute(sql, params).fetchall()
     df = pd.DataFrame([dict(r) for r in rows])
     if df.empty:
@@ -117,21 +103,17 @@ def monthly_flow_by_category(
         " AND COALESCE(e.iban_is_known_self, 0) = 0" if exclude_internal else ""
     )
     savings_sql, savings_params = _savings_clause(savings_categories)
-    sql = (
-        _LATEST_LABEL_CTE
-        + f"""
+    sql = f"""
         SELECT strftime('%Y-%m', e.buchungsdatum) AS ym,
                COALESCE(c.name, '(unkategorisiert)') AS name,
                COALESCE(c.color, '#bbbbbb') AS color,
                SUM(e.betrag_cents) / 100.0 AS amount
         FROM expenses e
-        LEFT JOIN latest_label ll ON ll.expense_id = e.id
-        LEFT JOIN categories c ON c.id = ll.category_id
+        {JOIN_LATEST_LABEL}
         WHERE 1=1 {extra} {internal} {savings_sql}
         GROUP BY ym, name
         ORDER BY ym
-        """
-    )
+    """
     rows = conn.execute(sql, params + savings_params).fetchall()
     df = pd.DataFrame([dict(r) for r in rows])
     if df.empty:
@@ -148,17 +130,13 @@ def amount_distribution(
     """One row per expense: amount + category. For histograms."""
     extra, params = _date_filter_clause("e.buchungsdatum", since, until)
     income_clause = "" if include_income else " AND e.is_income = 0"
-    sql = (
-        _LATEST_LABEL_CTE
-        + f"""
+    sql = f"""
         SELECT ABS(e.betrag_cents) / 100.0 AS amount,
                COALESCE(c.name, '(unkategorisiert)') AS name
         FROM expenses e
-        LEFT JOIN latest_label ll ON ll.expense_id = e.id
-        LEFT JOIN categories c ON c.id = ll.category_id
+        {JOIN_LATEST_LABEL}
         WHERE 1=1 {income_clause} {extra}
-        """
-    )
+    """
     rows = conn.execute(sql, params).fetchall()
     df = pd.DataFrame([dict(r) for r in rows])
     if df.empty:
@@ -342,9 +320,7 @@ def savings_flow(
         )
     extra, params = _date_filter_clause("e.buchungsdatum", since, until)
     ph = ",".join("?" * len(savings_categories))
-    sql = (
-        _LATEST_LABEL_CTE
-        + f"""
+    sql = f"""
         SELECT
             strftime('%Y-%m', e.buchungsdatum) AS ym,
             SUM(CASE WHEN e.is_income = 0 THEN ABS(e.betrag_cents) ELSE 0 END)
@@ -352,13 +328,11 @@ def savings_flow(
             SUM(CASE WHEN e.is_income = 1 THEN e.betrag_cents ELSE 0 END)
                 / 100.0 AS from_savings
         FROM expenses e
-        LEFT JOIN latest_label ll ON ll.expense_id = e.id
-        LEFT JOIN categories c ON c.id = ll.category_id
+        {JOIN_LATEST_LABEL}
         WHERE COALESCE(c.name, '') IN ({ph}) {extra}
         GROUP BY ym
         ORDER BY ym
-        """
-    )
+    """
     rows = conn.execute(sql, list(savings_categories) + params).fetchall()
     df = pd.DataFrame([dict(r) for r in rows])
     if df.empty:
@@ -399,9 +373,7 @@ def monthly_income_vs_expense(
         " AND COALESCE(e.iban_is_known_self, 0) = 0" if exclude_internal else ""
     )
     savings_sql, savings_params = _savings_clause(savings_categories)
-    sql = (
-        _LATEST_LABEL_CTE
-        + f"""
+    sql = f"""
         SELECT
             strftime('%Y-%m', e.buchungsdatum) AS ym,
             SUM(CASE WHEN e.is_income = 1 THEN e.betrag_cents ELSE 0 END) / 100.0
@@ -409,13 +381,11 @@ def monthly_income_vs_expense(
             SUM(CASE WHEN e.is_income = 0 THEN ABS(e.betrag_cents) ELSE 0 END) / 100.0
                 AS expenses
         FROM expenses e
-        LEFT JOIN latest_label ll ON ll.expense_id = e.id
-        LEFT JOIN categories c ON c.id = ll.category_id
+        {JOIN_LATEST_LABEL}
         WHERE 1=1 {extra} {internal} {savings_sql}
         GROUP BY ym
         ORDER BY ym
-        """
-    )
+    """
     rows = conn.execute(sql, params + savings_params).fetchall()
     df = pd.DataFrame([dict(r) for r in rows])
     if df.empty:
@@ -459,10 +429,8 @@ def anomalies(
     # compiled in by default). Pull AVG / mean-of-squares / count from
     # SQL, do the z-score arithmetic + threshold filter in pandas.
     extra, params = _date_filter_clause("e.buchungsdatum", since, until)
-    sql = (
-        _LATEST_LABEL_CTE
-        + f"""
-        , cp_stats AS (
+    sql = f"""
+        WITH cp_stats AS (
             SELECT counterparty_normalized,
                    AVG(ABS(betrag_cents)) AS mean_cents,
                    AVG(ABS(betrag_cents) * ABS(betrag_cents)) AS msq_cents,
@@ -487,13 +455,11 @@ def anomalies(
             s.n AS n_history
         FROM expenses e
         JOIN cp_stats s ON s.counterparty_normalized = e.counterparty_normalized
-        LEFT JOIN latest_label ll ON ll.expense_id = e.id
-        LEFT JOIN categories c ON c.id = ll.category_id
+        {JOIN_LATEST_LABEL}
         WHERE e.is_income = 0
           AND s.msq_cents - s.mean_cents * s.mean_cents > 0
           {extra}
     """
-    )
     full_params = [min_history] + params
     rows = conn.execute(sql, full_params).fetchall()
     if not rows:
@@ -536,21 +502,17 @@ def weekly_by_category(
     sorts correctly as a string.
     """
     extra, params = _date_filter_clause("e.buchungsdatum", since, until)
-    sql = (
-        _LATEST_LABEL_CTE
-        + f"""
+    sql = f"""
         SELECT strftime('%Y-W%W', e.buchungsdatum) AS w,
                COALESCE(c.name, '(unkategorisiert)') AS name,
                COALESCE(c.color, '#bbbbbb') AS color,
                SUM(ABS(e.betrag_cents)) / 100.0 AS amount
         FROM expenses e
-        LEFT JOIN latest_label ll ON ll.expense_id = e.id
-        LEFT JOIN categories c ON c.id = ll.category_id
+        {JOIN_LATEST_LABEL}
         WHERE e.is_income = 0 {extra}
         GROUP BY w, name, color
         ORDER BY w, name
-        """
-    )
+    """
     rows = conn.execute(sql, params).fetchall()
     df = pd.DataFrame([dict(r) for r in rows])
     if df.empty:
@@ -569,21 +531,17 @@ def daily_by_category(
     Uncategorized rows fall under "(unkategorisiert)" with a neutral grey.
     """
     extra, params = _date_filter_clause("e.buchungsdatum", since, until)
-    sql = (
-        _LATEST_LABEL_CTE
-        + f"""
+    sql = f"""
         SELECT e.buchungsdatum AS d,
                COALESCE(c.name, '(unkategorisiert)') AS name,
                COALESCE(c.color, '#bbbbbb') AS color,
                SUM(ABS(e.betrag_cents)) / 100.0 AS amount
         FROM expenses e
-        LEFT JOIN latest_label ll ON ll.expense_id = e.id
-        LEFT JOIN categories c ON c.id = ll.category_id
+        {JOIN_LATEST_LABEL}
         WHERE e.is_income = 0 {extra}
         GROUP BY d, name, color
         ORDER BY d, name
-        """
-    )
+    """
     rows = conn.execute(sql, params).fetchall()
     df = pd.DataFrame([dict(r) for r in rows])
     if df.empty:

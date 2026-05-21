@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "expense-analyzer-de"
 version = "0.1.0"
-description = "Local German expense analysis: ingest CSVs, dedup, cluster and categorize on-device with Hugging Face models. No cloud LLMs."
+description = "Local German expense analysis: ingest CSVs, dedup and categorize on-device with Hugging Face models. No cloud LLMs."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
@@ -28,18 +28,13 @@ dependencies = [
     "pandas>=2.0",
     "numpy>=1.24",
     "scikit-learn>=1.3",
-    "umap-learn>=0.5.5",
-    "hdbscan>=0.8.33",
     "rapidfuzz>=3.5",
     "schwifty>=2024.1.0",
     "python-dateutil>=2.8",
     "click>=8.1",
     "plotly>=5.18",
-    "matplotlib>=3.8",
-    "kaleido>=0.2.1",
     "pyyaml>=6.0",
     "pydantic>=2.5",
-    "sqlalchemy>=2.0",
     "sentence-transformers>=2.6",
     "transformers>=4.40",
     "torch>=2.2",
@@ -59,6 +54,11 @@ dev = [
 ]
 vendor-lookup = [
     "duckduckgo-search>=5.0",
+]
+# Static image export for `expense viz --out *.png` (or *.svg / *.pdf).
+# Plotly's write_image() needs kaleido; HTML export needs nothing extra.
+png-export = [
+    "kaleido>=0.2.1",
 ]
 
 [project.scripts]

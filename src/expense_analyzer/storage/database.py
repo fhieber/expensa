@@ -59,8 +59,18 @@ def connect(db_path: Path) -> sqlite3.Connection:
 
 
 def init_schema(conn: sqlite3.Connection) -> None:
-    """Apply schema.sql idempotently."""
+    """Apply ``schema.sql`` (idempotent) then run any pending migrations.
+
+    `schema.sql` reflects the *current* shape of the DB and uses
+    ``CREATE TABLE IF NOT EXISTS`` everywhere, so on a fresh DB it lands
+    the v-N schema directly and migrations are no-ops. On an older DB
+    the IF NOT EXISTS lines skip existing tables and the migration
+    runner brings the rest up to date.
+    """
+    from expense_analyzer.storage.migrations import apply_migrations
+
     conn.executescript(_read_schema())
+    apply_migrations(conn)
 
 
 @contextmanager

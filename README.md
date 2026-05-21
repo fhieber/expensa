@@ -1,15 +1,14 @@
 # expense-analyzer-de
 
-Local German bank-statement analyzer. Ingest CSV exports, deduplicate, build features, cluster and categorize — all on-device using locally hosted Hugging Face models. **No expense data ever leaves your machine for cloud LLMs.**
+Local German bank-statement analyzer. Ingest CSV exports, deduplicate, build features, and categorize — all on-device using locally hosted Hugging Face models. **No expense data ever leaves your machine for cloud LLMs.**
 
 ## Features
 
 - Incremental ingestion of German-format CSVs (`;` separator, `,` decimal, cp1252/utf-8) with content-hash deduplication.
-- Rich per-record feature engineering (text, embeddings, numeric, temporal, IBAN, similarity, behavior, clusters).
-- Cascaded categorization: vendor exact-match → k-NN on embeddings → supervised classifier → zero-shot NLI fallback.
+- Rich per-record feature engineering (text, embeddings, numeric, temporal, IBAN, similarity, behavior).
+- Cascaded categorization: vendor exact-match → k-NN on embeddings → supervised classifier → category-similarity → zero-shot NLI fallback.
 - Active-learning loop — label a few examples; the system surfaces the next most informative records to label.
-- HDBSCAN clustering of unlabeled transactions for outlier discovery.
-- Visualizations: pie, bar, histogram, monthly trend lines, day-of-week heatmaps, calendar heatmap, Sankey.
+- Visualizations: bar, pie, histogram, monthly stacked / weekly stacked / daily stacked, calendar heatmap, recurring-vendor + anomaly tables.
 - Two interfaces: a `click` CLI and a local-only Streamlit app.
 - Optional, opt-in vendor web lookup that sends **only the merchant name** (never amount/IBAN/Verwendungszweck) to a search engine.
 
