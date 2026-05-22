@@ -63,6 +63,51 @@ See the "Proposed feature set per expense" section of `../../.claude/plans/build
 
 (Append new instructions here verbatim with date so context is preserved.)
 
+### 2026-05-22 — Multi-account support
+
+The package now supports multiple accounts (e.g. Personal vs Business)
+each backed by its own SQLite DB. Layout under `$EXPENSE_ANALYZER_HOME`
+(default `~/.expense-analyzer/`):
+
+    config.yaml              # global: ML models, vendor_lookup, streamlit
+    accounts.yaml            # registry: [{id, name, data_dir}]
+    active_account           # plain text: slug of the active account
+    accounts/
+      personal/db.sqlite
+      business/db.sqlite
+
+Per-account: `expenses`, `categories`, `labels`, `notes`, `embeddings`,
+`vendor_cache`, `own_ibans`, `model_versions`. Global: ML settings,
+device, vendor_lookup, streamlit binding.
+
+**Migration:** transparent. On first launch with the new code, if a
+legacy `db.sqlite` exists at the root but no `accounts.yaml`, a
+`Default` account is auto-registered pointing at the global home
+itself (zero file movement). Rollback = delete `accounts.yaml` +
+`active_account`.
+
+**CLI:** `expense account list/add/remove/rename/use`. Root group
+takes `--account NAME_OR_SLUG` to target a non-active account for one
+command. The PID file (`expense ui` and friends) lives under the
+global home so there's one Streamlit server per machine -- account
+switching happens in-UI.
+
+**UI:** account picker above the header metrics (`Dashboard | …`).
+Add / Rename / Remove buttons open `@st.dialog` flows. Switching
+accounts wipes tab-scoped session_state and re-renders against the
+new DB. Settings sections that affect global config are flagged
+"Global setting — applies to all accounts." and write through to
+`<global_home>/config.yaml`.
+
+Key files:
+- `src/expense_analyzer/accounts.py` — registry + slugify + migration.
+- `src/expense_analyzer/config.py` — `GlobalConfig` / `Config` /
+  `load_config_for_account()`.
+- `src/expense_analyzer/cli.py` — `expense account ...` subgroup.
+- `src/expense_analyzer/ui/_shared.py` — cached per-session state.
+- `src/expense_analyzer/ui/streamlit_app.py` — `_render_account_picker()`
+  + Add/Rename/Remove dialogs.
+
 ### 2026-05-21 — Clustering removed; deps trimmed
 
 The HDBSCAN/UMAP clustering module from the original plan was never

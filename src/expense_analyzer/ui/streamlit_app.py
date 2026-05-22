@@ -239,7 +239,7 @@ def _render_account_picker() -> None:
     except ValueError:
         index = 0
 
-    picker_col, add_col, rename_col, remove_col = st.columns([4, 1, 1, 1])
+    picker_col, add_col, rename_col, remove_col = st.columns([2, 0.5, 0.5, 0.5], width=350, gap='small')
     with picker_col:
         st.selectbox(
             "Account",
@@ -249,13 +249,13 @@ def _render_account_picker() -> None:
             on_change=_on_account_changed,
             label_visibility="collapsed",
         )
-    if add_col.button("➕ Add", key="account_add_btn",
+    if add_col.button("➕", key="account_add_btn",
                        help="Create another account."):
         _add_account_dialog()
-    if rename_col.button("✏ Rename", key="account_rename_btn",
+    if rename_col.button("✏", key="account_rename_btn",
                           help="Rename the active account."):
         _rename_account_dialog()
-    if remove_col.button("🗑 Remove", key="account_remove_btn",
+    if remove_col.button("🗑", key="account_remove_btn",
                           help="Drop the active account from the registry "
                                "(files on disk stay).",
                           disabled=len(rows) <= 1):
