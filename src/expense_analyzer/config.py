@@ -80,9 +80,14 @@ class StreamlitConfig(BaseModel):
         return v
 
 
-class Config(BaseModel):
-    data_dir: Path = Path("~/.expense-analyzer").expanduser()
-    db_filename: str = "db.sqlite"
+class GlobalConfig(BaseModel):
+    """Settings that apply to every account.
+
+    Identical field set to :class:`Config` minus ``data_dir`` /
+    ``db_filename``. The two distinct types let the type checker (and a
+    quick code reader) tell shared-across-accounts state apart from
+    per-account state.
+    """
 
     embedding_model: str = "T-Systems-onsite/cross-en-de-roberta-sentence-transformer"
     zeroshot_model: str = "MoritzLaurer/mDeBERTa-v3-base-mnli-xnli"
@@ -99,6 +104,18 @@ class Config(BaseModel):
     active_learning: ActiveLearningConfig = Field(default_factory=ActiveLearningConfig)
     vendor_lookup: VendorLookupConfig = Field(default_factory=VendorLookupConfig)
     streamlit: StreamlitConfig = Field(default_factory=StreamlitConfig)
+
+
+class Config(GlobalConfig):
+    """Per-account resolved config = GlobalConfig + a data directory.
+
+    Inheritance keeps :class:`Config` source-compatible with every
+    pre-multi-account caller: a single resolved object with both ML
+    settings and the data directory.
+    """
+
+    data_dir: Path = Path("~/.expense-analyzer").expanduser()
+    db_filename: str = "db.sqlite"
 
     @field_validator("data_dir", mode="before")
     @classmethod
@@ -159,18 +176,89 @@ def resolve_config_path(explicit: Path | None = None) -> Path | None:
     return candidate if candidate.is_file() else None
 
 
-def load_config(explicit: Path | None = None) -> Config:
-    """Merge: packaged defaults <- user config (if any). Pydantic validates."""
+def _merged_global_dict(explicit: Path | None = None) -> dict:
+    """Read packaged defaults + the user's global config.yaml and merge.
+
+    Returns a raw dict (not validated yet) holding ML / device /
+    vendor_lookup / streamlit keys. Used by both ``load_global_config``
+    and the legacy ``load_config`` path.
+    """
     merged = packaged_default_config()
     user_path = resolve_config_path(explicit)
     if user_path is not None:
         user = _load_yaml(user_path)
         merged = _deep_merge(merged, user)
-    # data_dir env override
-    env_home = os.environ.get("EXPENSE_ANALYZER_HOME")
-    if env_home:
-        merged["data_dir"] = env_home
-    return Config(**merged)
+    return merged
+
+
+def load_global_config(explicit: Path | None = None) -> GlobalConfig:
+    """Read ``config.yaml`` and validate as :class:`GlobalConfig`.
+
+    Per-account fields (``data_dir`` / ``db_filename``) are silently
+    dropped if present in the user file -- they're per-account now and
+    belong in the account registry, not the global config.
+    """
+    raw = _merged_global_dict(explicit)
+    # Drop per-account keys if they survived from the legacy single-
+    # account config.yaml; GlobalConfig doesn't accept them.
+    raw.pop("data_dir", None)
+    raw.pop("db_filename", None)
+    return GlobalConfig(**raw)
+
+
+def load_config_for_account(account, global_cfg: GlobalConfig | None = None) -> Config:
+    """Build a per-account :class:`Config` from a registry entry.
+
+    ``account`` is duck-typed: anything with ``.data_dir`` works (the
+    real type is :class:`expense_analyzer.accounts.AccountInfo` but
+    that's a heavier import we keep out of this module).
+
+    If ``global_cfg`` is None we load it fresh from disk; pass an
+    existing instance to avoid re-reading the YAML in tight loops.
+    """
+    if global_cfg is None:
+        global_cfg = load_global_config()
+    payload = global_cfg.model_dump()
+    payload["data_dir"] = Path(account.data_dir)
+    return Config(**payload)
+
+
+def load_config(explicit: Path | None = None) -> Config:
+    """Backward-compatible single-account loader.
+
+    Resolves the active account via the registry under ``$EXPENSE_ANALYZER_HOME``
+    (or ``~/.expense-analyzer``), defaulting to the first registered account
+    if no active slug is set. Falls back to the legacy single-account
+    layout (``data_dir = global_home``) when the registry is empty -- so
+    a never-opened install or a test environment with neither
+    ``accounts.yaml`` nor a legacy ``db.sqlite`` still gets a sensible
+    Config back rather than crashing.
+    """
+    # Local import to avoid a circular dependency: accounts.py imports
+    # storage / config helpers lazily.
+    from expense_analyzer.accounts import migrate_legacy_if_needed
+
+    global_cfg = load_global_config(explicit)
+    global_home = Path(
+        os.environ.get("EXPENSE_ANALYZER_HOME", "~/.expense-analyzer")
+    ).expanduser()
+    registry = migrate_legacy_if_needed(global_home)
+
+    active_id = registry.get_active_id()
+    account = None
+    if active_id is not None:
+        account = registry.get(active_id)
+    if account is None and len(registry) > 0:
+        account = registry.all()[0]
+    if account is not None:
+        return load_config_for_account(account, global_cfg)
+
+    # No accounts and no legacy DB: fall back to the legacy single-
+    # account layout. Tests rely on this when EXPENSE_ANALYZER_HOME
+    # points at a fresh tmp_path.
+    payload = global_cfg.model_dump()
+    payload["data_dir"] = global_home
+    return Config(**payload)
 
 
 def _deep_merge(base: dict, overlay: dict) -> dict:
