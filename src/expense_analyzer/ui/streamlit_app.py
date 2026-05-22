@@ -25,7 +25,17 @@ from expense_analyzer.ui import (
     data_tab,
     settings,
 )
-from expense_analyzer.ui._shared import get_config, get_conn
+from expense_analyzer.ui._shared import (
+    add_account_via_ui,
+    clear_tab_state,
+    get_active_account,
+    get_config,
+    get_conn,
+    get_registry,
+    remove_account_via_ui,
+    rename_account_via_ui,
+    set_active_account,
+)
 
 # ---------------------------------------------------------------------------
 # Page setup -- CSS + header bar live in this file because they're cross-tab.
@@ -70,6 +80,186 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+
+# ---------------------------------------------------------------------------
+# Account picker (sits above the header metrics).
+# ---------------------------------------------------------------------------
+
+
+def _on_account_changed() -> None:
+    """Selectbox on_change handler. Streamlit writes the new label into
+    `account_picker`; we map it back to a slug, switch, wipe stale
+    tab state, and let the natural rerun re-render every tab against
+    the new DB."""
+    picked_label = st.session_state.get("account_picker")
+    if not picked_label:
+        return
+    slug = st.session_state.get("_picker_label_to_id", {}).get(picked_label)
+    if slug is None or slug == get_active_account().id:
+        return
+    set_active_account(slug)
+    clear_tab_state()
+
+
+@st.dialog("Add account")
+def _add_account_dialog() -> None:
+    """Name input -> register row, init DB, seed German defaults,
+    switch active. The rerun is the only thing that changes UI state
+    so the failure mode (validation error) leaves the user where they
+    were."""
+    st.caption(
+        "A new account gets its own SQLite DB under "
+        "`accounts/<slug>/db.sqlite`. ML models, vendor lookup and the "
+        "Streamlit config are shared across accounts."
+    )
+    name = st.text_input(
+        "Account name", placeholder="e.g. Business",
+        key="add_account_name",
+    )
+    with_defaults = st.checkbox(
+        "Install default German categories", value=True,
+        key="add_account_with_defaults",
+    )
+    cols = st.columns([1, 1, 4])
+    if cols[0].button("Add", type="primary", disabled=not name.strip(),
+                       key="add_account_confirm"):
+        try:
+            info = add_account_via_ui(name, with_defaults=with_defaults)
+        except ValueError as e:
+            st.error(f"refusing: {e}")
+            return
+        set_active_account(info.id)
+        clear_tab_state()
+        # Clear the dialog's inputs so the next open is blank.
+        for k in ("add_account_name", "add_account_with_defaults"):
+            st.session_state.pop(k, None)
+        st.rerun()
+    if cols[1].button("Cancel", key="add_account_cancel"):
+        st.rerun()
+
+
+@st.dialog("Rename account")
+def _rename_account_dialog() -> None:
+    active = get_active_account()
+    st.caption(
+        f"Rename **{active.name}** (slug `{active.id}`). The slug and "
+        "data directory stay put -- this is purely cosmetic."
+    )
+    new_name = st.text_input(
+        "New name", value=active.name,
+        key="rename_account_new_name",
+    )
+    cols = st.columns([1, 1, 4])
+    if cols[0].button(
+        "Rename", type="primary",
+        disabled=not new_name.strip() or new_name.strip() == active.name,
+        key="rename_account_confirm",
+    ):
+        try:
+            rename_account_via_ui(active.id, new_name)
+        except ValueError as e:
+            st.error(f"refusing: {e}")
+            return
+        st.session_state.pop("rename_account_new_name", None)
+        st.rerun()
+    if cols[1].button("Cancel", key="rename_account_cancel"):
+        st.rerun()
+
+
+@st.dialog("Remove account")
+def _remove_account_dialog() -> None:
+    active = get_active_account()
+    registry = get_registry()
+    rows = registry.all()
+    if len(rows) <= 1:
+        st.warning(
+            "Refusing: you'd be left with zero registered accounts. "
+            "Add another account first."
+        )
+        if st.button("Close", key="remove_account_close"):
+            st.rerun()
+        return
+    st.warning(
+        f"Remove **{active.name}** from the registry?\n\n"
+        f"This does **not** delete files on disk. The data directory "
+        f"`{active.data_dir}` stays put -- you can re-register it later "
+        "by editing `accounts.yaml` manually, or just leave it."
+    )
+    cols = st.columns([1, 1, 4])
+    if cols[0].button("Remove", type="primary",
+                       key="remove_account_confirm"):
+        try:
+            removed = remove_account_via_ui(active.id)
+        except KeyError as e:
+            st.error(f"already removed: {e}")
+            return
+        # Switch to the first remaining account.
+        remaining = get_registry().all()
+        if remaining:
+            set_active_account(remaining[0].id)
+        clear_tab_state()
+        st.toast(f"removed {removed.name}; files still at {removed.data_dir}")
+        st.rerun()
+    if cols[1].button("Cancel", key="remove_account_cancel"):
+        st.rerun()
+
+
+def _render_account_picker() -> None:
+    """Account selectbox + Add / Rename / Remove buttons. Sits above
+    the header metrics so it reads as a single row of "what am I
+    looking at, and what tools do I have on it"."""
+    registry = get_registry()
+    rows = registry.all()
+
+    # On first render with no registered accounts, show only the +Add
+    # button. Picker would be empty otherwise.
+    if not rows:
+        cols = st.columns([4, 1])
+        with cols[0]:
+            st.caption(
+                "No accounts registered yet. Add one to get started -- "
+                "the bundled German default categories are seeded "
+                "automatically."
+            )
+        if cols[1].button("➕ Add account", type="primary",
+                           key="add_first_account_btn"):
+            _add_account_dialog()
+        return
+
+    # The selectbox uses display labels (name); we map back via the
+    # _picker_label_to_id dict. Storing the mapping on session_state
+    # lets the on_change handler resolve without re-walking the
+    # registry.
+    labels = [a.name for a in rows]
+    st.session_state["_picker_label_to_id"] = {a.name: a.id for a in rows}
+    active = get_active_account()
+    try:
+        index = labels.index(active.name)
+    except ValueError:
+        index = 0
+
+    picker_col, add_col, rename_col, remove_col = st.columns([4, 1, 1, 1])
+    with picker_col:
+        st.selectbox(
+            "Account",
+            labels,
+            index=index,
+            key="account_picker",
+            on_change=_on_account_changed,
+            label_visibility="collapsed",
+        )
+    if add_col.button("➕ Add", key="account_add_btn",
+                       help="Create another account."):
+        _add_account_dialog()
+    if rename_col.button("✏ Rename", key="account_rename_btn",
+                          help="Rename the active account."):
+        _rename_account_dialog()
+    if remove_col.button("🗑 Remove", key="account_remove_btn",
+                          help="Drop the active account from the registry "
+                               "(files on disk stay).",
+                          disabled=len(rows) <= 1):
+        _remove_account_dialog()
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +320,7 @@ def _render_header() -> None:
     st.divider()
 
 
+_render_account_picker()
 _render_header()
 
 tab_dash, tab_cats, tab_data, tab_settings = st.tabs(
