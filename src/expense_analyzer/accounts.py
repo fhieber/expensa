@@ -245,30 +245,46 @@ class AccountRegistry:
     # ---- Mutate -------------------------------------------------------
 
     def add(
-        self, name: str, data_dir: Path | None = None
+        self,
+        name: str,
+        data_dir: Path | None = None,
+        slug: str | None = None,
     ) -> AccountInfo:
         """Register a new account. Auto-slugifies ``name``; if the slug
-        collides, suffixes ``-2`` / ``-3`` / ... ``data_dir`` defaults
-        to ``<global_home>/accounts/<slug>``.
+        collides, suffixes ``-2`` / ``-3`` / ... Pass ``slug`` to
+        override the auto-derived id (still sanitised via
+        :func:`slugify`; must not already be taken). ``data_dir``
+        defaults to ``<global_home>/accounts/<final_slug>``.
 
         Raises ``ValueError`` if ``name`` slugifies to the empty string
-        (e.g. an all-punctuation name). The directory itself is **not**
-        created here; call :func:`init_account_db` to bootstrap it.
+        (e.g. an all-punctuation name), if an explicit ``slug`` is
+        empty after sanitisation, or if an explicit ``slug`` is already
+        in use. The directory itself is **not** created here; call
+        :func:`init_account_db` to bootstrap it.
         """
         cleaned = (name or "").strip()
         if not cleaned:
             raise ValueError("account name cannot be empty")
-        base_slug = slugify(cleaned)
-        if not base_slug:
-            raise ValueError(
-                f"account name {name!r} produces an empty slug -- pick a "
-                "name with letters or digits"
-            )
         taken = {a.id for a in self._accounts}
-        slug = _unique_slug(base_slug, taken)
+        if slug is not None:
+            final = slugify(slug)
+            if not final:
+                raise ValueError(
+                    f"slug {slug!r} produces an empty string after sanitisation"
+                )
+            if final in taken:
+                raise ValueError(f"slug {final!r} is already in use")
+        else:
+            base_slug = slugify(cleaned)
+            if not base_slug:
+                raise ValueError(
+                    f"account name {name!r} produces an empty slug -- pick a "
+                    "name with letters or digits"
+                )
+            final = _unique_slug(base_slug, taken)
         if data_dir is None:
-            data_dir = self._global_home / ACCOUNTS_SUBDIR / slug
-        info = AccountInfo(id=slug, name=cleaned, data_dir=Path(data_dir))
+            data_dir = self._global_home / ACCOUNTS_SUBDIR / final
+        info = AccountInfo(id=final, name=cleaned, data_dir=Path(data_dir))
         self._accounts.append(info)
         return info
 

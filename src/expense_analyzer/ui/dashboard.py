@@ -167,6 +167,7 @@ def _render_records_table(conn, since, until) -> None:
     as background; text colour is auto-picked for legibility."""
     params: list = []
     clauses = ["e.is_income = 0"]
+    clauses = []
     if since is not None:
         clauses.append("e.buchungsdatum >= ?")
         params.append(since.isoformat())
