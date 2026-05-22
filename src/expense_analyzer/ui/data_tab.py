@@ -469,6 +469,7 @@ def _build_grid_options(df: pd.DataFrame, extended: bool, all_cat_names: list[st
     gb.configure_grid_options(
         rowHeight=28, headerHeight=34, animateRows=False,
         suppressFieldDotNotation=True, domLayout="normal",
+        enableCellTextselection=True, ensureDomOrder=True,
     )
 
     for hid in ("_orig_category", "category_id", "label_source", "_pre_selected",

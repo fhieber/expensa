@@ -41,7 +41,13 @@ from expense_analyzer.storage.own_ibans import (
     remove_own_iban,
     update_label,
 )
-from expense_analyzer.ui._shared import get_config, get_conn, invalidate_connection
+from expense_analyzer.ui._shared import (
+    get_config,
+    get_conn,
+    get_global_home,
+    invalidate_connection,
+    invalidate_global_config,
+)
 
 
 def render() -> None:
@@ -57,6 +63,7 @@ def render() -> None:
 
 def _render_device_section(cfg) -> None:
     st.header("Compute Device")
+    st.caption("Global setting — applies to all accounts.")
     st.write(f"**Device:** `{cfg.device}`")
     st.caption(f"HF cache: `{hf_cache_dir()}`")
 
@@ -122,8 +129,12 @@ def _model_table_and_picker(
             "Use this", key=f"model_use_{cfg_key}", type="primary",
             disabled=picked == current_id, width="stretch",
         ):
-            save_user_config({cfg_key: picked}, data_dir=cfg.data_dir)
-            st.cache_resource.clear()
+            # Model settings are global; write to the global home's
+            # config.yaml, not the per-account data_dir. Narrow the
+            # cache-clear too: only the GlobalConfig changed, so the
+            # DB connection and embedder caches don't need to flip.
+            save_user_config({cfg_key: picked}, data_dir=get_global_home())
+            invalidate_global_config()
             st.success(
                 f"`{cfg_key}` set to `{picked}`. Restart the UI for it to take effect: "
                 "`expense ui-restart`."
@@ -132,6 +143,7 @@ def _model_table_and_picker(
 
 def _render_model_sections(cfg) -> None:
     st.header("Embeddings")
+    st.caption("Global setting — applies to all accounts.")
     _model_table_and_picker(
         EMBEDDING_MODELS, cfg.embedding_model, "embedding_model",
         explanation=(
@@ -149,6 +161,7 @@ def _render_model_sections(cfg) -> None:
         cfg=cfg,
     )
     st.header("Zero-Shot")
+    st.caption("Global setting — applies to all accounts.")
     _model_table_and_picker(
         ZEROSHOT_MODELS, cfg.zeroshot_model, "zeroshot_model",
         explanation=(
@@ -167,6 +180,7 @@ def _render_model_sections(cfg) -> None:
 
 def _render_privacy(cfg) -> None:
     st.title("Privacy")
+    st.caption("Global setting — applies to all accounts.")
     st.write(f"Vendor web lookup enabled: **{cfg.vendor_lookup.enabled}**")
     if cfg.vendor_lookup.enabled:
         st.warning(
@@ -363,6 +377,10 @@ def _render_restore(cfg) -> None:
                     conn.close()
                 except Exception:
                     pass
+                # Narrow cache-clear: drop only the DB connection. The
+                # embedder cache (the heavy one) stays warm because the
+                # model didn't change, and so does the GlobalConfig and
+                # account registry.
                 invalidate_connection()
                 report = restore_database(
                     cfg.db_path, _upload_path, keep_safety=True,
@@ -375,7 +393,6 @@ def _render_restore(cfg) -> None:
                 )
                 if report.safety_copy:
                     st.info(f"safety copy: `{report.safety_copy}`")
-                st.cache_resource.clear()
                 st.rerun()
             except Exception as e:
                 st.error(f"restore failed: {e}")

@@ -17,14 +17,76 @@ from pathlib import Path
 import click
 
 from expense_analyzer import __version__
+from expense_analyzer.accounts import (
+    AccountInfo,
+    AccountNotFoundError,
+    AccountRegistry,
+    init_account_db,
+    migrate_legacy_if_needed,
+)
 from expense_analyzer.config import (
     Config,
-    load_config,
+    load_config_for_account,
+    load_global_config,
     packaged_default_categories,
 )
 from expense_analyzer.utils.logging import configure_logging
 
 _CTX_KEY = "ea_state"
+
+
+def _global_home() -> Path:
+    """Resolve the global home directory (one per machine).
+
+    Honours ``$EXPENSE_ANALYZER_HOME`` so tests can point us at a
+    temp directory. The global home holds ``config.yaml``,
+    ``accounts.yaml``, ``active_account``, and the ``accounts/``
+    subtree.
+    """
+    return Path(
+        os.environ.get("EXPENSE_ANALYZER_HOME", "~/.expense-analyzer")
+    ).expanduser()
+
+
+def _resolve_account(
+    registry: AccountRegistry,
+    explicit: str | None,
+    global_home: Path,
+) -> AccountInfo:
+    """Pick the account a command should run against.
+
+    Resolution order:
+        1. ``--account`` flag (matched by id OR display name).
+        2. ``active_account`` file (if it points at a registered slug).
+        3. First registered account (deterministic fallback).
+        4. Legacy single-account layout: register a ``Default`` account
+           pointing at ``global_home`` so the command can still run on
+           a fresh install.
+
+    Raises :class:`click.ClickException` only when ``--account`` is
+    explicitly given and doesn't match anything (the user supplied a
+    wrong name -- surface it loudly).
+    """
+    if explicit:
+        match = registry.get_by_name_or_id(explicit)
+        if match is None:
+            raise click.ClickException(
+                f"no such account: {explicit!r}. "
+                "Run `expense account list` to see what's available."
+            )
+        return match
+    active_id = registry.get_active_id()
+    if active_id is not None:
+        info = registry.get(active_id)
+        if info is not None:
+            return info
+    rows = registry.all()
+    if rows:
+        return rows[0]
+    # Brand-new install or test environment with neither accounts.yaml
+    # nor a legacy db.sqlite. Synthesize a default pointing at
+    # global_home so commands like `expense init` keep working.
+    return AccountInfo(id="default", name="Default", data_dir=global_home)
 
 
 # --- Helpers -----------------------------------------------------------------
@@ -62,15 +124,32 @@ def _parse_date_opt(s: str | None) -> date | None:
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
 @click.option("--config", "config_path", type=click.Path(path_type=Path), default=None,
               help="Path to a YAML config file.")
+@click.option("--account", "account_id", default=None,
+              help="Target account by name or slug (overrides the active account).")
 @click.option("-v", "--verbose", is_flag=True)
 @click.version_option(__version__)
 @click.pass_context
-def cli(ctx: click.Context, config_path: Path | None, verbose: bool) -> None:
+def cli(
+    ctx: click.Context,
+    config_path: Path | None,
+    account_id: str | None,
+    verbose: bool,
+) -> None:
     """expense-analyzer-de — local German expense analysis."""
     configure_logging(verbose)
-    cfg = load_config(config_path)
+    global_home = _global_home()
+    global_cfg = load_global_config(config_path)
+    registry = migrate_legacy_if_needed(global_home)
+    account = _resolve_account(registry, account_id, global_home)
+    cfg = load_config_for_account(account, global_cfg)
     ctx.ensure_object(dict)
-    ctx.obj[_CTX_KEY] = {"config": cfg}
+    ctx.obj[_CTX_KEY] = {
+        "config": cfg,
+        "global_cfg": global_cfg,
+        "registry": registry,
+        "account": account,
+        "global_home": global_home,
+    }
 
 
 # --- init --------------------------------------------------------------------
@@ -196,6 +275,125 @@ def categories_remove(ctx: click.Context, name: str, force: bool, yes: bool) -> 
         )
     finally:
         conn.close()
+
+
+# --- account -----------------------------------------------------------------
+
+@cli.group("account")
+def account() -> None:
+    """Manage accounts (separate SQLite DBs)."""
+
+
+@account.command("list")
+@click.pass_context
+def account_list(ctx: click.Context) -> None:
+    """Show every registered account; the active one is marked ``*``."""
+    registry: AccountRegistry = ctx.obj[_CTX_KEY]["registry"]
+    if len(registry) == 0:
+        click.echo("(no accounts registered yet)")
+        click.echo("Hint: `expense account add NAME` to create your first.")
+        return
+    active_id = registry.get_active_id()
+    for a in registry.all():
+        marker = "*" if a.id == active_id else " "
+        click.echo(f"  {marker} {a.id:<20} {a.name:<24} {a.data_dir}")
+
+
+@account.command("add")
+@click.argument("name")
+@click.option("--id", "slug", default=None,
+              help="Override the auto-derived slug (sanitised).")
+@click.option("--with-defaults/--no-defaults", default=True,
+              help="Seed the bundled German default categories.")
+@click.option("--use/--no-use", default=True,
+              help="Switch the active account to the newly-created one.")
+@click.pass_context
+def account_add(
+    ctx: click.Context,
+    name: str,
+    slug: str | None,
+    with_defaults: bool,
+    use: bool,
+) -> None:
+    """Register a new account, create its directory + DB."""
+    registry: AccountRegistry = ctx.obj[_CTX_KEY]["registry"]
+    try:
+        info = registry.add(name, slug=slug)
+    except ValueError as e:
+        raise click.ClickException(str(e)) from e
+    registry.save()
+    conn = init_account_db(info, with_defaults=with_defaults)
+    conn.close()
+    click.echo(f"added account: {info.id}  ({info.name})")
+    click.echo(f"  data dir:    {info.data_dir}")
+    click.echo(f"  database:    {info.db_path}")
+    if with_defaults:
+        click.echo("  seeded default German categories.")
+    if use:
+        registry.set_active_id(info.id)
+        click.echo(f"  active account is now: {info.id}")
+
+
+@account.command("remove")
+@click.argument("name")
+@click.option("--yes", "yes", is_flag=True, help="Skip the confirmation prompt.")
+@click.pass_context
+def account_remove(ctx: click.Context, name: str, yes: bool) -> None:
+    """Drop an account from the registry. **Does not delete files**;
+    the path is printed so you can remove it manually if you want."""
+    registry: AccountRegistry = ctx.obj[_CTX_KEY]["registry"]
+    info = registry.get_by_name_or_id(name)
+    if info is None:
+        raise click.ClickException(f"no such account: {name!r}")
+    if not yes:
+        click.confirm(
+            f"Remove account {info.id!r} from the registry? "
+            "(The DB on disk will NOT be deleted.)",
+            abort=True,
+        )
+    try:
+        registry.remove(info.id)
+    except AccountNotFoundError as e:
+        raise click.ClickException(str(e)) from e
+    registry.save()
+    click.echo(f"removed account: {info.id}")
+    click.echo(
+        f"  data dir still on disk: {info.data_dir}\n"
+        "  (delete it manually if you want the files gone too)"
+    )
+
+
+@account.command("rename")
+@click.argument("name")
+@click.argument("new_name")
+@click.pass_context
+def account_rename(ctx: click.Context, name: str, new_name: str) -> None:
+    """Change the display name. The slug + directory stay put -- this
+    is purely cosmetic so existing scripts using ``--account <slug>``
+    keep working."""
+    registry: AccountRegistry = ctx.obj[_CTX_KEY]["registry"]
+    info = registry.get_by_name_or_id(name)
+    if info is None:
+        raise click.ClickException(f"no such account: {name!r}")
+    try:
+        updated = registry.rename(info.id, new_name)
+    except ValueError as e:
+        raise click.ClickException(str(e)) from e
+    registry.save()
+    click.echo(f"renamed: {updated.id}  -> {updated.name}")
+
+
+@account.command("use")
+@click.argument("name")
+@click.pass_context
+def account_use(ctx: click.Context, name: str) -> None:
+    """Make this account active (writes ``active_account``)."""
+    registry: AccountRegistry = ctx.obj[_CTX_KEY]["registry"]
+    info = registry.get_by_name_or_id(name)
+    if info is None:
+        raise click.ClickException(f"no such account: {name!r}")
+    registry.set_active_id(info.id)
+    click.echo(f"active account is now: {info.id}  ({info.name})")
 
 
 # --- own-iban ----------------------------------------------------------------
@@ -691,14 +889,17 @@ def ui(ctx: click.Context, foreground: bool, no_browser: bool) -> None:
     )
 
     cfg: Config = ctx.obj[_CTX_KEY]["config"]
+    global_home: Path = ctx.obj[_CTX_KEY]["global_home"]
     try:
         import streamlit  # noqa: F401
     except ImportError:
         click.echo("streamlit is not installed in this environment (pip install streamlit)", err=True)
         ctx.exit(2)
 
-    # Refuse to start a second instance.
-    existing = read_pid_file(cfg.data_dir)
+    # PID file lives under global_home, not the active account's data_dir
+    # -- the Streamlit server is one-per-machine and serves every
+    # registered account via the in-UI account picker.
+    existing = read_pid_file(global_home)
     if existing is not None and is_alive(existing.pid):
         click.echo(
             f"UI already running (pid {existing.pid}, http://{existing.host}:{existing.port}). "
@@ -709,7 +910,7 @@ def ui(ctx: click.Context, foreground: bool, no_browser: bool) -> None:
 
     args = _build_streamlit_args(cfg)
     env = os.environ.copy()
-    env["EXPENSE_ANALYZER_HOME"] = str(cfg.data_dir)
+    env["EXPENSE_ANALYZER_HOME"] = str(global_home)
     url = f"http://{cfg.streamlit.host}:{cfg.streamlit.port}"
     click.echo(f"-> {url}")
 
@@ -720,7 +921,7 @@ def ui(ctx: click.Context, foreground: bool, no_browser: bool) -> None:
         _run_foreground(args, env)
         return
 
-    log_path = cfg.data_dir / "ui.log"
+    log_path = global_home / "ui.log"
     pid = spawn_detached(args, env=env, log_path=log_path)
     info = UiProcessInfo(
         pid=pid,
@@ -728,7 +929,7 @@ def ui(ctx: click.Context, foreground: bool, no_browser: bool) -> None:
         host=cfg.streamlit.host,
         started_at=__import__("time").time(),
     )
-    write_pid_file(cfg.data_dir, info)
+    write_pid_file(global_home, info)
     click.echo(f"streamlit detached as pid {pid} (logs: {log_path})")
     click.echo("stop with: expense ui-stop")
 
@@ -768,21 +969,21 @@ def ui_stop(ctx: click.Context) -> None:
         read_pid_file,
     )
 
-    cfg: Config = ctx.obj[_CTX_KEY]["config"]
-    info = read_pid_file(cfg.data_dir)
+    global_home: Path = ctx.obj[_CTX_KEY]["global_home"]
+    info = read_pid_file(global_home)
     if info is None:
         click.echo("no UI pid file found.")
         return
     if not is_alive(info.pid):
         click.echo(f"pid {info.pid} not running; clearing stale pid file.")
-        clear_pid_file(cfg.data_dir)
+        clear_pid_file(global_home)
         return
     click.echo(f"stopping UI (pid {info.pid})...")
     if graceful_stop(info.pid):
         click.echo("stopped.")
     else:
         click.echo("could not confirm process exit; check Task Manager.", err=True)
-    clear_pid_file(cfg.data_dir)
+    clear_pid_file(global_home)
 
 
 @cli.command("ui-status")
@@ -795,14 +996,14 @@ def ui_status(ctx: click.Context) -> None:
         read_pid_file,
     )
 
-    cfg: Config = ctx.obj[_CTX_KEY]["config"]
-    info = read_pid_file(cfg.data_dir)
+    global_home: Path = ctx.obj[_CTX_KEY]["global_home"]
+    info = read_pid_file(global_home)
     if info is None:
         click.echo("UI is not running.")
         return
     if not is_alive(info.pid):
         click.echo(f"UI is not running (pid {info.pid} is dead; clearing stale pid file).")
-        clear_pid_file(cfg.data_dir)
+        clear_pid_file(global_home)
         return
     click.echo(f"running: pid={info.pid} http://{info.host}:{info.port}")
 
