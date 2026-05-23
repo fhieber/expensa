@@ -54,7 +54,9 @@ class CategorySimilarityConfig(BaseModel):
 
 class ActiveLearningConfig(BaseModel):
     default_batch_size: int = 10
-    default_strategy: Literal["uncertainty", "diverse", "mixed"] = "uncertainty"
+    default_strategy: Literal[
+        "uncertainty", "low-confidence-first", "diverse", "mixed",
+    ] = "uncertainty"
 
 
 class VendorLookupConfig(BaseModel):

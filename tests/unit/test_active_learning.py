@@ -11,6 +11,7 @@ from expense_analyzer.ingestion import ingest_csv
 from expense_analyzer.ml.active_learning import (
     pick_candidates,
     select_diverse,
+    select_low_confidence,
     select_uncertain,
 )
 from expense_analyzer.ml.classifier import CategorizationCascade
@@ -62,6 +63,56 @@ def test_pick_candidates_dispatch(
     rows = tmp_db.execute("SELECT id, combined_text FROM expenses").fetchall()
     store_embeddings(tmp_db, e, [(r["id"], r["combined_text"]) for r in rows])
     cascade = CategorizationCascade(tmp_db, _cfg(tmp_path), e)
-    for s in ("uncertainty", "diverse", "mixed"):
+    for s in ("uncertainty", "low-confidence-first", "diverse", "mixed"):
         out = pick_candidates(tmp_db, _cfg(tmp_path), e, cascade, n=5, strategy=s)
         assert len(out) <= 5
+
+
+def test_select_low_confidence_orders_by_conf_asc(
+    tmp_db: sqlite3.Connection, fixtures_dir: Path, tmp_path: Path
+) -> None:
+    """Stored low-confidence model labels should come first, sorted
+    by ascending confidence (most uncertain first)."""
+    ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
+    cat = upsert_category(tmp_db, "Lebensmittel")
+    # Seed three model labels with deliberately ordered low confidences.
+    exp_rows = tmp_db.execute(
+        "SELECT id FROM expenses ORDER BY id LIMIT 4"
+    ).fetchall()
+    confidences = {
+        int(exp_rows[0]["id"]): 0.10,
+        int(exp_rows[1]["id"]): 0.05,
+        int(exp_rows[2]["id"]): 0.30,
+        int(exp_rows[3]["id"]): 0.85,   # high-conf: must NOT be picked.
+    }
+    for eid, conf in confidences.items():
+        add_label(tmp_db, eid, cat, "model", confidence=conf)
+
+    cascade = CategorizationCascade(tmp_db, _cfg(tmp_path), HashEmbedder(dim=64))
+    picks = select_low_confidence(tmp_db, cascade, n=3)
+    # First three slots are the three low-conf rows in ascending order.
+    low_only_expected = sorted(
+        [eid for eid, c in confidences.items() if c < 0.40],
+        key=lambda eid: confidences[eid],
+    )
+    assert picks[:3] == low_only_expected
+
+
+def test_select_low_confidence_excludes_user_labeled(
+    tmp_db: sqlite3.Connection, fixtures_dir: Path, tmp_path: Path
+) -> None:
+    """Rows the user has already labelled shouldn't reappear in the
+    low-confidence queue, even if they also carry a stored model label."""
+    ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
+    cat = upsert_category(tmp_db, "Lebensmittel")
+    rows = tmp_db.execute("SELECT id FROM expenses ORDER BY id LIMIT 5").fetchall()
+    ids = [int(r["id"]) for r in rows]
+    # Stamp all five with a low-conf model label, then user-confirm two.
+    for eid in ids:
+        add_label(tmp_db, eid, cat, "model", confidence=0.10)
+    for eid in ids[:2]:
+        add_label(tmp_db, eid, cat, "user")
+
+    cascade = CategorizationCascade(tmp_db, _cfg(tmp_path), HashEmbedder(dim=64))
+    picks = select_low_confidence(tmp_db, cascade, n=10)
+    assert all(eid not in ids[:2] for eid in picks)

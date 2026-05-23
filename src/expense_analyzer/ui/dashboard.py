@@ -189,7 +189,15 @@ def _render_records_table(conn, since, until) -> None:
         "all dates" if since is None and until is None
         else f"{since} … {until}"
     )
-    st.caption(f"{len(full_df)} record(s) · date range: {date_label}")
+    # Signed total across the visible rows. The dashboard table is
+    # filtered to e.is_income = 0 (expenses only), so this is the
+    # net expense for the selected date range -- always non-positive
+    # under normal data.
+    total_eur = float(full_df["betrag_€"].sum()) if not full_df.empty else 0.0
+    st.caption(
+        f"{len(full_df)} record(s) · date range: {date_label} · "
+        f"total {de_eur(total_eur)}"
+    )
 
     dash_cats = list_categories(conn)
     color_map: dict[str, str] = {c.name: c.color for c in dash_cats}
