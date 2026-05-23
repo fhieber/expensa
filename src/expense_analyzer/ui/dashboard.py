@@ -166,8 +166,7 @@ def _render_records_table(conn, since, until) -> None:
     """Read-only records table. Category cells get the category colour
     as background; text colour is auto-picked for legibility."""
     params: list = []
-    clauses = ["e.is_income = 0"]
-    clauses = []
+    clauses: list[str] = []
     if since is not None:
         clauses.append("e.buchungsdatum >= ?")
         params.append(since.isoformat())
@@ -175,9 +174,10 @@ def _render_records_table(conn, since, until) -> None:
         clauses.append("e.buchungsdatum <= ?")
         params.append(until.isoformat())
 
+    where_sql = (" WHERE " + " AND ".join(clauses)) if clauses else ""
     sql = (
         _DASHBOARD_RECORDS_SELECT
-        + " WHERE " + " AND ".join(clauses)
+        + where_sql
         + " ORDER BY e.buchungsdatum DESC, e.id DESC LIMIT 5000"
     )
     full_df = pd.read_sql_query(sql, conn, params=params)
@@ -189,10 +189,9 @@ def _render_records_table(conn, since, until) -> None:
         "all dates" if since is None and until is None
         else f"{since} … {until}"
     )
-    # Signed total across the visible rows. The dashboard table is
-    # filtered to e.is_income = 0 (expenses only), so this is the
-    # net expense for the selected date range -- always non-positive
-    # under normal data.
+    # Signed total across the visible rows. The table is unfiltered
+    # by direction (income + expenses), so this is the net cashflow
+    # for the selected date range.
     total_eur = float(full_df["betrag_€"].sum()) if not full_df.empty else 0.0
     st.caption(
         f"{len(full_df)} record(s) · date range: {date_label} · "
