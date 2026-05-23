@@ -16,6 +16,7 @@ from pathlib import Path
 
 import streamlit as st
 
+from expense_analyzer.accounts import slugify
 from expense_analyzer.config import save_user_config
 from expense_analyzer.features.model_registry import (
     EMBEDDING_MODELS,
@@ -40,6 +41,7 @@ from expense_analyzer.storage.own_ibans import (
     update_label,
 )
 from expense_analyzer.ui._shared import (
+    get_active_account,
     get_config,
     get_conn,
     get_global_home,
@@ -179,7 +181,7 @@ def _render_privacy(cfg) -> None:
 
 def _render_own_ibans(conn) -> None:
     with st.container(border=True):
-        st.subheader("My Accounts")
+        st.header("My Accounts")
         st.caption(
             "Your own IBANs. Rows whose IBAN matches one listed here are "
             "marked **internal** (`iban_is_known_self = 1`) and become a "
@@ -195,7 +197,7 @@ def _render_own_ibans(conn) -> None:
                 "internal transfers."
             )
         else:
-            own_widths = [4, 3, 0.6]
+            own_widths = [2, 2, 0.6]
             h = st.columns(own_widths)
             h[0].markdown("**IBAN**")
             h[1].markdown("**Label**")
@@ -222,18 +224,18 @@ def _render_own_ibans(conn) -> None:
                     st.rerun()
 
         st.markdown("**Add own IBAN**")
-        add_cols = st.columns([4, 3, 1])
+        add_cols = st.columns([2, 2, 0.6])
         new_iban = add_cols[0].text_input(
             "new iban",
             key="new_own_iban_iban",
             label_visibility="collapsed",
-            placeholder="DE89 3704 0044 0532 0130 00",
+            placeholder="IBAN",
         )
         new_label = add_cols[1].text_input(
             "new label",
             key="new_own_iban_label",
             label_visibility="collapsed",
-            placeholder="Friendly name (optional)",
+            placeholder="Name",
         )
         if add_cols[2].button("Add", type="primary", key="new_own_iban_add",
                               disabled=not new_iban.strip()):
@@ -301,11 +303,18 @@ def _render_backup(conn) -> None:
             _bk_tmp = Path(_td) / "backup.sqlite"
             export_database(conn, _bk_tmp)
             _bk_bytes = _bk_tmp.read_bytes()
+        # Embed the active account's slug in the filename so backups
+        # from multiple accounts don't collide in the user's Downloads
+        # folder. Re-slugify defensively in case the registry slug ever
+        # picks up something funky from a hand-edit.
+        active = get_active_account()
+        slug = slugify(active.id) or "account"
         st.download_button(
             "⬇️ Download backup",
             data=_bk_bytes,
             file_name=(
-                f"expense-analyzer-backup-{_dt.date.today().isoformat()}.sqlite"
+                f"expense-analyzer-{slug}-backup-"
+                f"{_dt.date.today().isoformat()}.sqlite"
             ),
             mime="application/x-sqlite3",
             key="db_backup_download",
