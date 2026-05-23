@@ -326,7 +326,7 @@ def _render_card(
     for i in range(0, len(cats), chips_per_row):
         chunk = cats[i : i + chips_per_row]
         cols = st.columns(len(chunk))
-        for col, cat in zip(cols, chunk):
+        for col, cat in zip(cols, chunk, strict=True):
             is_pending = pending_cat_id == cat.id
             is_predicted = (
                 pred is not None
