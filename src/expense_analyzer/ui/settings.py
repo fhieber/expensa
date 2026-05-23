@@ -197,6 +197,8 @@ def _render_own_ibans(conn) -> None:
                 "internal transfers."
             )
         else:
+            # One width tuple shared by header / per-IBAN rows / Add
+            # row so every column lines up vertically.
             own_widths = [2, 2, 0.6]
             h = st.columns(own_widths)
             h[0].markdown("**IBAN**")
@@ -204,7 +206,17 @@ def _render_own_ibans(conn) -> None:
             h[2].markdown("")
             for r in own_rows:
                 row = st.columns(own_widths)
-                row[0].code(r.iban, language=None)
+                # Disabled text_input rather than st.code so the IBAN
+                # box renders at the same height as the editable Label
+                # input next to it -- st.code's <pre> block was
+                # systematically shorter and rows looked misaligned.
+                row[0].text_input(
+                    "iban",
+                    value=r.iban,
+                    key=f"own_iban_display_{r.iban}",
+                    label_visibility="collapsed",
+                    disabled=True,
+                )
                 new_lbl = row[1].text_input(
                     "label",
                     value=r.label or "",
@@ -215,7 +227,8 @@ def _render_own_ibans(conn) -> None:
                 if new_lbl != (r.label or ""):
                     update_label(conn, r.iban, new_lbl)
                 if row[2].button("✕", key=f"own_iban_del_{r.iban}",
-                                 help=f"Remove {r.iban}"):
+                                 help=f"Remove {r.iban}",
+                                 use_container_width=True):
                     rep = remove_own_iban(conn, r.iban)
                     st.toast(
                         f"removed; cleared the flag on {rep.n_was_self} "
@@ -238,7 +251,8 @@ def _render_own_ibans(conn) -> None:
             placeholder="Name",
         )
         if add_cols[2].button("Add", type="primary", key="new_own_iban_add",
-                              disabled=not new_iban.strip()):
+                              disabled=not new_iban.strip(),
+                              use_container_width=True):
             try:
                 rep = add_own_iban(conn, new_iban, label=new_label or None)
             except ValueError as e:

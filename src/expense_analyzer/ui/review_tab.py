@@ -397,6 +397,12 @@ def render() -> None:
     total_q = needs_n + confirm_n
 
     # ── Batch controls ──
+    # All five widgets share one row. The selectbox + number_input
+    # carry visible labels which push them DOWN by a label-height; the
+    # buttons have no label so without a spacer they float UP and
+    # misalign. We claim the label slot in each button column with a
+    # fixed-height invisible div so the three button tops line up with
+    # the bottom-anchored selectbox / number_input tops.
     c_strat, c_size, c_load, c_save, c_discard = st.columns([2.5, 1.5, 1.5, 1.5, 1.5])
 
     strategy = c_strat.selectbox(
@@ -424,6 +430,12 @@ def render() -> None:
     skipped: set[int] = st.session_state.get(_SKIPPED_KEY, set())
     n_labeled = len(pending)
 
+    # 1.7rem matches the rendered label height under the project's
+    # density CSS (label font-size 0.88rem * line-height ~1.5 + a tiny
+    # bottom margin). Tweak if Streamlit's label styling shifts.
+    _label_spacer = "<div style='height:1.7rem;'></div>"
+
+    c_load.markdown(_label_spacer, unsafe_allow_html=True)
     load_clicked = c_load.button(
         "Load batch",
         type="primary",
@@ -432,17 +444,22 @@ def render() -> None:
             f"{total_q} expense(s) in queue "
             f"({confirm_n} to confirm, {needs_n} needing a label)."
         ),
+        use_container_width=True,
     )
+    c_save.markdown(_label_spacer, unsafe_allow_html=True)
     save_clicked = c_save.button(
         f"💾 Save ({n_labeled})",
         disabled=(n_labeled == 0),
         type="primary" if n_labeled > 0 else "secondary",
         help="Write user labels to DB and retrain the cascade.",
+        use_container_width=True,
     )
+    c_discard.markdown(_label_spacer, unsafe_allow_html=True)
     discard_clicked = c_discard.button(
         "Discard",
         disabled=not batch,
         help="Drop this batch without saving.",
+        use_container_width=True,
     )
 
     # ── Handle load ──
