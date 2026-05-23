@@ -23,6 +23,7 @@ from expense_analyzer.ui import (
     categories_tab,
     dashboard,
     data_tab,
+    review_tab,
     settings,
 )
 from expense_analyzer.ui._shared import (
@@ -323,8 +324,14 @@ def _render_header() -> None:
 _render_account_picker()
 _render_header()
 
-tab_dash, tab_cats, tab_data, tab_settings = st.tabs(
-    ["Dashboard", "Categories", "Data", "Settings"]
+try:
+    _review_count = review_tab.queue_size(get_conn())
+except Exception:
+    _review_count = 0
+_review_label = f"Review ({_review_count})" if _review_count > 0 else "Review"
+
+tab_dash, tab_cats, tab_data, tab_review, tab_settings = st.tabs(
+    ["Dashboard", "Categories", "Data", _review_label, "Settings"]
 )
 
 with tab_dash:
@@ -333,6 +340,8 @@ with tab_cats:
     categories_tab.render()
 with tab_data:
     data_tab.render()
+with tab_review:
+    review_tab.render()
 with tab_settings:
     settings.render()
 

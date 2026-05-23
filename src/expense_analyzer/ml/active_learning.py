@@ -22,6 +22,70 @@ from expense_analyzer.ml.classifier import CategorizationCascade
 Strategy = Literal["uncertainty", "diverse", "mixed"]
 
 
+def get_neighbor_context(
+    conn: sqlite3.Connection,
+    embedder: Embedder,
+    expense_id: int,
+    n: int = 2,
+) -> list[dict]:
+    """Return the n nearest user-labeled expenses by cosine similarity.
+
+    Each result dict has keys: expense_id, buchungsdatum, counterparty,
+    betrag_cents, category_name, similarity (float 0-1).
+    Returns an empty list when embeddings are unavailable or no labeled
+    expenses exist.
+    """
+    target_ids, target_vecs = load_embeddings(conn, embedder.model_name, [expense_id])
+    if not target_ids:
+        return []
+    target_vec = target_vecs[0]
+
+    labeled_rows = conn.execute(
+        """
+        SELECT DISTINCT expense_id FROM labels
+        WHERE source = 'user' AND expense_id != ?
+        """,
+        (expense_id,),
+    ).fetchall()
+    labeled_ids = [int(r["expense_id"]) for r in labeled_rows]
+    if not labeled_ids:
+        return []
+
+    lab_ids, lab_vecs = load_embeddings(conn, embedder.model_name, labeled_ids)
+    if not lab_ids:
+        return []
+
+    sims = lab_vecs @ target_vec
+    top_pos = sims.argsort()[::-1][:n]
+
+    results = []
+    for pos in top_pos:
+        eid = lab_ids[int(pos)]
+        sim = float(sims[int(pos)])
+        row = conn.execute(
+            """
+            SELECT e.buchungsdatum, e.counterparty, e.betrag_cents,
+                   c.name AS category_name
+            FROM expenses e
+            JOIN labels l ON l.expense_id = e.id
+            JOIN categories c ON c.id = l.category_id
+            WHERE e.id = ? AND l.source = 'user'
+            ORDER BY l.id DESC LIMIT 1
+            """,
+            (eid,),
+        ).fetchone()
+        if row:
+            results.append({
+                "expense_id": eid,
+                "buchungsdatum": str(row["buchungsdatum"])[:10],
+                "counterparty": row["counterparty"],
+                "betrag_cents": row["betrag_cents"],
+                "category_name": row["category_name"],
+                "similarity": sim,
+            })
+    return results
+
+
 def _unlabeled_ids(conn: sqlite3.Connection) -> list[int]:
     rows = conn.execute(
         """

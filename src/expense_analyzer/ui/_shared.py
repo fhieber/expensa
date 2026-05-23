@@ -199,6 +199,7 @@ _TAB_STATE_PREFIXES = (
     "dashboard_",
     "cat_",
     "data_",
+    "review_",
     "own_iban_",
     "new_own_iban_",
     "confirm_",
