@@ -8,9 +8,10 @@ under ~150 lines and the tabs can be edited / tested independently.
 
 Tabs, in order:
   1. dashboard.py        -- overview stats, charts, records table.
-  2. categories_tab.py   -- types table with per-category stats.
+  2. review_tab.py       -- active-learning queue + bulk Predict-all.
   3. data_tab.py         -- AgGrid + Auto-Label flow + record dialog.
-  4. settings.py         -- model picker, privacy, own IBANs, DB admin.
+  4. categories_tab.py   -- types table with per-category stats.
+  5. settings.py         -- model picker, privacy, own IBANs, DB admin.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from expense_analyzer.ui import (
     categories_tab,
     dashboard,
     data_tab,
+    review_tab,
     settings,
 )
 from expense_analyzer.ui._shared import (
@@ -292,6 +294,13 @@ def _render_header() -> None:
         dot = "🔴"
     else:
         dot = "🟡"
+    # Review queue size as a header metric instead of in the tab label
+    # -- the tab label has to stay constant across reruns (see the
+    # explanation around the `st.tabs(...)` call below).
+    try:
+        n_review = review_tab.queue_size(conn)
+    except Exception:
+        n_review = 0
     try:
         db_size_mb = (
             cfg.db_path.stat().st_size / (1024 * 1024)
@@ -301,7 +310,7 @@ def _render_header() -> None:
         db_size_mb = 0.0
     bar = st.container()
     with bar:
-        c1, c2, c3, c4, c5 = st.columns([1, 1, 1.3, 1, 1])
+        c1, c2, c3, c4, c5, c6 = st.columns([1, 1, 1.3, 1, 1, 1])
         with c1:
             st.metric("Expenses", n_exp)
         with c2:
@@ -313,8 +322,14 @@ def _render_header() -> None:
                      "label (user or model). 🟢 ≥90% · 🟡 50-90% · 🔴 <50%.",
             )
         with c4:
-            st.metric("Categories", n_cat)
+            st.metric(
+                "To review", n_review,
+                help="Expenses needing a user label or a mid-confidence "
+                     "confirmation. See the Review tab.",
+            )
         with c5:
+            st.metric("Categories", n_cat)
+        with c6:
             st.metric("DB size", f"{db_size_mb:.1f} MB",
                       help=f"Path: {cfg.db_path}")
     st.divider()
@@ -323,16 +338,21 @@ def _render_header() -> None:
 _render_account_picker()
 _render_header()
 
-tab_dash, tab_cats, tab_data, tab_settings = st.tabs(
-    ["Dashboard", "Categories", "Data", "Settings"]
+tab_dash, tab_review, tab_data, tab_cats, tab_settings = st.tabs(
+    ["Dashboard", "Review", "Data", "Categories", "Settings"]
 )
 
+# Render order matches tab order so a future side-effect from an
+# earlier tab (DB write, session_state mutation) is consistently visible
+# to a later tab in the same rerun.
 with tab_dash:
     dashboard.render()
-with tab_cats:
-    categories_tab.render()
+with tab_review:
+    review_tab.render()
 with tab_data:
     data_tab.render()
+with tab_cats:
+    categories_tab.render()
 with tab_settings:
     settings.render()
 

@@ -3,9 +3,13 @@
 Strategies pick the next N expenses to ask the user about. They differ in
 the *kind* of information gain they target:
 
-  * uncertainty: lowest classifier confidence
-  * diverse:     max-min distance in embedding space (kicks off well)
-  * mixed:       round-robin across the two above
+  * uncertainty:           re-predict every candidate, pick lowest confidence
+  * low-confidence-first:  read STORED low-confidence model labels and pick
+                           by ascending confidence -- cheaper than uncertainty
+                           because no re-prediction; surfaces the rows the
+                           last cascade run was already unsure about
+  * diverse:               max-min distance in embedding space (cold start)
+  * mixed:                 round-robin between uncertainty and diverse
 """
 
 from __future__ import annotations
@@ -19,7 +23,75 @@ from expense_analyzer.config import Config
 from expense_analyzer.features.embeddings import Embedder, load_embeddings
 from expense_analyzer.ml.classifier import CategorizationCascade
 
-Strategy = Literal["uncertainty", "diverse", "mixed"]
+Strategy = Literal["uncertainty", "low-confidence-first", "diverse", "mixed"]
+
+# Mirror of `review_tab._CONF_LOW`. Kept in sync by convention; if the
+# review-tab threshold ever changes, change this too.
+_LOW_CONF_THRESHOLD: float = 0.40
+
+
+def get_neighbor_context(
+    conn: sqlite3.Connection,
+    embedder: Embedder,
+    expense_id: int,
+    n: int = 2,
+) -> list[dict]:
+    """Return the n nearest user-labeled expenses by cosine similarity.
+
+    Each result dict has keys: expense_id, buchungsdatum, counterparty,
+    betrag_cents, category_name, similarity (float 0-1).
+    Returns an empty list when embeddings are unavailable or no labeled
+    expenses exist.
+    """
+    target_ids, target_vecs = load_embeddings(conn, embedder.model_name, [expense_id])
+    if not target_ids:
+        return []
+    target_vec = target_vecs[0]
+
+    labeled_rows = conn.execute(
+        """
+        SELECT DISTINCT expense_id FROM labels
+        WHERE source = 'user' AND expense_id != ?
+        """,
+        (expense_id,),
+    ).fetchall()
+    labeled_ids = [int(r["expense_id"]) for r in labeled_rows]
+    if not labeled_ids:
+        return []
+
+    lab_ids, lab_vecs = load_embeddings(conn, embedder.model_name, labeled_ids)
+    if not lab_ids:
+        return []
+
+    sims = lab_vecs @ target_vec
+    top_pos = sims.argsort()[::-1][:n]
+
+    results = []
+    for pos in top_pos:
+        eid = lab_ids[int(pos)]
+        sim = float(sims[int(pos)])
+        row = conn.execute(
+            """
+            SELECT e.buchungsdatum, e.counterparty, e.betrag_cents,
+                   c.name AS category_name
+            FROM expenses e
+            JOIN labels l ON l.expense_id = e.id
+            JOIN categories c ON c.id = l.category_id
+            WHERE e.id = ? AND l.source = 'user'
+            ORDER BY l.id DESC LIMIT 1
+            """,
+            (eid,),
+        ).fetchone()
+        if row:
+            results.append({
+                "expense_id": eid,
+                "buchungsdatum": str(row["buchungsdatum"])[:10],
+                "counterparty": row["counterparty"],
+                "betrag_cents": row["betrag_cents"],
+                "category_name": row["category_name"],
+                "similarity": sim,
+            })
+    return results
 
 
 def _unlabeled_ids(conn: sqlite3.Connection) -> list[int]:
@@ -72,6 +144,51 @@ def select_diverse(
     return [ids[p] for p in chosen_pos]
 
 
+def select_low_confidence(
+    conn: sqlite3.Connection,
+    cascade: CategorizationCascade,
+    n: int,
+) -> list[int]:
+    """Pick rows whose **stored** model label has the lowest confidence.
+
+    Two-stage strategy so an empty / sparse low-confidence pool falls
+    back gracefully:
+
+      1. Pull every expense whose latest label is a model prediction
+         with confidence below :data:`_LOW_CONF_THRESHOLD`, sorted by
+         confidence ascending (most uncertain first).
+      2. If the request asks for more than that, pad from
+         :func:`select_uncertain` over rows that have NO stored model
+         label at all -- which the cascade will fresh-predict and rank
+         by confidence too.
+
+    Compared to ``select_uncertain``, this skips re-prediction for the
+    rows that already have a stored low-confidence label, which is the
+    common case after a `Predict-all` pass.
+    """
+    rows = conn.execute(
+        """
+        SELECT expense_id, confidence FROM latest_label
+        WHERE label_source = 'model'
+          AND (confidence IS NULL OR confidence < ?)
+          AND expense_id NOT IN (
+            SELECT DISTINCT expense_id FROM labels WHERE source = 'user'
+          )
+        ORDER BY COALESCE(confidence, 0) ASC, expense_id ASC
+        LIMIT ?
+        """,
+        (_LOW_CONF_THRESHOLD, n),
+    ).fetchall()
+    low_ids = [int(r["expense_id"]) for r in rows]
+    if len(low_ids) >= n:
+        return low_ids
+    # Padding: rows with no model label at all -- delegate to the
+    # uncertainty selector (which fresh-predicts via the cascade).
+    seen = set(low_ids)
+    extras = [x for x in select_uncertain(conn, cascade, n) if x not in seen]
+    return (low_ids + extras)[:n]
+
+
 def pick_candidates(
     conn: sqlite3.Connection,
     config: Config,
@@ -84,6 +201,8 @@ def pick_candidates(
     strategy = strategy or config.active_learning.default_strategy
     if strategy == "uncertainty":
         return select_uncertain(conn, cascade, n)
+    if strategy == "low-confidence-first":
+        return select_low_confidence(conn, cascade, n)
     if strategy == "diverse":
         return select_diverse(conn, embedder, n)
     if strategy == "mixed":

@@ -22,7 +22,7 @@ from expense_analyzer.ingestion import ingest_csv
 from expense_analyzer.ml.classifier import CategorizationCascade
 from expense_analyzer.storage.admin import clear_labels_for_expense
 from expense_analyzer.storage.categories import add_label, list_categories
-from expense_analyzer.ui._components import date_preset_row
+from expense_analyzer.ui._components import date_preset_row, de_eur
 from expense_analyzer.ui._pending_edits import (
     PendingEdits,
     merge_user_typed,
@@ -34,10 +34,40 @@ from expense_analyzer.ui._pending_edits import (
     load as load_pending_edits,
 )
 from expense_analyzer.ui._shared import get_config, get_conn, get_embedder
+from expense_analyzer.utils.colors import readable_text_color
 
 # SELECT that joins the most-recent label via the `latest_label` view
 # defined in schema.sql. SQLite inlines views at plan time, so this is
 # just a list of selected columns.
+#
+# `last_modified` captures the most recent write to the row from any
+# source: any label insert (user edit, auto-label, predict-all), any
+# note update, or the original ingestion timestamp as a fallback.
+# Picks the greatest of the three via SQLite's scalar `MAX(a, b, c)`
+# (NULL-tolerant: ignores NULL args, picks the largest non-NULL).
+# Joined via two LEFT JOINs (cheap on idx_labels_expense + notes pk)
+# instead of correlated subqueries.
+# Canonical visible-column order, applied at the end of dataframe
+# assembly so AgGrid renders cells in this sequence. Hidden columns
+# (overlay flags, raw label_source, etc.) get appended after these so
+# they don't affect the rendered layout.
+#
+# Bump `_GRID_STATE_KEY` below when this order changes -- otherwise
+# AgGrid will keep restoring the previous order from session_state
+# columnState. The suffix orphans the prior cached state on the user's
+# next visit (they lose any one-off column drag-reorder customisations,
+# but the canonical layout becomes the source of truth again).
+_VISIBLE_COL_ORDER = [
+    "id", "buchungsdatum",
+    "counterparty", "zahlungspflichtiger", "verwendungszweck",
+    "betrag_€",
+    "category", "confidence", "src", "iban",
+    "umsatztyp", "iban_is_foreign",
+    "has_glaeubiger_id", "mandatsreferenz_present",
+    "last_modified",
+]
+_GRID_STATE_KEY = "data_aggrid_grid_state_v3"
+
 _DATA_RECORDS_SELECT = """
     SELECT
         e.id, e.buchungsdatum,
@@ -45,11 +75,17 @@ _DATA_RECORDS_SELECT = """
         e.betrag_cents / 100.0 AS "betrag_€",
         c.name AS category, ll.category_id AS category_id,
         ll.label_source AS label_source, ll.confidence,
+        MAX(last_lbl.last_at, n.updated_at, e.imported_at) AS last_modified,
         e.umsatztyp, e.iban, e.iban_is_foreign,
         e.has_glaeubiger_id, e.mandatsreferenz_present
     FROM expenses e
     LEFT JOIN latest_label ll ON ll.expense_id = e.id
     LEFT JOIN categories c ON c.id = ll.category_id
+    LEFT JOIN (
+        SELECT expense_id, MAX(created_at) AS last_at
+        FROM labels GROUP BY expense_id
+    ) last_lbl ON last_lbl.expense_id = e.id
+    LEFT JOIN notes n ON n.expense_id = e.id
 """
 
 
@@ -221,8 +257,17 @@ def render() -> None:
     all_cat_names = sorted(c.name for c in all_cat_objs)
     cat_id_by_name = {c.name: c.id for c in all_cat_objs}
     cat_name_by_id = {c.id: c.name for c in all_cat_objs}
+    # {category_name: {"bg": "#rrggbb", "fg": "#000000" | "#ffffff"}} -- consumed
+    # by the AgGrid Category cell's cellStyle JS so each cell paints in
+    # the user-chosen category colour with auto-picked legible text.
+    cat_color_map = {
+        c.name: {"bg": c.color or "#888888", "fg": readable_text_color(c.color or "#888888")}
+        for c in all_cat_objs
+    }
 
-    grid_options, aggrid_key = _build_grid_options(df, extended, all_cat_names)
+    grid_options, aggrid_key = _build_grid_options(
+        df, extended, all_cat_names, cat_color_map,
+    )
     _render_top_action_bar_and_grid_and_actions(
         conn, cfg, df, edits, grid_options, aggrid_key,
         cat_id_by_name, cat_name_by_id,
@@ -362,6 +407,10 @@ def _fetch_and_overlay(
         df["src"] = df["label_source"].map(
             {"user": "✅ user", "model": "🤖 model"}
         ).fillna("")  # unlabeled rows -> empty Source cell
+        # Compact `YYYY-MM-DD HH:MM` for the Modified column. ISO
+        # ordering means lexicographic sort in AgGrid matches
+        # chronological sort -- no custom comparator needed.
+        df["last_modified"] = pd.to_datetime(df["last_modified"]).dt.strftime("%Y-%m-%d %H:%M")
     else:
         df["src"] = ""
         df["label_source"] = ""
@@ -375,6 +424,12 @@ def _fetch_and_overlay(
 
     edits = load_pending_edits()
     df = _overlay_pending(df, edits)
+    # Pin canonical visible-column order. Hidden / overlay columns
+    # tail the visible ones; their position is irrelevant because
+    # AgGrid hides them via `configure_column(hide=True)`.
+    visible_first = [c for c in _VISIBLE_COL_ORDER if c in df.columns]
+    rest = [c for c in df.columns if c not in visible_first]
+    df = df[visible_first + rest]
     return df, edits
 
 
@@ -382,7 +437,7 @@ def _apply_search(df: pd.DataFrame, search_text: str) -> pd.DataFrame:
     text_cols = [
         "id", "buchungsdatum", "counterparty", "zahlungspflichtiger",
         "verwendungszweck", "betrag_€", "category", "_orig_category",
-        "src", "umsatztyp", "iban",
+        "src", "umsatztyp", "iban", "last_modified",
     ]
     cols_present = [c for c in text_cols if c in df.columns]
 
@@ -453,7 +508,12 @@ def _overlay_pending(df: pd.DataFrame, edits: PendingEdits) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 
-def _build_grid_options(df: pd.DataFrame, extended: bool, all_cat_names: list[str]):
+def _build_grid_options(
+    df: pd.DataFrame,
+    extended: bool,
+    all_cat_names: list[str],
+    cat_color_map: dict[str, dict[str, str]],
+):
     from st_aggrid import GridOptionsBuilder
     from st_aggrid.shared import JsCode
 
@@ -524,6 +584,8 @@ def _build_grid_options(df: pd.DataFrame, extended: bool, all_cat_names: list[st
         ),
         cellStyle=amount_cell_style,
     )
+    # Pending-state highlight for Source / Confidence columns (no
+    # category-colour overlay there -- those cells aren't categories).
     pending_cell_style = JsCode("""
         function(params) {
           if (!params.data) return null;
@@ -535,11 +597,30 @@ def _build_grid_options(df: pd.DataFrame, extended: bool, all_cat_names: list[st
         }
     """)
     _valid_cats_js = _json.dumps([""] + all_cat_names)
+    _cat_colors_js = _json.dumps(cat_color_map)
     category_value_parser = JsCode(
         "function(params){"
         f"  var valid = {_valid_cats_js};"
         "  if (valid.indexOf(params.newValue) >= 0) return params.newValue;"
         "  return params.oldValue;"
+        "}"
+    )
+    # Category cell: pending-edit highlight wins; otherwise paint the
+    # cell in the user-chosen category colour with auto-picked legible
+    # text. Mirrors the Dashboard records table's styling.
+    category_cell_style = JsCode(
+        "function(params) {"
+        "  if (!params.data) return null;"
+        "  var d = params.data;"
+        "  if (d._user_pending === true) return {'backgroundColor': 'rgba(212, 160, 23, 0.22)'};"
+        "  if (d._stage_cat && d._stage_cat !== '') return {'backgroundColor': 'rgba(212, 160, 23, 0.22)'};"
+        "  if (d._promote === true) return {'backgroundColor': 'rgba(212, 160, 23, 0.22)'};"
+        f"  var colors = {_cat_colors_js};"
+        "  var v = params.value;"
+        "  if (v && colors[v]) {"
+        "    return {'backgroundColor': colors[v].bg, 'color': colors[v].fg};"
+        "  }"
+        "  return null;"
         "}"
     )
     gb.configure_column(
@@ -549,7 +630,7 @@ def _build_grid_options(df: pd.DataFrame, extended: bool, all_cat_names: list[st
         cellEditor="agSelectCellEditor",
         cellEditorParams={"values": [""] + all_cat_names},
         valueParser=category_value_parser,
-        cellStyle=pending_cell_style,
+        cellStyle=category_cell_style,
         filter="agTextColumnFilter",
     )
 
@@ -574,7 +655,7 @@ def _build_grid_options(df: pd.DataFrame, extended: bool, all_cat_names: list[st
           return d.src || '';
         }
     """)
-    gb.configure_column("src", header_name="Source", width=170,
+    gb.configure_column("src", header_name="Source", width=102,
                         filter="agTextColumnFilter",
                         valueGetter=src_value_getter,
                         cellStyle=pending_cell_style)
@@ -592,10 +673,41 @@ def _build_grid_options(df: pd.DataFrame, extended: bool, all_cat_names: list[st
           return d.confidence || '';
         }
     """)
+    # Conf cell style: pending-edit highlight wins; otherwise paint
+    # the cell by confidence bucket so the user can spot low-quality
+    # predictions at a glance. Thresholds match
+    # `review_tab._CONF_LOW = 0.40` / `_CONF_MED = 0.70`:
+    #   conf < 0.40  -> red    (low; cascade isn't sure)
+    #   0.40 <= conf < 0.70 -> yellow ("to confirm" bucket in Review)
+    #   conf >= 0.70 -> no bg  (high; auto-coverage)
+    conf_cell_style = JsCode("""
+        function(params) {
+          if (!params.data) return null;
+          var d = params.data;
+          if (d._user_pending === true) return {'backgroundColor': 'rgba(212, 160, 23, 0.22)'};
+          if (d._stage_cat && d._stage_cat !== '') return {'backgroundColor': 'rgba(212, 160, 23, 0.22)'};
+          if (d._promote === true) return {'backgroundColor': 'rgba(212, 160, 23, 0.22)'};
+          var v = parseFloat(params.value);
+          if (isNaN(v)) return null;
+          if (v < 0.40) return {'backgroundColor': 'rgba(220, 50, 50, 0.28)'};
+          if (v < 0.70) return {'backgroundColor': 'rgba(255, 200, 0, 0.30)'};
+          return null;
+        }
+    """)
     gb.configure_column("confidence", header_name="Conf", width=80,
                         filter="agNumberColumnFilter",
                         valueGetter=conf_value_getter,
-                        cellStyle=pending_cell_style)
+                        cellStyle=conf_cell_style)
+
+    # Modified column: latest write timestamp across labels / notes /
+    # original ingest (computed in the SELECT). Sortable so the user
+    # can pull recent activity to the top with one click. Date filter
+    # for "show me everything touched in the last week" workflows.
+    gb.configure_column(
+        "last_modified", header_name="Last Modified", width=145,
+        filter="agDateColumnFilter",
+        tooltipField="last_modified",
+    )
 
     gb.configure_column("iban", header_name="IBAN", width=220,
                         filter="agTextColumnFilter")
@@ -612,7 +724,27 @@ def _build_grid_options(df: pd.DataFrame, extended: bool, all_cat_names: list[st
             if c in df.columns:
                 gb.configure_column(c, hide=True)
 
-    _saved_grid_state = st.session_state.get("data_aggrid_grid_state")
+    # Restore the prior AgGrid state (filter / sort / col widths) IF
+    # it was captured under the SAME column set. After adding or
+    # removing columns the saved `columnState` would either hide the
+    # new column or list ghost columns -- safest is to drop the state
+    # and let AgGrid re-derive defaults from the current columnDefs.
+    _saved_grid_state = st.session_state.get(_GRID_STATE_KEY)
+    if isinstance(_saved_grid_state, dict) and _saved_grid_state:
+        col_state = _saved_grid_state.get("columnState") or []
+        saved_col_ids = {
+            item.get("colId") for item in col_state
+            if isinstance(item, dict) and "colId" in item
+        }
+        if saved_col_ids and not set(df.columns).issubset(saved_col_ids):
+            # New columns added since the saved state was captured.
+            # Drop the state + bump the AgGrid widget key so it
+            # re-mounts cleanly with the new column set.
+            _saved_grid_state = None
+            st.session_state.pop(_GRID_STATE_KEY, None)
+            st.session_state["data_aggrid_seed"] = (
+                st.session_state.get("data_aggrid_seed", 0) + 1
+            )
     if isinstance(_saved_grid_state, dict) and _saved_grid_state:
         _init_state = {k: v for k, v in _saved_grid_state.items()
                        if k != "rowSelection"}
@@ -684,7 +816,8 @@ def _render_action_buttons(prefix: str, counts: dict):
         key=f"data_extended_{prefix}_toggle",
         on_change=_sync_extended_from,
         args=(f"data_extended_{prefix}_toggle",),
-        help="Reveal Umsatztyp / IBAN / SEPA flag columns.",
+        help="Reveal Umsatztyp / Foreign? / Gläubiger? / Mandat? columns. "
+             "(IBAN is always shown.)",
     )
     return save_c, revert_c, auto_c, promote_c, see_c
 
@@ -693,30 +826,73 @@ def _render_caption(counts: dict) -> None:
     n_pend = int(counts.get("n_pending", 0))
     n_sel = int(counts.get("n_selected", 0))
     n_row = int(counts.get("n_rows", 0))
+    total = float(counts.get("total_amount", 0.0))
+    sel_total = float(counts.get("selected_amount", 0.0))
+    # When the user has a selection, surface its subtotal too -- saves
+    # the user from grabbing a calculator. Total reflects the SQL-level
+    # filter view (date / search / pinned); it does NOT honour AgGrid
+    # per-column header filters (those run client-side; the grid state
+    # AgGrid posts back doesn't cleanly expose post-filter visibility
+    # without extra JS plumbing).
+    sel_str = (
+        f"  ·  selected total {de_eur(sel_total)}"
+        if n_sel > 0 else ""
+    )
     st.markdown(
         f"<div style='text-align:center; font-size:0.78rem; "
         f"opacity:0.75; margin: 0.25rem 0 0.6rem 0;'>"
-        f"{n_pend} unsaved changes  ·  {n_sel} of {n_row} selected"
+        f"{n_pend} unsaved changes  ·  {n_sel} of {n_row} selected  ·  "
+        f"total {de_eur(total)}{sel_str}"
         f"</div>",
         unsafe_allow_html=True,
     )
 
 
-def _counts_from_grid_state(key: str, cat_id_by_name: dict[str, int]) -> dict:
+def _counts_from_grid_state(
+    key: str,
+    cat_id_by_name: dict[str, int],
+    df: pd.DataFrame | None = None,
+) -> dict:
     """Read AgGrid's just-written grid_state out of session_state and
     derive the counts used by the top action bar -- before the grid
-    itself renders this turn."""
+    itself renders this turn.
+
+    On the first render after a tab switch or page load the grid_state
+    isn't in session_state yet (AgGrid posts back after it mounts), so
+    `_top_counts` would otherwise read all zeros. Pass the Python-side
+    `df` as a fallback so the top bar at least shows total row count +
+    total amount immediately.
+    """
     out = {"n_pending": 0, "n_selected": 0, "n_rows": 0,
+           "total_amount": 0.0, "selected_amount": 0.0,
            "can_promote": False, "can_inspect": False, "sel_single_eid": None}
+
+    def _seed_from_df() -> None:
+        # Fallback when grid_state hasn't arrived: take the row count
+        # and signed total from the SQL-filter view. Pending and
+        # selected stay zero because both require user interaction
+        # with AgGrid.
+        if df is None or df.empty:
+            return
+        out["n_rows"] = len(df)
+        try:
+            out["total_amount"] = float(df["betrag_€"].sum())
+        except (KeyError, ValueError):
+            pass
+
     raw = st.session_state.get(key)
     if not isinstance(raw, dict):
+        _seed_from_df()
         return out
     nodes = raw.get("nodes") or []
-    if not isinstance(nodes, list):
+    if not isinstance(nodes, list) or not nodes:
+        _seed_from_df()
         return out
     out["n_rows"] = len(nodes)
     sel_eids: list[int] = []
     n_pending = 0
+    total_amount = 0.0
+    selected_amount = 0.0
     for node in nodes:
         if not isinstance(node, dict):
             continue
@@ -725,8 +901,19 @@ def _counts_from_grid_state(key: str, cat_id_by_name: dict[str, int]) -> dict:
             eid = int(d.get("id"))
         except (TypeError, ValueError):
             continue
+        # Sum the signed amount across every visible row, and again
+        # restricted to selected rows so the caption can show a
+        # subtotal when the user has a selection. AgGrid column-
+        # filters aren't reflected here -- this is the SQL-filter
+        # view, same scope as `n_rows`.
+        try:
+            amt = float(d.get("betrag_€") or 0)
+        except (TypeError, ValueError):
+            amt = 0.0
+        total_amount += amt
         if node.get("isSelected") is True:
             sel_eids.append(eid)
+            selected_amount += amt
         cat = str(d.get("category") or "").strip()
         orig = str(d.get("_orig_category") or "").strip()
         orig_norm = "" if orig == "(unkategorisiert)" else orig
@@ -735,6 +922,8 @@ def _counts_from_grid_state(key: str, cat_id_by_name: dict[str, int]) -> dict:
                 n_pending += 1
     out["n_pending"] = n_pending
     out["n_selected"] = len(sel_eids)
+    out["total_amount"] = total_amount
+    out["selected_amount"] = selected_amount
     if sel_eids:
         sel_set = set(sel_eids)
         ok = True
@@ -773,7 +962,7 @@ def _render_top_action_bar_and_grid_and_actions(
     st.session_state["data_extended_top_toggle"] = _master_ext
     st.session_state["data_extended_bot_toggle"] = _master_ext
 
-    _top_counts = _counts_from_grid_state(aggrid_key, cat_id_by_name)
+    _top_counts = _counts_from_grid_state(aggrid_key, cat_id_by_name, df=df)
     save_top_clicked, revert_top_clicked, auto_label_top_clicked, \
         promote_top_clicked, see_details_top_clicked = \
         _render_action_buttons("top", _top_counts)
@@ -799,7 +988,7 @@ def _render_top_action_bar_and_grid_and_actions(
     )
     _gs = response.grid_state
     if _gs:
-        st.session_state["data_aggrid_grid_state"] = _gs
+        st.session_state[_GRID_STATE_KEY] = _gs
 
     edited_df = response.get("data")
     if edited_df is None:
@@ -826,6 +1015,25 @@ def _render_top_action_bar_and_grid_and_actions(
     n_selected = len(sel_ids)
     n_rows = len(edited_df) if edited_df is not None else 0
 
+    # Signed totals over the SQL-filter scope (= every row AgGrid
+    # received). Column-filtering at the grid level is invisible from
+    # here; see comment in `_render_caption`.
+    if edited_df is not None and not edited_df.empty:
+        total_amount = float(edited_df["betrag_€"].sum())
+        sel_set_for_sum = {int(x) for x in sel_ids}
+        if sel_set_for_sum:
+            selected_amount = float(
+                edited_df.loc[
+                    edited_df["id"].astype(int).isin(sel_set_for_sum),
+                    "betrag_€",
+                ].sum()
+            )
+        else:
+            selected_amount = 0.0
+    else:
+        total_amount = 0.0
+        selected_amount = 0.0
+
     can_promote = _compute_can_promote(edited_df, sel_ids)
     can_inspect = n_selected == 1
     sel_single_eid = int(sel_ids[0]) if can_inspect else None
@@ -834,6 +1042,8 @@ def _render_top_action_bar_and_grid_and_actions(
         "n_pending": n_pending,
         "n_selected": n_selected,
         "n_rows": n_rows,
+        "total_amount": total_amount,
+        "selected_amount": selected_amount,
         "can_promote": can_promote,
         "can_inspect": can_inspect,
         "sel_single_eid": sel_single_eid,
