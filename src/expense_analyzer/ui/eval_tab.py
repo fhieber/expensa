@@ -18,7 +18,12 @@ import pandas as pd
 import streamlit as st
 
 from expense_analyzer.ml import eval_cache
-from expense_analyzer.ml.eval_report import ReportContext, build_pdf, default_filename
+from expense_analyzer.ml.eval_report import (
+    ReportContext,
+    build_pdf,
+    default_filename,
+    format_duration,
+)
 from expense_analyzer.ml.evaluation import (
     ablation,
     cross_validate,
@@ -126,18 +131,33 @@ def render() -> None:
         return
 
     saved_at = st.session_state.get(_SAVED_AT_KEY)
+    meta = st.session_state.get(_RUN_META_KEY) or {}
     if saved_at:
         # Format ISO timestamp -> "2026-05-24 14:32" without parsing.
         pretty = saved_at.replace("T", " ")
-        st.caption(f"📌 Showing results from **{pretty}**. Re-run above to refresh.")
+        runtime = meta.get("runtime_seconds")
+        runtime_suffix = (
+            f" · runtime **{format_duration(float(runtime))}**"
+            if isinstance(runtime, (int, float)) else ""
+        )
+        st.caption(
+            f"📌 Showing results from **{pretty}**{runtime_suffix}. "
+            "Re-run above to refresh."
+        )
     _render_results(result, abl, id_to_name)
 
 
 def _run(conn, cfg, n_folds: int, seed: int, include_zeroshot: bool) -> None:
+    import time
+
     eval_cfg = cfg.model_copy(deep=True)
     if not include_zeroshot:
         eval_cfg.zeroshot.enabled = False
 
+    # Wall-clock total: covers CV + ablation. monotonic() is the right
+    # choice over time() so a system clock adjustment mid-run doesn't
+    # corrupt the reported duration.
+    _started = time.monotonic()
     with st.status("Evaluating cascade…", expanded=True) as status:
         status.write(f"loading embedding model `{cfg.embedding_model}`…")
         embedder = get_embedder()
@@ -203,9 +223,11 @@ def _run(conn, cfg, n_folds: int, seed: int, include_zeroshot: bool) -> None:
         )
         abl_progress.empty()
 
+        _runtime_s = time.monotonic() - _started
         status.update(
             label=(
-                f"Done. Accuracy {result.accuracy:.1%} · "
+                f"Done in {format_duration(_runtime_s)}. "
+                f"Accuracy {result.accuracy:.1%} · "
                 f"macro-F1 {result.macro_f1:.2f} · "
                 f"coverage {result.coverage:.1%} over {result.n_labeled} labels."
             ),
@@ -214,7 +236,11 @@ def _run(conn, cfg, n_folds: int, seed: int, include_zeroshot: bool) -> None:
 
     from datetime import datetime
 
-    meta = {"seed": seed, "include_zeroshot": include_zeroshot}
+    meta = {
+        "seed": seed,
+        "include_zeroshot": include_zeroshot,
+        "runtime_seconds": float(_runtime_s),
+    }
     st.session_state[_RESULT_KEY] = result
     st.session_state[_ABLATION_KEY] = abl
     st.session_state[_RUN_META_KEY] = meta
@@ -353,6 +379,10 @@ def _render_pdf_export(result, abl, id_to_name: dict[int, str]) -> None:
         "category_similarity": eff_cfg.category_similarity.model_dump(),
         "zeroshot": eff_cfg.zeroshot.model_dump(),
     }
+    runtime_val = meta.get("runtime_seconds")
+    duration_seconds = (
+        float(runtime_val) if isinstance(runtime_val, (int, float)) else None
+    )
     ctx = ReportContext(
         account_name=account.name,
         embedding_model=cfg.embedding_model,
@@ -363,6 +393,7 @@ def _render_pdf_export(result, abl, id_to_name: dict[int, str]) -> None:
         cascade_settings=cascade_settings,
         zeroshot_model=cfg.zeroshot_model,
         device=cfg.device,
+        duration_seconds=duration_seconds,
     )
     try:
         with st.spinner("Rendering report (charts → PNG → PDF)…"):

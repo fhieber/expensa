@@ -297,6 +297,25 @@ def test_build_pdf_produces_pdf_bytes(
     assert "Test_Account" in fname  # space -> underscore by the sanitiser
 
 
+def test_format_duration_picks_smallest_unit() -> None:
+    """The PDF header + eval-tab caption + status bar all share this
+    formatter. Pin its contract so the displayed string stays short."""
+    from expense_analyzer.ml.eval_report import format_duration
+
+    assert format_duration(None) == "—"
+    assert format_duration(0) == "0.0s"
+    assert format_duration(0.34) == "0.3s"
+    assert format_duration(12.4) == "12.4s"
+    assert format_duration(59.9) == "59.9s"
+    assert format_duration(60) == "1m 00s"
+    assert format_duration(142) == "2m 22s"
+    assert format_duration(3599) == "59m 59s"
+    assert format_duration(3600) == "1h 00m"
+    assert format_duration(3900) == "1h 05m"
+    # Negative input clamps to 0 rather than producing "-5s".
+    assert format_duration(-5) == "0.0s"
+
+
 def test_format_setting_value_renders_each_python_type() -> None:
     """``_format_setting_value`` is the appendix's one-stop value
     formatter; keep its contract pinned so future stage additions
@@ -372,3 +391,22 @@ def test_build_pdf_includes_cascade_settings_appendix(
     # Adding the appendix added real content (one PageBreak + ~7
     # tables -> hundreds of bytes minimum even after PDF compression).
     assert len(pdf_with) > len(pdf_without) + 500
+
+    # A duration of None must not crash and must produce a valid PDF,
+    # while supplying a duration must produce *some* additional bytes
+    # (header line + appendix row).
+    timed_ctx = ReportContext(
+        account_name="Test",
+        embedding_model="hash-test",
+        n_folds=result.n_folds,
+        seed=0,
+        include_zeroshot=False,
+        category_id_to_name=id_to_name,
+        cascade_settings=settings_ctx.cascade_settings,
+        zeroshot_model="moritz/test-nli",
+        device="cpu",
+        duration_seconds=142.7,
+    )
+    pdf_timed = build_pdf(result, None, timed_ctx)
+    assert pdf_timed[:4] == b"%PDF"
+    assert len(pdf_timed) > len(pdf_with)

@@ -37,6 +37,8 @@ zeroshot:
   # via Settings → Cascade tuning, then A/B via the Quality tab.
   use_vendor_context: false
   vendor_summary_max_chars: 240
+  # Pipeline batch size. 16 is safe on CPU; raise to 32/64 on GPU.
+  batch_size: 16
 
 # --- Zero-shot via embedding similarity (categories embedded as name+description) ---
 category_similarity:

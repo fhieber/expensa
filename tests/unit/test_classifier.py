@@ -267,3 +267,141 @@ def test_cascade_fit_and_classifier_predict(
     assert report.n_classes == 3
     assert report.classifier_type == "logistic_regression"
     assert report.train_score >= 0.99  # overfit on 5 rows
+
+
+# ─── Vectorization + zero-shot batching ────────────────────────────────
+
+
+def test_knn_vote_from_sims_equivalent_to_knn_vote() -> None:
+    """The new bulk-sims helper must vote the same way as the
+    historical per-vector _knn_vote. Pin the contract because
+    predict_batch's kNN stage now exclusively uses the precomputed
+    sim matrix."""
+    from expense_analyzer.ml.classifier import _knn_vote_from_sims
+
+    rng = np.random.default_rng(0)
+    train_vecs = rng.standard_normal((20, 16)).astype(np.float32)
+    train_vecs /= np.linalg.norm(train_vecs, axis=1, keepdims=True)
+    train_labels = np.array([0, 1, 0, 1, 2] * 4, dtype=np.int64)
+
+    for _ in range(10):
+        target = rng.standard_normal(16).astype(np.float32)
+        target /= np.linalg.norm(target)
+        per_row = _knn_vote(target, train_vecs, train_labels, k=5, agreement_min=3)
+        bulk = _knn_vote_from_sims(
+            train_vecs @ target, train_labels, k=5, agreement_min=3
+        )
+        assert per_row == bulk
+
+
+def test_predict_batch_is_deterministic_across_input_order(
+    tmp_db: sqlite3.Connection, fixtures_dir: Path, tmp_path: Path
+) -> None:
+    """Vectorisation lookup by ``pos_for_eid`` plus the deferred
+    zero-shot pass: if we mistakenly index by loop position rather
+    than expense id anywhere, shuffling the input order would shift
+    predictions. Pin that the order is irrelevant."""
+    ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
+    food = upsert_category(tmp_db, "Lebensmittel")
+    rent = upsert_category(tmp_db, "Miete")
+    _label_one(tmp_db, "rewe markt", food)
+    _label_one(tmp_db, "edeka sued", food)
+    _label_one(tmp_db, "aldi sued", food)
+    _label_one(tmp_db, "vermieter schmidt", rent)
+    cascade = CategorizationCascade(
+        tmp_db, _config_no_zeroshot(tmp_path), HashEmbedder(dim=128)
+    )
+    cascade.fit()
+    eids = [
+        int(r["id"])
+        for r in tmp_db.execute("SELECT id FROM expenses ORDER BY id LIMIT 30").fetchall()
+    ]
+    in_order = {p.expense_id: (p.category_id, p.stage) for p in cascade.predict_batch(eids)}
+    shuffled = list(reversed(eids))
+    out_of_order = {
+        p.expense_id: (p.category_id, p.stage)
+        for p in cascade.predict_batch(shuffled)
+    }
+    # Same expense id -> same (category, stage) regardless of where it
+    # sat in the input list.
+    assert in_order == out_of_order
+
+
+def test_zeroshot_predict_batch_routes_empty_inputs_to_abstain(
+    tmp_db: sqlite3.Connection, tmp_path: Path
+) -> None:
+    """Empty / whitespace-only premises must surface as (None, 0.0)
+    -- the batch path used to crash because the transformers
+    pipeline rejects ``''`` outright; we substitute a space and
+    map those slots back to abstain afterwards."""
+    upsert_category(tmp_db, "Lebensmittel", "Supermarkt Einkauf")
+    cascade = CategorizationCascade(
+        tmp_db, _config_no_zeroshot(tmp_path), HashEmbedder(dim=64)
+    )
+    # Force the lazy ``_zs`` slot to a stub so we don't pay an HF
+    # download in unit tests -- exercises the empty-text handling
+    # without touching the network.
+    def _fake_pipeline(texts, candidate_labels, **_kw):
+        # transformers returns a single dict for one input, list for many.
+        single = isinstance(texts, str)
+        items = [texts] if single else list(texts)
+        out = [
+            {"labels": candidate_labels, "scores": [1.0 / len(candidate_labels)] * len(candidate_labels)}
+            for _ in items
+        ]
+        return out[0] if single else out
+
+    cascade._zs = _fake_pipeline  # type: ignore[assignment]
+    results = cascade._zeroshot_predict_batch(["", "  ", "real text"])
+    assert results[0] == (None, 0.0)
+    assert results[1] == (None, 0.0)
+    # The real-text slot should produce *some* category id (any will
+    # do given the fake pipeline returns uniform scores).
+    cid, conf = results[2]
+    assert cid is not None
+    assert 0.0 <= conf <= 1.0
+
+
+def test_zeroshot_predict_batch_preserves_input_order(
+    tmp_db: sqlite3.Connection, tmp_path: Path
+) -> None:
+    """Each input position must get its own answer in the same slot
+    -- the deferred-zero-shot path in predict_batch stitches results
+    back via index, so order-preservation is a hard contract."""
+    cat_a = upsert_category(tmp_db, "Lebensmittel", "Supermarkt")
+    cat_b = upsert_category(tmp_db, "Miete", "Wohnung")
+    cascade = CategorizationCascade(
+        tmp_db, _config_no_zeroshot(tmp_path), HashEmbedder(dim=64)
+    )
+
+    # Fake pipeline that always picks the label whose text matches
+    # the premise verbatim, so we can verify order by reading back.
+    def _fake_pipeline(texts, candidate_labels, **_kw):
+        # The label format is "name: description". Pick whichever
+        # label has a name that appears in the premise.
+        single = isinstance(texts, str)
+        items = [texts] if single else list(texts)
+        out = []
+        for t in items:
+            scores = []
+            for lab in candidate_labels:
+                name = lab.split(":", 1)[0].strip().lower()
+                scores.append(1.0 if name in t.lower() else 0.0)
+            # Renormalise so transformers' argmax behaviour is sane.
+            total = sum(scores) or 1.0
+            scores = [s / total for s in scores]
+            order = sorted(range(len(candidate_labels)), key=lambda i: -scores[i])
+            out.append({
+                "labels": [candidate_labels[i] for i in order],
+                "scores": [scores[i] for i in order],
+            })
+        return out[0] if single else out
+
+    cascade._zs = _fake_pipeline  # type: ignore[assignment]
+    results = cascade._zeroshot_predict_batch(
+        ["lebensmittel einkauf", "miete januar", "lebensmittel laden"]
+    )
+    assert len(results) == 3
+    assert results[0][0] == cat_a
+    assert results[1][0] == cat_b
+    assert results[2][0] == cat_a

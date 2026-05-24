@@ -107,18 +107,24 @@ def _vendor_exact_match(
     return None
 
 
-def _knn_vote(
-    target_vec: np.ndarray,
-    train_vecs: np.ndarray,
+def _knn_vote_from_sims(
+    sims: np.ndarray,
     train_labels: np.ndarray,
     k: int,
     agreement_min: int,
 ) -> tuple[int, float] | None:
-    if train_vecs.shape[0] == 0:
+    """kNN vote when the cosine-similarity vector is already computed.
+
+    Splitting the vote logic out lets ``predict_batch`` precompute all
+    test-vs-train sims with a single matmul (``emb @ train_vecs.T``)
+    and then do a cheap lookup per row -- instead of N separate
+    matmuls inside the cascade loop.
+    """
+    if len(sims) == 0:
         return None
-    # Cosine similarity (vectors are unit-normalized when produced by ST or HashEmbedder).
-    sims = train_vecs @ target_vec
     k_eff = min(k, len(sims))
+    # argpartition is O(N) vs argsort O(N log N); we only need the top-k
+    # so we use the cheaper version.
     top_idx = np.argpartition(-sims, k_eff - 1)[:k_eff]
     votes = train_labels[top_idx]
     values, counts = np.unique(votes, return_counts=True)
@@ -126,6 +132,24 @@ def _knn_vote(
     if counts[best] >= agreement_min:
         return int(values[best]), float(counts[best] / k_eff)
     return None
+
+
+def _knn_vote(
+    target_vec: np.ndarray,
+    train_vecs: np.ndarray,
+    train_labels: np.ndarray,
+    k: int,
+    agreement_min: int,
+) -> tuple[int, float] | None:
+    """Per-row kNN vote. Kept for back-compat with direct callers
+    (tests + any external user). The hot path in ``predict_batch``
+    bypasses this and uses :func:`_knn_vote_from_sims` with a
+    bulk-precomputed sim matrix."""
+    if train_vecs.shape[0] == 0:
+        return None
+    # Cosine similarity (vectors are unit-normalized when produced by ST or HashEmbedder).
+    sims = train_vecs @ target_vec
+    return _knn_vote_from_sims(sims, train_labels, k, agreement_min)
 
 
 class CategorizationCascade:
@@ -421,124 +445,208 @@ class CategorizationCascade:
                 vendor_industry = {}
                 vendor_summary = {}
 
-        out: list[Prediction] = []
-        # Lazy-build the X matrix only if we actually need the classifier.
-        X_cache = None
+        # ── Pre-loop vectorization ───────────────────────────────────
+        # Three perf bugs in the per-row loop are fixed here once:
+        #   (1) ``list(df.index).index(eid)`` was O(N²) over the run --
+        #       hoist a hash lookup outside the loop.
+        #   (2) ``self._sk.predict_proba`` was called once per row even
+        #       though sklearn does the whole matrix in one shot at
+        #       essentially the same cost.
+        #   (3) ``train_vecs @ target_vec`` ran N times in the kNN
+        #       stage. ``emb @ train_vecs.T`` does the whole pairwise
+        #       similarity matrix in one BLAS matmul.
+        # Plus zero-shot is now deferred and batched (see second pass
+        # below) instead of called once per row via the transformers
+        # pipeline.
+        pos_for_eid: dict[int, int] = {int(eid): i for i, eid in enumerate(df.index)}
 
+        proba_all: np.ndarray | None = None
+        if self.cfg.classifier.enabled and self._sk is not None:
+            X_cache = _build_x(df, emb)
+            # One predict_proba on the whole matrix; per-row code below
+            # just looks up ``proba_all[target_pos]``.
+            proba_all = self._sk.predict_proba(X_cache)
+
+        knn_sim_matrix: np.ndarray | None = None
+        if self.cfg.knn.enabled and train_vecs.shape[0] > 0 and emb.shape[0] > 0:
+            # Shape (N_test, N_train). For 340×1015×float32 = ~1.3 MB --
+            # comfortable even on giant-DB predict-all runs (100k rows
+            # × 1k train × 4 bytes ≈ 400 MB worst case; revisit chunking
+            # if that ever becomes the typical predict size).
+            knn_sim_matrix = emb @ train_vecs.T
+
+        # First pass: collect predictions through stages 1-4. Rows that
+        # would have called zero-shot get a placeholder slot and we
+        # record their premise for the batched second pass.
+        out: list[Prediction | None] = [None] * len(expense_ids)
+        zs_pending: list[tuple[int, int, str]] = []  # (out_idx, eid, premise)
+        done = 0  # rows fully predicted; progress only ticks on these
         total = len(expense_ids)
-        for done, eid in enumerate(expense_ids, start=1):
-            try:
-                if eid not in df.index:
-                    out.append(
-                        Prediction(eid, None, 0.0, "unknown", notes="not found / no features")
-                    )
+
+        def _tick() -> None:
+            if progress_callback is not None:
+                progress_callback(done, total)
+
+        for i, eid in enumerate(expense_ids):
+            if eid not in df.index:
+                out[i] = Prediction(eid, None, 0.0, "unknown", notes="not found / no features")
+                done += 1
+                _tick()
+                continue
+
+            target_pos = pos_for_eid[int(eid)]
+            row = df.iloc[target_pos]
+
+            # Stage 1: vendor exact match
+            if self.cfg.vendor_exact_match.enabled:
+                hit = _vendor_exact_match(
+                    self.conn,
+                    str(row.get("counterparty_normalized") or ""),
+                    self.cfg.vendor_exact_match.agreement_min,
+                    restrict_ids=self._train_ids,
+                )
+                if hit:
+                    cid, agreement = hit
+                    out[i] = Prediction(eid, cid, agreement, "vendor_exact_match")
+                    done += 1
+                    _tick()
                     continue
-                row = df.loc[eid]
 
-                # Stage 1: vendor exact match
-                if self.cfg.vendor_exact_match.enabled:
-                    hit = _vendor_exact_match(
-                        self.conn,
-                        str(row.get("counterparty_normalized") or ""),
-                        self.cfg.vendor_exact_match.agreement_min,
-                        restrict_ids=self._train_ids,
-                    )
-                    if hit:
-                        cid, agreement = hit
-                        out.append(Prediction(eid, cid, agreement, "vendor_exact_match"))
-                        continue
+            # Stage 2: k-NN -- use the precomputed sim row.
+            if knn_sim_matrix is not None:
+                hit = _knn_vote_from_sims(
+                    knn_sim_matrix[target_pos],
+                    train_y,
+                    k=self.cfg.knn.k,
+                    agreement_min=self.cfg.knn.agreement_min,
+                )
+                if hit:
+                    cid, conf = hit
+                    out[i] = Prediction(eid, cid, conf, "knn")
+                    done += 1
+                    _tick()
+                    continue
 
-                # Stage 2: k-NN over labeled embeddings
-                if self.cfg.knn.enabled and train_vecs.shape[0] > 0:
-                    target_pos = list(df.index).index(eid)
-                    target_vec = emb[target_pos]
-                    hit = _knn_vote(
-                        target_vec,
-                        train_vecs,
-                        train_y,
-                        k=self.cfg.knn.k,
-                        agreement_min=self.cfg.knn.agreement_min,
-                    )
-                    if hit:
-                        cid, conf = hit
-                        out.append(Prediction(eid, cid, conf, "knn"))
-                        continue
-
-                # Stage 3: supervised classifier
-                if self.cfg.classifier.enabled and self._sk is not None:
-                    if X_cache is None:
-                        X_cache = _build_x(df, emb)
-                    target_pos = list(df.index).index(eid)
-                    proba = self._sk.predict_proba(X_cache[target_pos : target_pos + 1])[0]
-                    top = int(np.argmax(proba))
-                    top_conf = float(proba[top])
+            # Stage 3: classifier -- look up the precomputed row.
+            if proba_all is not None:
+                proba = proba_all[target_pos]
+                top = int(np.argmax(proba))
+                top_conf = float(proba[top])
+                if top_conf >= self.cfg.classifier.confidence_threshold:
                     runner = int(np.argsort(proba)[-2]) if len(proba) > 1 else top
-                    if top_conf >= self.cfg.classifier.confidence_threshold:
-                        out.append(
-                            Prediction(
-                                eid,
-                                int(self._classes_[top]),
-                                top_conf,
-                                "classifier",
-                                runner_up=int(self._classes_[runner]),
-                                runner_up_confidence=float(proba[runner]),
-                            )
-                        )
-                        continue
-                    low_conf = top_conf < self.cfg.zeroshot.use_when_confidence_below
-                else:
-                    low_conf = True
-
-                # Stage 4: category similarity (zero-shot via embeddings + lexical overlap)
-                if self.cfg.category_similarity.enabled and low_conf:
-                    target_pos = list(df.index).index(eid)
-                    expense_text = str(row.get("combined_text") or "")
-                    industry = vendor_industry.get(eid, "")
-                    if industry:
-                        # Append the vendor-cache industry tag so it counts as
-                        # an additional token in the lexical-overlap bonus
-                        # (e.g. "supermarket" matches a Lebensmittel category
-                        # description that lists "supermarket").
-                        expense_text = f"{expense_text} {industry}".strip()
-                    cid, conf = self._category_similarity(
-                        emb[target_pos], expense_text=expense_text
+                    out[i] = Prediction(
+                        eid,
+                        int(self._classes_[top]),
+                        top_conf,
+                        "classifier",
+                        runner_up=int(self._classes_[runner]),
+                        runner_up_confidence=float(proba[runner]),
                     )
+                    done += 1
+                    _tick()
+                    continue
+                low_conf = top_conf < self.cfg.zeroshot.use_when_confidence_below
+            else:
+                low_conf = True
+
+            # Stage 4: category similarity (still per-row -- lexical
+            # overlap bonus uses the expense text, so vectorising the
+            # cosine part alone wouldn't change much).
+            if self.cfg.category_similarity.enabled and low_conf:
+                expense_text = str(row.get("combined_text") or "")
+                industry = vendor_industry.get(eid, "")
+                if industry:
+                    expense_text = f"{expense_text} {industry}".strip()
+                cid, conf = self._category_similarity(
+                    emb[target_pos], expense_text=expense_text
+                )
+                if cid is not None:
+                    out[i] = Prediction(eid, cid, conf, "category_similarity")
+                    done += 1
+                    _tick()
+                    continue
+
+            # Stage 5: zero-shot -- DEFER. Real call happens in the
+            # batched second pass below so the transformers pipeline
+            # gets <batch_size> rows per forward pass instead of 1.
+            if self.cfg.zeroshot.enabled and low_conf:
+                premise = _build_zeroshot_premise(
+                    text=str(row.get("combined_text") or ""),
+                    industry=vendor_industry.get(eid, "") if want_summary else "",
+                    summary=vendor_summary.get(eid, "") if want_summary else "",
+                    summary_max_chars=self.cfg.zeroshot.vendor_summary_max_chars,
+                )
+                zs_pending.append((i, eid, premise))
+                continue  # progress will tick when this row finishes below
+
+            # Nothing fired and zero-shot is off: abstain.
+            out[i] = Prediction(eid, None, 0.0, "unknown")
+            done += 1
+            _tick()
+
+        # ── Second pass: batched zero-shot ────────────────────────────
+        if zs_pending:
+            texts = [p for _, _, p in zs_pending]
+            batch_size = max(1, int(self.cfg.zeroshot.batch_size))
+            for start in range(0, len(texts), batch_size):
+                chunk_texts = texts[start : start + batch_size]
+                chunk_meta = zs_pending[start : start + batch_size]
+                preds = self._zeroshot_predict_batch(chunk_texts)
+                for (out_idx, eid, _premise), (cid, conf) in zip(
+                    chunk_meta, preds, strict=True
+                ):
                     if cid is not None:
-                        out.append(Prediction(eid, cid, conf, "category_similarity"))
-                        continue
+                        out[out_idx] = Prediction(eid, cid, conf, "zeroshot")
+                    else:
+                        out[out_idx] = Prediction(eid, None, 0.0, "unknown")
+                    done += 1
+                    _tick()
 
-                # Stage 5: zero-shot NLI (slowest fallback)
-                if self.cfg.zeroshot.enabled and low_conf:
-                    premise = _build_zeroshot_premise(
-                        text=str(row.get("combined_text") or ""),
-                        industry=vendor_industry.get(eid, "") if want_summary else "",
-                        summary=vendor_summary.get(eid, "") if want_summary else "",
-                        summary_max_chars=self.cfg.zeroshot.vendor_summary_max_chars,
-                    )
-                    cid, conf = self._zeroshot_predict(premise)
-                    if cid is not None:
-                        out.append(Prediction(eid, cid, conf, "zeroshot"))
-                        continue
-
-                # Nothing fired: surface as unknown so the UI flags it.
-                out.append(Prediction(eid, None, 0.0, "unknown"))
-            finally:
-                # Always fire the callback, even when a stage continue'd above.
-                if progress_callback is not None:
-                    progress_callback(done, total)
-
-        return out
+        # Sanity: every slot must be filled -- a None here means a
+        # stage path silently returned without ``out[i] = ...``.
+        return [p if p is not None else Prediction(int(expense_ids[i]), None, 0.0, "unknown")
+                for i, p in enumerate(out)]
 
     # ---- zeroshot -------------------------------------------------------
 
     def _zeroshot_predict(self, text: str) -> tuple[int | None, float]:
-        if not text.strip():
-            return None, 0.0
+        """Single-row zero-shot. Kept as a thin convenience wrapper so
+        any direct caller still works -- the cascade itself routes
+        everything through :meth:`_zeroshot_predict_batch` so the
+        transformers pipeline gets to amortise GPU launch overhead."""
+        results = self._zeroshot_predict_batch([text])
+        return results[0] if results else (None, 0.0)
+
+    def _zeroshot_predict_batch(
+        self, texts: list[str]
+    ) -> list[tuple[int | None, float]]:
+        """Run zero-shot NLI on a batch of premises.
+
+        Returns one ``(category_id, confidence)`` tuple per input,
+        same order. Empty/whitespace-only premises and any pipeline
+        failure surface as ``(None, 0.0)`` -- the cascade then
+        treats the row as an abstention.
+
+        Why batching matters: the transformers zero-shot pipeline
+        does roughly ``len(texts) * len(candidate_labels)`` NLI
+        forward passes. With ~18 categories, ~200 fallback rows per
+        Quality-tab fold, and a GPU, a per-row call wastes the
+        majority of each forward pass to kernel-launch overhead.
+        Passing the whole list lets the pipeline build proper
+        mini-batches internally (size controlled by
+        ``cfg.zeroshot.batch_size``).
+        """
+        if not texts:
+            return []
         from expense_analyzer.storage.categories import list_categories
 
         cats = list_categories(self.conn)
         if not cats:
-            return None, 0.0
+            return [(None, 0.0)] * len(texts)
+
+        # Lazy-init the transformers pipeline. If it can't be built
+        # (offline + no HF cache) we cache a no-op marker so the
+        # second call doesn't keep retrying.
         if self._zs is None:
             try:
                 from transformers import pipeline
@@ -548,35 +656,45 @@ class CategorizationCascade:
                     model=self.cfg.zeroshot_model,
                 )
             except Exception:
-                # Network or HF cache unreachable; skip silently.
                 self._zs = lambda *_a, **_kw: None  # type: ignore
-                return None, 0.0
-        # Candidate labels are "name: description" so the NLI model sees
-        # the user-curated definition for each category, not just the
-        # short name.
+                return [(None, 0.0)] * len(texts)
+
         label_map = {f"{c.name}: {c.description}": c.id for c in cats if c.name}
         labels = list(label_map.keys())
-        # Hypothesis template controls the second half of each NLI pair.
-        # Defaults to a German template; explicitly user-configurable so
-        # English-data installs can swap back. Guard against a missing
-        # ``{}`` placeholder -- transformers will raise otherwise.
         template = self.cfg.zeroshot.hypothesis_template or "In diesem Text geht es um {}."
         if "{}" not in template:
             template = "In diesem Text geht es um {}."
+
+        # The pipeline raises on empty strings; substitute a single
+        # space so the call doesn't blow up the whole batch, then map
+        # those rows to (None, 0.0) on the way out.
+        empty_mask = [not (t and t.strip()) for t in texts]
+        safe_texts = [t if (t and t.strip()) else " " for t in texts]
+
+        batch_size = max(1, int(self.cfg.zeroshot.batch_size))
         try:
-            res = self._zs(
-                text,
+            raw = self._zs(
+                safe_texts,
                 candidate_labels=labels,
                 multi_label=False,
                 hypothesis_template=template,
+                batch_size=batch_size,
             )
         except Exception:
-            return None, 0.0
-        if not res:
-            return None, 0.0
-        top_label = res["labels"][0]
-        top_score = float(res["scores"][0])
-        return label_map[top_label], top_score
+            return [(None, 0.0)] * len(texts)
+        # Transformers returns a single dict if called with a single
+        # string and a list of dicts otherwise; normalise.
+        if isinstance(raw, dict):
+            raw = [raw]
+        results: list[tuple[int | None, float]] = []
+        for is_empty, res in zip(empty_mask, raw, strict=True):
+            if is_empty or not res:
+                results.append((None, 0.0))
+                continue
+            top_label = res["labels"][0]
+            top_score = float(res["scores"][0])
+            results.append((label_map.get(top_label), top_score))
+        return results
 
 
 def _build_zeroshot_premise(

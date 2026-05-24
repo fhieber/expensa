@@ -472,6 +472,7 @@ def _render_zeroshot_form(cfg) -> None:
                     "hypothesis_template": z.hypothesis_template,
                     "use_vendor_context": z.use_vendor_context,
                     "vendor_summary_max_chars": z.vendor_summary_max_chars,
+                    "batch_size": z.batch_size,
                 },
                 ZeroshotConfig,
             )
@@ -524,6 +525,19 @@ def _render_zeroshot_prompting_form(cfg) -> None:
                 "to the premise. Only used when the toggle above is on."
             ),
         )
+        batch_size = st.number_input(
+            "NLI pipeline batch size",
+            min_value=1, max_value=512, step=1,
+            value=int(z.batch_size),
+            help=(
+                "How many (text × candidate-label) pairs the zero-shot "
+                "pipeline processes per GPU forward pass. **16** is a "
+                "safe CPU default; bump to **32–64** on a GPU to amortise "
+                "kernel-launch overhead — typically a 5–20× speedup on "
+                "Quality-tab runs that exercise zero-shot. Higher values "
+                "use more VRAM."
+            ),
+        )
         if st.form_submit_button("Save prompting", type="primary"):
             # Preserve the pipeline knobs from the other form.
             _persist(
@@ -534,6 +548,7 @@ def _render_zeroshot_prompting_form(cfg) -> None:
                     "hypothesis_template": template,
                     "use_vendor_context": bool(use_vendor_context),
                     "vendor_summary_max_chars": int(summary_max_chars),
+                    "batch_size": int(batch_size),
                 },
                 ZeroshotConfig,
             )

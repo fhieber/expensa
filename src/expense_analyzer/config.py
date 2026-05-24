@@ -49,6 +49,13 @@ class ZeroshotConfig(BaseModel):
     # appended to the premise. Keeps the NLI input within model
     # context and limits exposure to long marketing snippets.
     vendor_summary_max_chars: int = 240
+    # Batch size passed to the transformers zero-shot pipeline. The
+    # pipeline groups <batch_size> (text × candidate-label) pairs per
+    # GPU forward pass. 16 is a safe CPU default; bump to 32/64 on a
+    # GPU to amortise kernel-launch overhead. Only kicks in when the
+    # cascade has >1 row reaching the zero-shot stage (we batch
+    # them rather than calling the pipeline once per row).
+    batch_size: int = 16
 
 
 class CategorySimilarityConfig(BaseModel):

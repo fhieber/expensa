@@ -52,6 +52,11 @@ class ReportContext:
     zeroshot_model: str = ""
     # Compute device the eval actually ran on. Same rationale.
     device: str = ""
+    # Wall-clock seconds the cross-validation + ablation took. Surfaced
+    # in the header line ("Generated: … · Runtime: 2m 22s") and in the
+    # settings appendix so the PDF reader can compare runs on identical
+    # config vs. different config. ``None`` skips the line.
+    duration_seconds: float | None = None
 
 
 def _require_deps() -> None:
@@ -78,6 +83,31 @@ def _fig_to_png(fig, width: int = 900, height: int = 480) -> bytes:
     # scale=2 makes the embedded PNG sharp on print without bloating
     # the PDF too much (plotly's default 1x looks fuzzy on paper).
     return fig.to_image(format="png", width=width, height=height, scale=2)
+
+
+def format_duration(seconds: float | None) -> str:
+    """Human-readable wall-clock duration.
+
+    Picks the smallest unit that keeps the number short and scannable:
+      * < 60s  -> "12.4s"
+      * < 1h   -> "2m 22s"
+      * else   -> "1h 05m"
+
+    Lives here (not in the UI) so the PDF can render runtime without
+    importing Streamlit. The eval tab re-exports / mirrors this for
+    its caption.
+    """
+    if seconds is None:
+        return "—"
+    s = max(0.0, float(seconds))
+    if s < 60.0:
+        return f"{s:.1f}s"
+    if s < 3600.0:
+        m, sec = divmod(int(round(s)), 60)
+        return f"{m}m {sec:02d}s"
+    h, rem = divmod(int(round(s)), 3600)
+    m = rem // 60
+    return f"{h}h {m:02d}m"
 
 
 def build_pdf(
@@ -124,11 +154,13 @@ def build_pdf(
 
     # ─── Header ───────────────────────────────────────────────────────
     story.append(Paragraph("Cascade quality report", h1))
-    story.append(Paragraph(
-        f"Account: <b>{ctx.account_name}</b> &nbsp;·&nbsp; "
+    header_bits = [
+        f"Account: <b>{ctx.account_name}</b>",
         f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
-        body,
-    ))
+    ]
+    if ctx.duration_seconds is not None:
+        header_bits.append(f"Runtime: <b>{format_duration(ctx.duration_seconds)}</b>")
+    story.append(Paragraph(" &nbsp;·&nbsp; ".join(header_bits), body))
     story.append(Paragraph(
         f"Embedding model: <font face='Courier'>{ctx.embedding_model}</font>",
         small,
@@ -371,6 +403,8 @@ def _append_settings_appendix(
         rows.append(["seed", str(ctx.seed)])
         rows.append(["n_folds", str(ctx.n_folds)])
         rows.append(["zeroshot stage included", "yes" if include_zeroshot else "no"])
+        if ctx.duration_seconds is not None:
+            rows.append(["runtime", format_duration(ctx.duration_seconds)])
         _append_kv_table(story, rows, colors, cm)
         story.append(Spacer(1, 0.4 * cm))
 
@@ -425,4 +459,9 @@ def default_filename(account_name: str) -> str:
     return f"cascade-quality_{safe or 'account'}_{ts}.pdf"
 
 
-__all__: Iterable[str] = ("ReportContext", "build_pdf", "default_filename")
+__all__: Iterable[str] = (
+    "ReportContext",
+    "build_pdf",
+    "default_filename",
+    "format_duration",
+)

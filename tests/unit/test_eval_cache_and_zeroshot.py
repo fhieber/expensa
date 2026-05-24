@@ -65,7 +65,10 @@ def _fake_ablation() -> AblationResult:
 def test_save_then_load_roundtrip(tmp_path: Path) -> None:
     result = _fake_result()
     abl = _fake_ablation()
-    meta = {"seed": 7, "include_zeroshot": False}
+    # ``runtime_seconds`` is a recent addition; pin that arbitrary
+    # numeric meta keys survive the pickle round-trip so the eval tab
+    # can keep reading it back after a UI restart.
+    meta = {"seed": 7, "include_zeroshot": False, "runtime_seconds": 142.7}
 
     saved_path = eval_cache.save(tmp_path, result, abl, meta)
     assert saved_path.is_file()
@@ -80,6 +83,7 @@ def test_save_then_load_roundtrip(tmp_path: Path) -> None:
     assert loaded.ablation is not None
     assert loaded.ablation.full_accuracy == abl.full_accuracy
     assert loaded.meta == meta
+    assert loaded.meta["runtime_seconds"] == 142.7
     assert isinstance(loaded.saved_at, datetime)
 
 
