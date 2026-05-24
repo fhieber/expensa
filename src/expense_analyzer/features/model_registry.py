@@ -78,6 +78,43 @@ ZEROSHOT_MODELS: list[ModelInfo] = [
         approx_size_mb=580,
         notes="Same family, trained on a larger multilingual NLI mix.",
     ),
+    # --- v2 family: Moritz Laurer's 2024 retraining with cleaner data ---
+    ModelInfo(
+        model_id="MoritzLaurer/bge-m3-zeroshot-v2.0",
+        role="zeroshot",
+        dim=None,
+        languages="multi",
+        approx_size_mb=2270,
+        notes=(
+            "BGE-M3 fine-tuned for zero-shot. Often the strongest "
+            "multilingual zero-shot model on the HF leaderboard; "
+            "single-pass scoring (faster than NLI for many labels). "
+            "Heavier disk footprint."
+        ),
+    ),
+    ModelInfo(
+        model_id="MoritzLaurer/deberta-v3-large-zeroshot-v2.0",
+        role="zeroshot",
+        dim=None,
+        languages="en",
+        approx_size_mb=850,
+        notes=(
+            "Best-in-class for English zero-shot. German support is "
+            "weaker than the multilingual options here — pick only "
+            "if your data is mostly English."
+        ),
+    ),
+    ModelInfo(
+        model_id="MoritzLaurer/ernie-m-large-mnli-xnli",
+        role="zeroshot",
+        dim=None,
+        languages="multi",
+        approx_size_mb=2160,
+        notes=(
+            "Baidu's ERNIE-M (large) on XNLI — strong on low-resource "
+            "language transfer, including German bank text."
+        ),
+    ),
 ]
 
 

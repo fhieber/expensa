@@ -75,7 +75,7 @@ def test_vendor_lookup_only_sends_counterparty(tmp_db: sqlite3.Connection) -> No
     # The single outbound call must equal the counterparty - nothing else.
     assert captured == ["rewe markt"]
     assert info.counterparty_normalized == "rewe markt"
-    assert info.industry == "supermarket"
+    assert info.industry == "Supermarkt"
 
 
 def test_vendor_lookup_uses_cache_on_second_call(tmp_db: sqlite3.Connection) -> None:
@@ -94,14 +94,69 @@ def test_vendor_lookup_uses_cache_on_second_call(tmp_db: sqlite3.Connection) -> 
 
 
 def test_heuristic_industry_classifies_known_categories() -> None:
-    assert _heuristic_industry("rewe markt", "supermarkt edeka") == "supermarket"
-    assert _heuristic_industry("netflix international", "streaming") == "streaming"
-    assert _heuristic_industry("telekom deutschland", "mobilfunk") == "telco"
-    assert _heuristic_industry("vermieter schmidt", "miete januar") == "rent"
+    """Industry labels are German (multilingual NLI + DE embedding both
+    benefit from the same-language signal)."""
+    assert _heuristic_industry("rewe markt", "supermarkt edeka") == "Supermarkt"
+    assert _heuristic_industry("netflix international", "streaming") == "Streaming"
+    assert _heuristic_industry("telekom deutschland", "mobilfunk") == "Telekommunikation"
+    assert _heuristic_industry("vermieter schmidt", "miete januar") == "Miete"
+    # Fallback is the German "Sonstige" sentinel, not the English "other".
+    assert _heuristic_industry("xyzzy", "nothing here") == "Sonstige"
 
 
 def test_vendor_lookup_empty_counterparty(tmp_db: sqlite3.Connection) -> None:
     cfg = VendorLookupConfig(enabled=True)
     info = lookup_vendor(tmp_db, "", cfg)
     assert info.summary == ""
-    assert info.industry == "other"
+    assert info.industry == "Sonstige"
+
+
+def test_normalize_industry_translates_legacy_english() -> None:
+    """Legacy cached "supermarket"/"telco"/etc. rows from before the
+    German-label switch must surface as German on read so the UI and
+    cascade never see two dialects."""
+    from expense_analyzer.enrichment.vendor_web import normalize_industry
+
+    assert normalize_industry("supermarket") == "Supermarkt"
+    assert normalize_industry("telco") == "Telekommunikation"
+    assert normalize_industry("rent") == "Miete"
+    assert normalize_industry("other") == "Sonstige"
+    # Already-German values pass through unchanged.
+    assert normalize_industry("Supermarkt") == "Supermarkt"
+    # Empty / None passes through to empty (caller decides what to do).
+    assert normalize_industry("") == ""
+    assert normalize_industry(None) == ""
+    # Case-insensitive: "TELCO" still hits the legacy map.
+    assert normalize_industry("TELCO") == "Telekommunikation"
+
+
+def test_is_meaningful_industry_filters_no_signal_values() -> None:
+    """Cascade stages call this to skip enrichment that would only
+    add a dead token like "Sonstige" to the premise / lexical overlap."""
+    from expense_analyzer.enrichment.vendor_web import is_meaningful_industry
+
+    assert is_meaningful_industry("Supermarkt") is True
+    assert is_meaningful_industry("Miete") is True
+    # Both spellings of the "no real signal" sentinel are filtered.
+    assert is_meaningful_industry("Sonstige") is False
+    assert is_meaningful_industry("sonstige") is False
+    assert is_meaningful_industry("other") is False
+    assert is_meaningful_industry("") is False
+    assert is_meaningful_industry(None) is False
+
+
+def test_cached_read_migrates_legacy_english_label(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    """A cache row written before the German-label change should
+    surface as German on read, even without re-running the lookup."""
+    # Insert a legacy-style row directly.
+    tmp_db.execute(
+        "INSERT INTO vendor_cache(counterparty_normalized, summary, industry) "
+        "VALUES (?, ?, ?)",
+        ("legacy vendor", "old snippet", "supermarket"),
+    )
+    cfg = VendorLookupConfig(enabled=True, cache_ttl_days=10)
+    info = lookup_vendor(tmp_db, "legacy vendor", cfg)
+    assert info.industry == "Supermarkt"
+    assert info.summary == "old snippet"

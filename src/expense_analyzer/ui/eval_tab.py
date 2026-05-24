@@ -17,10 +17,22 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from expense_analyzer.ml.evaluation import ablation, cross_validate
+from expense_analyzer.ml import eval_cache
+from expense_analyzer.ml.eval_report import ReportContext, build_pdf, default_filename
+from expense_analyzer.ml.evaluation import (
+    ablation,
+    cross_validate,
+    fold_sizes,
+    planned_ablation_runs,
+)
 from expense_analyzer.storage.categories import list_categories
 from expense_analyzer.ui._components import chart_expander
-from expense_analyzer.ui._shared import get_config, get_conn, get_embedder
+from expense_analyzer.ui._shared import (
+    get_active_account,
+    get_config,
+    get_conn,
+    get_embedder,
+)
 from expense_analyzer.viz import (
     ablation_cumulative_curve,
     ablation_leave_one_out_bar,
@@ -30,6 +42,8 @@ from expense_analyzer.viz import (
 
 _RESULT_KEY = "eval_result"
 _ABLATION_KEY = "eval_ablation"
+_RUN_META_KEY = "eval_run_meta"  # snapshot of (seed, include_zeroshot) used for the run
+_SAVED_AT_KEY = "eval_saved_at"  # ISO timestamp of the run that produced the cached result
 
 
 def render() -> None:
@@ -75,7 +89,9 @@ def render() -> None:
     min_eligible_class = min(int(r["n"]) for r in labeled if int(r["n"]) >= 2)
     fold_cap = max(2, min(10, min_eligible_class))
 
-    c1, c2, c3 = st.columns([2, 1, 2])
+    # vertical_alignment="bottom" so the checkbox baseline lines up with
+    # the slider track and number_input field on the same row.
+    c1, c2, c3 = st.columns([2, 1, 2], vertical_alignment="bottom")
     with c1:
         n_folds = st.slider(
             "Cross-validation folds", min_value=2, max_value=fold_cap,
@@ -93,11 +109,27 @@ def render() -> None:
     if st.button("Run evaluation", type="primary", key="eval_run"):
         _run(conn, cfg, int(n_folds), int(seed), include_zeroshot)
 
+    # Hydrate session state from the on-disk cache on first render of
+    # this session (or after an account switch, which clears the
+    # session_state but leaves the per-account cache file alone).
+    if st.session_state.get(_RESULT_KEY) is None:
+        cached = eval_cache.load(get_active_account().data_dir)
+        if cached is not None:
+            st.session_state[_RESULT_KEY] = cached.result
+            st.session_state[_ABLATION_KEY] = cached.ablation
+            st.session_state[_RUN_META_KEY] = cached.meta
+            st.session_state[_SAVED_AT_KEY] = cached.saved_at.isoformat(timespec="minutes")
+
     result = st.session_state.get(_RESULT_KEY)
     abl = st.session_state.get(_ABLATION_KEY)
     if result is None:
         return
 
+    saved_at = st.session_state.get(_SAVED_AT_KEY)
+    if saved_at:
+        # Format ISO timestamp -> "2026-05-24 14:32" without parsing.
+        pretty = saved_at.replace("T", " ")
+        st.caption(f"📌 Showing results from **{pretty}**. Re-run above to refresh.")
     _render_results(result, abl, id_to_name)
 
 
@@ -110,11 +142,31 @@ def _run(conn, cfg, n_folds: int, seed: int, include_zeroshot: bool) -> None:
         status.write(f"loading embedding model `{cfg.embedding_model}`…")
         embedder = get_embedder()
 
+        # Pre-compute the fold partition so the user sees label counts
+        # before any model fires. Cheap (no model calls).
+        n_kept, n_dropped, fsizes = fold_sizes(conn, n_folds, seed)
+        if fsizes:
+            train_min, train_max = min(t for t, _ in fsizes), max(t for t, _ in fsizes)
+            test_min, test_max = min(t for _, t in fsizes), max(t for _, t in fsizes)
+            train_txt = f"{train_min}" if train_min == train_max else f"{train_min}–{train_max}"
+            test_txt = f"{test_min}" if test_min == test_max else f"{test_min}–{test_max}"
+            status.write(
+                f"data: **{n_kept}** labels usable for CV "
+                f"({n_dropped} singletons excluded) — per fold "
+                f"~{train_txt} train / ~{test_txt} test rows."
+            )
+        else:
+            status.write(f"data: {n_kept} labels, but no class has ≥2 examples.")
+
         status.write(f"cross-validating ({n_folds} folds)…")
-        cv_progress = st.progress(0, text="fold 0")
+        cv_progress = st.progress(0, text="starting…")
 
         def _cv_cb(done: int, total: int) -> None:
-            cv_progress.progress(done / total, text=f"fold {done} / {total}")
+            train_n, test_n = fsizes[done - 1] if done - 1 < len(fsizes) else (0, 0)
+            cv_progress.progress(
+                done / total,
+                text=f"fold {done}/{total} — train={train_n}, test={test_n}",
+            )
 
         result = cross_validate(
             conn, eval_cfg, embedder, n_folds=n_folds, seed=seed,
@@ -129,11 +181,21 @@ def _run(conn, cfg, n_folds: int, seed: int, include_zeroshot: bool) -> None:
             st.rerun()
             return
 
-        status.write("running stage ablation…")
-        abl_progress = st.progress(0, text="ablation 0")
+        # Plan the ablation runs so the progress text can name each one.
+        # Each run does n_folds CV fits internally.
+        planned = planned_ablation_runs(eval_cfg)
+        status.write(
+            f"running stage ablation — **{len(planned)}** runs × "
+            f"{result.n_folds} folds = {len(planned) * result.n_folds} cascade fits."
+        )
+        abl_progress = st.progress(0, text="starting…")
 
         def _abl_cb(done: int, total: int) -> None:
-            abl_progress.progress(done / total, text=f"ablation run {done} / {total}")
+            label = planned[done - 1][0] if done - 1 < len(planned) else ""
+            abl_progress.progress(
+                done / total,
+                text=f"ablation {done}/{total} — {label}",
+            )
 
         abl = ablation(
             conn, eval_cfg, embedder, n_folds=n_folds, seed=seed,
@@ -150,8 +212,20 @@ def _run(conn, cfg, n_folds: int, seed: int, include_zeroshot: bool) -> None:
             state="complete",
         )
 
+    from datetime import datetime
+
+    meta = {"seed": seed, "include_zeroshot": include_zeroshot}
     st.session_state[_RESULT_KEY] = result
     st.session_state[_ABLATION_KEY] = abl
+    st.session_state[_RUN_META_KEY] = meta
+    st.session_state[_SAVED_AT_KEY] = datetime.now().isoformat(timespec="minutes")
+    # Persist to <data_dir>/cache/eval_latest.pkl so the result survives
+    # UI restarts. Failures are non-fatal -- the user keeps the in-
+    # memory result either way.
+    try:
+        eval_cache.save(get_active_account().data_dir, result, abl, meta)
+    except Exception as e:  # noqa: BLE001
+        st.warning(f"could not persist eval cache: {e}")
     st.rerun()
 
 
@@ -225,6 +299,88 @@ def _render_results(result, abl, id_to_name: dict[int, str]) -> None:
         )
 
     _render_misclassifications(result, id_to_name)
+
+    _render_pdf_export(result, abl, id_to_name)
+
+
+def _render_pdf_export(result, abl, id_to_name: dict[int, str]) -> None:
+    """Bottom-of-tab "Export as PDF" affordance.
+
+    Builds the report lazily on click so the kaleido / reportlab
+    imports (and the per-figure PNG rendering) only fire when the
+    user actually wants the file. Missing-deps surface as an inline
+    error rather than crashing the tab.
+    """
+    st.divider()
+    # Small breathing room so the button isn't hugging the divider line
+    # above -- with the column row going edge-to-edge, the primary
+    # button's top border was reading as part of the divider.
+    st.write("")
+    cfg = get_config()
+    account = get_active_account()
+    meta = st.session_state.get(_RUN_META_KEY) or {}
+    col_btn, col_hint = st.columns([1, 3], vertical_alignment="center")
+    with col_btn:
+        build_clicked = st.button(
+            "📄 Build PDF report",
+            key="eval_build_pdf",
+            help="Generate a single-file PDF with the headline metrics, "
+                 "per-stage chart, confusion matrix, per-category table, "
+                 "ablation charts and the top misclassifications.",
+        )
+    with col_hint:
+        st.caption(
+            "All charts are rendered as embedded PNGs (via kaleido). "
+            "PDF generation needs the `report-export` extras "
+            "(`pip install reportlab kaleido`)."
+        )
+
+    if not build_clicked:
+        return
+
+    # Build the cascade-settings snapshot from the *effective* config
+    # at run time (mirrors _run()'s eval_cfg). If include_zeroshot was
+    # off we set zeroshot.enabled=False here too so the appendix shows
+    # the same effective config the cascade actually saw.
+    include_zs = bool(meta.get("include_zeroshot", cfg.zeroshot.enabled))
+    eff_cfg = cfg.model_copy(deep=True)
+    if not include_zs:
+        eff_cfg.zeroshot.enabled = False
+    cascade_settings: dict[str, object] = {
+        "vendor_exact_match": eff_cfg.vendor_exact_match.model_dump(),
+        "knn": eff_cfg.knn.model_dump(),
+        "classifier": eff_cfg.classifier.model_dump(),
+        "category_similarity": eff_cfg.category_similarity.model_dump(),
+        "zeroshot": eff_cfg.zeroshot.model_dump(),
+    }
+    ctx = ReportContext(
+        account_name=account.name,
+        embedding_model=cfg.embedding_model,
+        n_folds=result.n_folds,
+        seed=int(meta.get("seed", 0)),
+        include_zeroshot=include_zs,
+        category_id_to_name=id_to_name,
+        cascade_settings=cascade_settings,
+        zeroshot_model=cfg.zeroshot_model,
+        device=cfg.device,
+    )
+    try:
+        with st.spinner("Rendering report (charts → PNG → PDF)…"):
+            pdf_bytes = build_pdf(result, abl, ctx)
+    except RuntimeError as e:
+        st.error(str(e))
+        return
+    except Exception as e:  # noqa: BLE001
+        st.error(f"PDF build failed: {e}")
+        return
+
+    st.download_button(
+        "⬇ Download PDF",
+        data=pdf_bytes,
+        file_name=default_filename(account.name),
+        mime="application/pdf",
+        key="eval_download_pdf",
+    )
 
 
 def _render_misclassifications(result, id_to_name: dict[int, str]) -> None:

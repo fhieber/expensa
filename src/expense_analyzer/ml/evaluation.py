@@ -120,6 +120,49 @@ def _stratified_folds(
     return folds, dropped
 
 
+def planned_ablation_runs(
+    cfg: Config, stages: Sequence[str] | None = None
+) -> list[tuple[str, list[str]]]:
+    """Predict the (label, subset) sequence ``ablation()`` will execute.
+
+    Useful for UI status text so the user can see *which* stage combo
+    each ablation run is exercising while it churns. Order matches the
+    run order inside ``ablation()``: all cumulatives, then full, then
+    leave-one-outs.
+    """
+    if stages is None:
+        stages = [s for s in STAGE_ORDER if _stage_enabled(cfg, s)]
+    stages = list(stages)
+    runs: list[tuple[str, list[str]]] = []
+    for i in range(len(stages)):
+        subset = stages[: i + 1]
+        label = "+".join(subset) if len(subset) > 1 else (subset[0] if subset else "")
+        runs.append((f"cumulative: {label}", subset))
+    runs.append((f"full baseline: {'+'.join(stages)}", stages))
+    for stage in stages:
+        subset = [s for s in stages if s != stage]
+        if not subset:
+            continue
+        runs.append((f"leave-one-out: drop {stage}", subset))
+    return runs
+
+
+def fold_sizes(
+    conn: sqlite3.Connection, n_folds: int, seed: int = 0
+) -> tuple[int, int, list[tuple[int, int]]]:
+    """Return (n_total_kept, n_dropped_singletons, [(train, test), ...]).
+
+    Pre-computes the fold partition without running any model, so the UI
+    can display "fold 1: train=1015 / test=338" up front.
+    """
+    labels = labeled_ids_with_categories(conn, source="user")
+    ids = [eid for eid, _ in labels]
+    y = np.array([cid for _, cid in labels], dtype=np.int64)
+    folds, dropped = _stratified_folds(ids, y, n_folds, seed)
+    sizes = [(int(len(tr)), int(len(te))) for tr, te in folds]
+    return len(ids) - dropped, dropped, sizes
+
+
 def cross_validate(
     conn: sqlite3.Connection,
     cfg: Config,

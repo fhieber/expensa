@@ -29,6 +29,14 @@ knn:
 zeroshot:
   enabled: true
   use_when_confidence_below: 0.5
+  # German template; multilingual NLI models do markedly better when
+  # premise + hypothesis share a language. Use `{}` as the label slot.
+  hypothesis_template: "In diesem Text geht es um {}."
+  # Off by default: appending DDG-cached vendor summary text to the
+  # NLI premise can help OR hurt depending on snippet quality. Turn on
+  # via Settings → Cascade tuning, then A/B via the Quality tab.
+  use_vendor_context: false
+  vendor_summary_max_chars: 240
 
 # --- Zero-shot via embedding similarity (categories embedded as name+description) ---
 category_similarity:

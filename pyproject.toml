@@ -60,6 +60,12 @@ vendor-lookup = [
 png-export = [
     "kaleido>=0.2.1",
 ]
+# PDF report export from the Quality tab's "Build PDF report" button.
+# Needs reportlab (layout) + kaleido (chart→PNG); both lazy-imported.
+report-export = [
+    "reportlab>=4.0",
+    "kaleido>=0.2.1",
+]
 
 [project.scripts]
 expense = "expense_analyzer.cli:main"

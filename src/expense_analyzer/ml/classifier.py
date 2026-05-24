@@ -366,18 +366,27 @@ class CategorizationCascade:
         else:
             train_vecs = np.zeros((0, 0), dtype=np.float32)
 
-        # Vendor-lookup industry tags (one SQL roundtrip for all expenses).
-        # Used to augment the lexical-overlap signal in the category_similarity
-        # stage: e.g. industry="supermarket" makes the Lebensmittel category
-        # win for a REWE row even when the cosine signal is borderline.
+        # Vendor-lookup data (one SQL roundtrip for all expenses, then
+        # split into per-expense dicts). Two consumers:
+        #   * category_similarity uses the *industry* tag as an extra
+        #     token in the lexical-overlap bonus.
+        #   * zeroshot (when use_vendor_context is on) uses both the
+        #     industry tag AND a truncated slice of the cached summary
+        #     to enrich the NLI premise.
+        # Fetched eagerly only if at least one consumer wants it.
         vendor_industry: dict[int, str] = {}
-        if self.cfg.category_similarity.use_vendor_industry:
+        vendor_summary: dict[int, str] = {}
+        want_industry = self.cfg.category_similarity.use_vendor_industry
+        want_summary = (
+            self.cfg.zeroshot.enabled and self.cfg.zeroshot.use_vendor_context
+        )
+        if want_industry or want_summary:
             try:
                 ids_list = list(expense_ids)
                 ph_v = ",".join("?" * len(ids_list))
                 rows = self.conn.execute(
                     f"""
-                    SELECT e.id, vc.industry
+                    SELECT e.id, vc.industry, vc.summary
                     FROM expenses e
                     LEFT JOIN vendor_cache vc
                       ON vc.counterparty_normalized = e.counterparty_normalized
@@ -385,15 +394,32 @@ class CategorizationCascade:
                     """,
                     ids_list,
                 ).fetchall()
-                vendor_industry = {
-                    int(r["id"]): (r["industry"] or "")
-                    for r in rows
-                    if r["industry"]
-                }
+                # Populate both dicts whenever the row carries data,
+                # regardless of which flag triggered the fetch. Cheaper
+                # than a second roundtrip if both consumers want it, and
+                # avoids a subtle bug where zeroshot's premise would
+                # lose the industry when only use_vendor_context (not
+                # use_vendor_industry) is enabled.
+                # Industry tags are migrated to German + filtered to
+                # exclude the "Sonstige" (no-signal) sentinel so they
+                # don't pollute the cascade with dead tokens.
+                from expense_analyzer.enrichment.vendor_web import (
+                    is_meaningful_industry,
+                    normalize_industry,
+                )
+                for r in rows:
+                    eid_int = int(r["id"])
+                    ind = normalize_industry(r["industry"])
+                    summ = (r["summary"] or "")
+                    if ind and is_meaningful_industry(ind):
+                        vendor_industry[eid_int] = ind
+                    if summ:
+                        vendor_summary[eid_int] = summ
             except Exception:
                 # vendor_cache table missing or other transient issue -- skip
                 # the boost rather than crash prediction.
                 vendor_industry = {}
+                vendor_summary = {}
 
         out: list[Prediction] = []
         # Lazy-build the X matrix only if we actually need the classifier.
@@ -483,7 +509,13 @@ class CategorizationCascade:
 
                 # Stage 5: zero-shot NLI (slowest fallback)
                 if self.cfg.zeroshot.enabled and low_conf:
-                    cid, conf = self._zeroshot_predict(str(row.get("combined_text") or ""))
+                    premise = _build_zeroshot_premise(
+                        text=str(row.get("combined_text") or ""),
+                        industry=vendor_industry.get(eid, "") if want_summary else "",
+                        summary=vendor_summary.get(eid, "") if want_summary else "",
+                        summary_max_chars=self.cfg.zeroshot.vendor_summary_max_chars,
+                    )
+                    cid, conf = self._zeroshot_predict(premise)
                     if cid is not None:
                         out.append(Prediction(eid, cid, conf, "zeroshot"))
                         continue
@@ -519,11 +551,25 @@ class CategorizationCascade:
                 # Network or HF cache unreachable; skip silently.
                 self._zs = lambda *_a, **_kw: None  # type: ignore
                 return None, 0.0
-        # Use category names plus their descriptions as labels.
+        # Candidate labels are "name: description" so the NLI model sees
+        # the user-curated definition for each category, not just the
+        # short name.
         label_map = {f"{c.name}: {c.description}": c.id for c in cats if c.name}
         labels = list(label_map.keys())
+        # Hypothesis template controls the second half of each NLI pair.
+        # Defaults to a German template; explicitly user-configurable so
+        # English-data installs can swap back. Guard against a missing
+        # ``{}`` placeholder -- transformers will raise otherwise.
+        template = self.cfg.zeroshot.hypothesis_template or "In diesem Text geht es um {}."
+        if "{}" not in template:
+            template = "In diesem Text geht es um {}."
         try:
-            res = self._zs(text, candidate_labels=labels, multi_label=False)
+            res = self._zs(
+                text,
+                candidate_labels=labels,
+                multi_label=False,
+                hypothesis_template=template,
+            )
         except Exception:
             return None, 0.0
         if not res:
@@ -531,3 +577,39 @@ class CategorizationCascade:
         top_label = res["labels"][0]
         top_score = float(res["scores"][0])
         return label_map[top_label], top_score
+
+
+def _build_zeroshot_premise(
+    text: str,
+    industry: str,
+    summary: str,
+    summary_max_chars: int,
+) -> str:
+    """Compose the NLI premise from the expense text + optional vendor context.
+
+    Format: ``"<expense_text>. Branche: <industry>. <truncated summary>"``
+    so the NLI model gets a natural-language run rather than concatenated
+    keywords. Each piece is appended only when non-empty so the empty-
+    summary / empty-industry / both-empty paths all degrade gracefully
+    to the original expense-only premise.
+    """
+    parts: list[str] = []
+    base = (text or "").strip()
+    if base:
+        parts.append(base if base.endswith(".") else base + ".")
+    ind = (industry or "").strip()
+    if ind:
+        parts.append(f"Branche: {ind}.")
+    summ = (summary or "").strip()
+    if summ:
+        # Hard cap: long DDG snippets shouldn't dominate the premise
+        # token budget. Cut on a word boundary when possible so we don't
+        # truncate mid-word and confuse the tokenizer.
+        if len(summ) > summary_max_chars:
+            cut = summ[:summary_max_chars]
+            sp = cut.rfind(" ")
+            if sp > summary_max_chars * 0.6:
+                cut = cut[:sp]
+            summ = cut.rstrip(" ,.;:") + "…"
+        parts.append(summ)
+    return " ".join(parts).strip()

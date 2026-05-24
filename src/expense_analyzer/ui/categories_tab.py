@@ -37,20 +37,36 @@ import sqlite3
 import streamlit as st
 
 from expense_analyzer.config import packaged_default_categories
+from expense_analyzer.ml import embedding_viz_cache
+from expense_analyzer.ml.embedding_viz import project_labeled_embeddings
 from expense_analyzer.storage.admin import category_removal_impact, remove_category
 from expense_analyzer.storage.categories import (
     import_categories_from_yaml,
+    list_categories,
     set_category_savings,
     upsert_category,
 )
 from expense_analyzer.storage.stats import category_stats, uncategorized_stat
-from expense_analyzer.ui._shared import get_active_account, get_conn
+from expense_analyzer.ui._components import chart_expander
+from expense_analyzer.ui._shared import (
+    get_active_account,
+    get_config,
+    get_conn,
+)
 from expense_analyzer.utils.colors import random_hex_color
+from expense_analyzer.viz import category_embedding_scatter
 
 # session_state key the handlers use to signal "I was suppressed because
 # the active account changed mid-edit". `render()` checks this on each
 # pass and shows a single toast.
 _SUPPRESSED_KEY = "_cat_edit_suppressed_msg"
+
+# session_state slots that hold the latest embedding scatter run.
+# Cleared on account switch by clear_tab_state() (prefix matches the
+# default `cat_` allow-list).
+_CAT_PROJ_KEY = "cat_embedding_projection"
+_CAT_PROJ_META_KEY = "cat_embedding_meta"
+_CAT_PROJ_SAVED_AT_KEY = "cat_embedding_saved_at"
 
 
 def _active_account_matches(bound_account_id: str) -> bool:
@@ -306,3 +322,144 @@ def render() -> None:
                     st.rerun()
                 except sqlite3.IntegrityError as e:
                     st.error(f"could not save: {e}")
+
+    # --- Embedding separation plot (bottom of tab) -----------------------
+    _render_embedding_separation(conn)
+
+
+def _render_embedding_separation(conn) -> None:
+    """2D scatter of labeled-expense embeddings, coloured by category.
+
+    Lets the user eyeball *before* a Quality-tab cross-validation
+    whether their categories form distinguishable clusters in the
+    embedding space. Overlapping clusters → the cascade will mix
+    those categories up; a sharp gap → they should classify cleanly.
+
+    Results are cached on disk (per account) so a re-render of the
+    tab doesn't re-run the projection; the user explicitly clicks
+    "Generate" to refresh. Same UX pattern as the Quality tab cache.
+    """
+    st.divider()
+    st.subheader("Embedding separation")
+    st.caption(
+        "Project every user-labeled expense's embedding to 2D and "
+        "colour by category. Cluster overlap here predicts which "
+        "categories the cascade will confuse — same diagnosis as the "
+        "Quality tab's confusion matrix, but visible **before** you "
+        "spend the CV budget. Click a legend entry to hide/show a "
+        "category."
+    )
+
+    cfg = get_config()
+    account = get_active_account()
+
+    # Hydrate from disk once per session (or after account switch).
+    if st.session_state.get(_CAT_PROJ_KEY) is None:
+        cached = embedding_viz_cache.load(account.data_dir)
+        if cached is not None:
+            st.session_state[_CAT_PROJ_KEY] = cached.projection
+            st.session_state[_CAT_PROJ_META_KEY] = cached.meta
+            st.session_state[_CAT_PROJ_SAVED_AT_KEY] = cached.saved_at.isoformat(
+                timespec="minutes"
+            )
+
+    c1, c2, c3 = st.columns([1, 1, 2], vertical_alignment="bottom")
+    with c1:
+        method = st.selectbox(
+            "Projection",
+            ["pca", "tsne"],
+            index=0,
+            key="cat_embedding_method",
+            help=(
+                "**PCA** is deterministic, fast, and preserves global "
+                "distance — best for an at-a-glance "
+                "*are-my-categories-separable?* read. **t-SNE** often "
+                "shows finer sub-clusters but distorts global distances, "
+                "and is much slower on big DBs."
+            ),
+        )
+    with c2:
+        seed = st.number_input(
+            "Seed", min_value=0, value=0, step=1, key="cat_embedding_seed",
+        )
+    with c3:
+        generate = st.button(
+            "🎨 Generate embedding visualization",
+            type="primary",
+            key="cat_embedding_run",
+        )
+
+    if generate:
+        with st.spinner("Loading embeddings and projecting…"):
+            try:
+                projection = project_labeled_embeddings(
+                    conn,
+                    model_name=cfg.embedding_model,
+                    method=method,
+                    seed=int(seed),
+                )
+            except Exception as e:  # noqa: BLE001
+                st.error(f"projection failed: {e}")
+                return
+        if projection is None:
+            st.info(
+                "Not enough labeled data with stored embeddings to "
+                "project. Label some expenses in the **Review** tab and "
+                "re-run; embeddings are computed on demand."
+            )
+            return
+        from datetime import datetime
+
+        meta = {"method": projection.method, "model_name": cfg.embedding_model, "seed": int(seed)}
+        st.session_state[_CAT_PROJ_KEY] = projection
+        st.session_state[_CAT_PROJ_META_KEY] = meta
+        st.session_state[_CAT_PROJ_SAVED_AT_KEY] = datetime.now().isoformat(timespec="minutes")
+        try:
+            embedding_viz_cache.save(account.data_dir, projection, meta)
+        except Exception as e:  # noqa: BLE001
+            st.warning(f"could not persist projection: {e}")
+        st.rerun()
+
+    projection = st.session_state.get(_CAT_PROJ_KEY)
+    if projection is None:
+        return
+
+    saved_at = st.session_state.get(_CAT_PROJ_SAVED_AT_KEY)
+    meta = st.session_state.get(_CAT_PROJ_META_KEY) or {}
+    if saved_at:
+        pretty = saved_at.replace("T", " ")
+        cap_bits = [f"📌 **{pretty}**"]
+        if meta.get("method"):
+            cap_bits.append(f"method: `{meta['method']}`")
+        if meta.get("model_name"):
+            cap_bits.append(f"model: `{meta['model_name']}`")
+        st.caption(" · ".join(cap_bits))
+
+    cats = list_categories(conn)
+    id_to_name = {c.id: c.name for c in cats}
+    color_map = {c.id: c.color for c in cats}
+
+    fig = category_embedding_scatter(
+        xy=projection.xy,
+        category_ids=projection.category_ids,
+        id_to_name=id_to_name,
+        color_map=color_map,
+        method=projection.method,
+    )
+    chart_expander(
+        "Category embeddings — 2D projection",
+        fig,
+        expanded=True,
+        key="cat_embedding_chart",
+    )
+    info_bits: list[str] = []
+    if projection.n_categories:
+        info_bits.append(f"{projection.n_categories} categor(y/ies)")
+    if projection.n_dropped_singletons:
+        info_bits.append(
+            f"{projection.n_dropped_singletons} singleton label(s) excluded"
+        )
+    if projection.notes:
+        info_bits.append(projection.notes)
+    if info_bits:
+        st.caption(" · ".join(info_bits))

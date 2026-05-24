@@ -393,6 +393,64 @@ def ablation_cumulative_curve(points) -> go.Figure:
     return fig
 
 
+def category_embedding_scatter(
+    xy,
+    category_ids,
+    id_to_name: dict[int, str],
+    color_map: dict[int, str] | None = None,
+    method: str = "pca",
+) -> go.Figure:
+    """Scatter of labeled-expense embeddings projected to 2D.
+
+    One trace per category (so Plotly's legend acts as a category
+    filter -- click to hide/show). Axes are unlabelled by design:
+    PCA/t-SNE coordinates are not interpretable in absolute terms;
+    only the *spatial separation* of category clusters carries meaning.
+    """
+    if xy is None or len(xy) == 0:
+        return go.Figure(layout={"title": "Category embedding scatter (no data)"})
+
+    color_map = color_map or {}
+    fig = go.Figure()
+    # Stable trace order by category name so the legend stays
+    # alphabetical across reruns.
+    cat_to_indices: dict[int, list[int]] = {}
+    for i, cid in enumerate(category_ids):
+        cat_to_indices.setdefault(int(cid), []).append(i)
+    for cid in sorted(cat_to_indices, key=lambda c: id_to_name.get(c, str(c))):
+        idx = cat_to_indices[cid]
+        pts = xy[idx]
+        fig.add_trace(go.Scatter(
+            x=pts[:, 0],
+            y=pts[:, 1],
+            mode="markers",
+            name=id_to_name.get(cid, str(cid)),
+            marker=dict(
+                size=7,
+                color=color_map.get(cid, None),
+                line=dict(width=0.5, color="rgba(0,0,0,0.3)"),
+                opacity=0.85,
+            ),
+            hovertemplate=(
+                f"<b>{id_to_name.get(cid, str(cid))}</b><br>"
+                "x: %{x:.2f}<br>y: %{y:.2f}<extra></extra>"
+            ),
+        ))
+    title = {
+        "pca": "Category separation in embedding space (PCA)",
+        "tsne": "Category separation in embedding space (t-SNE)",
+    }.get(method, "Category separation in embedding space")
+    fig.update_layout(
+        title=title,
+        xaxis=dict(title="", showticklabels=False, zeroline=False),
+        yaxis=dict(title="", showticklabels=False, zeroline=False),
+        legend=dict(itemsizing="constant"),
+        hovermode="closest",
+        height=520,
+    )
+    return fig
+
+
 def ablation_leave_one_out_bar(deltas) -> go.Figure:
     """Accuracy delta when each stage is removed from the full cascade.
     ``deltas`` is a list of ``(stage, accuracy, macro_f1, delta_vs_full)``;

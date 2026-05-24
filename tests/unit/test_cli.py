@@ -148,6 +148,105 @@ def test_eval_with_mocked_embedder(tmp_path: Path, fixtures_dir: Path) -> None:
     assert "per-stage contribution" in r.output
 
 
+def test_vendor_list_empty_cache_message(tmp_path: Path) -> None:
+    """`expense vendor list` on a fresh DB should say the cache is empty,
+    not crash, and not require vendor_lookup.enabled (read-only command)."""
+    runner = CliRunner()
+    runner.invoke(cli, ["init"], env=_runner_env(tmp_path))
+    r = runner.invoke(cli, ["vendor", "list"], env=_runner_env(tmp_path))
+    assert r.exit_code == 0, r.output
+    assert "empty" in r.output.lower()
+
+
+def test_vendor_list_shows_cached_rows_with_german_industry(
+    tmp_path: Path,
+) -> None:
+    """Seed a legacy English industry row directly; the list command
+    must show it migrated to German."""
+    import sqlite3
+
+    runner = CliRunner()
+    runner.invoke(cli, ["init"], env=_runner_env(tmp_path))
+    conn = sqlite3.connect(tmp_path / "db.sqlite")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "INSERT INTO vendor_cache(counterparty_normalized, summary, industry) "
+        "VALUES (?, ?, ?)",
+        ("rewe markt", "REWE ist eine deutsche Supermarktkette.", "supermarket"),
+    )
+    conn.commit()
+    conn.close()
+    r = runner.invoke(cli, ["vendor", "list"], env=_runner_env(tmp_path))
+    assert r.exit_code == 0, r.output
+    assert "rewe markt" in r.output
+    # The English legacy label is translated to German on display.
+    assert "Supermarkt" in r.output
+    assert "supermarket" not in r.output.lower().split("counterparty")[1]
+
+
+def test_vendor_show_full_snippet(tmp_path: Path) -> None:
+    """`vendor show <name>` should print the full snippet (no truncation)."""
+    import sqlite3
+
+    runner = CliRunner()
+    runner.invoke(cli, ["init"], env=_runner_env(tmp_path))
+    conn = sqlite3.connect(tmp_path / "db.sqlite")
+    conn.execute(
+        "INSERT INTO vendor_cache(counterparty_normalized, summary, industry) "
+        "VALUES (?, ?, ?)",
+        (
+            "edeka sued",
+            "Edeka Zentrale AG & Co. KG ist eine Verbundgruppe selbstaendiger Kaufleute.",
+            "Supermarkt",
+        ),
+    )
+    conn.commit()
+    conn.close()
+    r = runner.invoke(cli, ["vendor", "show", "edeka sued"], env=_runner_env(tmp_path))
+    assert r.exit_code == 0, r.output
+    assert "Edeka Zentrale" in r.output
+    assert "Verbundgruppe" in r.output  # full snippet, not truncated
+    assert "Supermarkt" in r.output
+
+
+def test_vendor_show_missing_returns_error(tmp_path: Path) -> None:
+    runner = CliRunner()
+    runner.invoke(cli, ["init"], env=_runner_env(tmp_path))
+    r = runner.invoke(cli, ["vendor", "show", "unknown vendor"], env=_runner_env(tmp_path))
+    assert r.exit_code != 0
+    assert "no cache entry" in r.output.lower()
+
+
+def test_vendor_clear_single_and_all(tmp_path: Path) -> None:
+    """`vendor clear --counterparty X --yes` removes one row; `vendor
+    clear --yes` removes the rest."""
+    import sqlite3
+
+    runner = CliRunner()
+    runner.invoke(cli, ["init"], env=_runner_env(tmp_path))
+    conn = sqlite3.connect(tmp_path / "db.sqlite")
+    for cp in ("rewe markt", "edeka sued", "aldi sued"):
+        conn.execute(
+            "INSERT INTO vendor_cache(counterparty_normalized, summary, industry) "
+            "VALUES (?, ?, ?)",
+            (cp, "snip", "Supermarkt"),
+        )
+    conn.commit()
+    conn.close()
+    r = runner.invoke(
+        cli,
+        ["vendor", "clear", "--counterparty", "rewe markt", "--yes"],
+        env=_runner_env(tmp_path),
+    )
+    assert r.exit_code == 0, r.output
+    assert "deleted 1 row" in r.output
+    r2 = runner.invoke(cli, ["vendor", "clear", "--yes"], env=_runner_env(tmp_path))
+    assert r2.exit_code == 0, r2.output
+    assert "deleted 2 row" in r2.output
+    r3 = runner.invoke(cli, ["vendor", "list"], env=_runner_env(tmp_path))
+    assert "empty" in r3.output.lower()
+
+
 def test_vendor_lookup_disabled_message(tmp_path: Path) -> None:
     runner = CliRunner()
     runner.invoke(cli, ["init"], env=_runner_env(tmp_path))

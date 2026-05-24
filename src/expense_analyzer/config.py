@@ -33,6 +33,22 @@ class KnnConfig(BaseModel):
 class ZeroshotConfig(BaseModel):
     enabled: bool = True
     use_when_confidence_below: float = 0.5
+    # German hypothesis template: multilingual NLI models perform far
+    # better on German bank text when the hypothesis is in the same
+    # language as the premise. The default English template
+    # "This example is {}." forces the model to mentally code-switch
+    # for every call and bleeds 5-10 accuracy points on DE data.
+    hypothesis_template: str = "In diesem Text geht es um {}."
+    # When True, enrich the NLI premise with the cached vendor industry
+    # tag + a short slice of the cached web summary (vendor_lookup must
+    # also be enabled and populated). Off by default because the signal
+    # is noisy on cryptic bank text -- recommended to A/B via the
+    # Quality tab before flipping on for real.
+    use_vendor_context: bool = False
+    # Cap on how many characters of the cached vendor summary get
+    # appended to the premise. Keeps the NLI input within model
+    # context and limits exposure to long marketing snippets.
+    vendor_summary_max_chars: int = 240
 
 
 class CategorySimilarityConfig(BaseModel):

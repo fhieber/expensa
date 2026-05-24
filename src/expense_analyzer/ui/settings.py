@@ -61,16 +61,51 @@ from expense_analyzer.ui._shared import (
 
 
 def render() -> None:
+    """Settings page.
+
+    Top-level layout (all collapsed by default so the page is quick
+    to scan and the user only opens what they need to change):
+
+      1. My Accounts          -- own-IBAN registry
+      2. Active Learning      -- review batch sizing / strategy
+      3. Privacy              -- vendor web lookup
+      4. Classification       -- compute device + ML models
+            ├── Compute Device
+            └── Models
+                  ├── Embeddings (+ batch size)
+                  └── Zero-Shot (+ prompting)
+      5. Categorization Cascade -- per-stage tuning, ordered as the
+            cascade actually runs (1. vendor_exact_match → 5. zeroshot)
+
+      Database admin lives at the very bottom, outside the numbered
+      sections, since it's a destructive surface that should stay
+      visible.
+    """
     cfg = get_config()
     conn = get_conn()
     st.title("Settings")
-    _render_device_section(cfg)
-    _render_model_sections(cfg)
-    _render_privacy(cfg)
-    _render_active_learning(cfg)
-    _render_cascade_advanced(cfg)
-    _render_own_ibans(conn)
-    _render_database_section(cfg, conn)
+
+    with st.expander("My Accounts", expanded=False):
+        _render_own_ibans_body(conn)
+
+    with st.expander("Active Learning", expanded=False):
+        _render_active_learning_body(cfg)
+
+    with st.expander("Privacy", expanded=False):
+        _render_privacy_body(cfg)
+
+    with st.expander("Classification", expanded=False):
+        st.caption("Global setting — applies to all accounts.")
+        with st.expander("Compute Device", expanded=False):
+            _render_device_body(cfg)
+        with st.expander("Models", expanded=False):
+            _render_models_body(cfg)
+
+    with st.expander("Categorization Cascade", expanded=False):
+        _render_cascade_body(cfg)
+
+    with st.expander("Database", expanded=False):
+        _render_database_body(cfg, conn)
 
 
 def _persist(key: str, values: dict, model_cls) -> None:
@@ -97,24 +132,22 @@ def _persist_scalar(updates: dict) -> None:
 _DEVICE_CHOICES = ["auto", "cpu", "cuda", "mps"]
 
 
-def _render_device_section(cfg) -> None:
-    with st.container(border=True):
-        st.subheader("Compute Device")
-        st.caption("Global setting — applies to all accounts.")
-        with st.form("settings_device"):
-            picked = st.selectbox(
-                "Device",
-                _DEVICE_CHOICES,
-                index=_DEVICE_CHOICES.index(cfg.device)
-                if cfg.device in _DEVICE_CHOICES else 0,
-                help=(
-                    "`auto` picks the best available: CUDA on NVIDIA, MPS on "
-                    "Apple Silicon, otherwise CPU. Override per host if needed."
-                ),
-            )
-            if st.form_submit_button("Save", type="primary"):
-                _persist_scalar({"device": picked})
-        st.caption(f"HF cache: `{hf_cache_dir()}`")
+def _render_device_body(cfg) -> None:
+    """Compute Device body. The outer expander supplies title + framing."""
+    with st.form("settings_device"):
+        picked = st.selectbox(
+            "Device",
+            _DEVICE_CHOICES,
+            index=_DEVICE_CHOICES.index(cfg.device)
+            if cfg.device in _DEVICE_CHOICES else 0,
+            help=(
+                "`auto` picks the best available: CUDA on NVIDIA, MPS on "
+                "Apple Silicon, otherwise CPU. Override per host if needed."
+            ),
+        )
+        if st.form_submit_button("Save", type="primary"):
+            _persist_scalar({"device": picked})
+    st.caption(f"HF cache: `{hf_cache_dir()}`")
 
 
 def _model_table_and_picker(
@@ -172,42 +205,29 @@ def _model_table_and_picker(
             )
 
 
-def _render_model_sections(cfg) -> None:
-    with st.container(border=True):
-        st.subheader("Models")
-        st.caption("Global setting — applies to all accounts.")
-        with st.expander("Embeddings", expanded=False):
-            _model_table_and_picker(
-                EMBEDDING_MODELS, cfg.embedding_model, "embedding_model",
-                explanation=(
-                    "Converts each expense's text "
-                    "(`counterparty_normalized` + ` | ` + `verwendungszweck_normalized`) "
-                    "into a fixed-dimensional vector. Those vectors power the "
-                    "**k-NN lookup** (finds the closest already-labeled expenses), the "
-                    "**supervised classifier** (logistic regression / random forest "
-                    "trained on your user labels), and the **category-similarity** "
-                    "stage (cosine match against embedded category names + "
-                    "descriptions). Pick a German-aware model for best results on DE "
-                    "bank text; larger models are more accurate but use more disk "
-                    "and run slower on CPU."
-                ),
-                cfg=cfg,
-            )
-        with st.expander("Zero-Shot", expanded=False):
-            _model_table_and_picker(
-                ZEROSHOT_MODELS, cfg.zeroshot_model, "zeroshot_model",
-                explanation=(
-                    "**Fallback only** — invoked when every earlier cascade stage "
-                    "(vendor exact match → k-NN → classifier → category similarity) "
-                    "comes back with low confidence. It does multilingual "
-                    "natural-language inference: it asks *\"does this expense text "
-                    "belong to category X?\"* for every category description and "
-                    "picks the best fit. Slow per call (especially on CPU) but "
-                    "rarely needed once you have a few user labels seeded; safe to "
-                    "leave on the default for most installs."
-                ),
-                cfg=cfg,
-            )
+def _render_models_body(cfg) -> None:
+    """Models sub-section body: Embeddings (+ batch size) and Zero-Shot
+    (+ prompting). The outer expander supplies the section title."""
+    # Embeddings + batch size live together: the batch size controls
+    # the embedder's forward-pass throughput, so it's a sibling knob.
+    with st.expander("Embeddings", expanded=False):
+        _model_table_and_picker(
+            EMBEDDING_MODELS, cfg.embedding_model, "embedding_model",
+            explanation=(
+                "Converts each expense's text "
+                "(`counterparty_normalized` + ` | ` + `verwendungszweck_normalized`) "
+                "into a fixed-dimensional vector. Those vectors power the "
+                "**k-NN lookup** (finds the closest already-labeled expenses), the "
+                "**supervised classifier** (logistic regression / random forest "
+                "trained on your user labels), and the **category-similarity** "
+                "stage (cosine match against embedded category names + "
+                "descriptions). Pick a German-aware model for best results on DE "
+                "bank text; larger models are more accurate but use more disk "
+                "and run slower on CPU."
+            ),
+            cfg=cfg,
+        )
+        st.markdown("---")
         with st.form("settings_embedding_batch"):
             batch = st.number_input(
                 "Embedding batch size",
@@ -220,94 +240,114 @@ def _render_model_sections(cfg) -> None:
             )
             if st.form_submit_button("Save", type="primary"):
                 _persist_scalar({"embedding_batch_size": int(batch)})
-
-
-def _render_privacy(cfg) -> None:
-    vl = cfg.vendor_lookup
-    with st.container(border=True):
-        st.subheader("Privacy — Vendor web lookup")
-        st.caption("Global setting — applies to all accounts.")
-        st.warning(
-            "Only `counterparty_normalized` is ever sent to the search backend "
-            "— never amount, IBAN or Verwendungszweck. This whitelist is "
-            "enforced in code and cannot be widened here."
+    with st.expander("Zero-Shot", expanded=False):
+        _model_table_and_picker(
+            ZEROSHOT_MODELS, cfg.zeroshot_model, "zeroshot_model",
+            explanation=(
+                "**Fallback only** — invoked when every earlier cascade stage "
+                "(vendor exact match → k-NN → classifier → category similarity) "
+                "comes back with low confidence. It does multilingual "
+                "natural-language inference: it asks *\"does this expense text "
+                "belong to category X?\"* for every category description and "
+                "picks the best fit. Slow per call (especially on CPU) but "
+                "rarely needed once you have a few user labels seeded; safe to "
+                "leave on the default for most installs."
+            ),
+            cfg=cfg,
         )
-        backends = ["duckduckgo", "searxng"]
-        with st.form("settings_vendor_lookup"):
-            enabled = st.toggle("Enable vendor web lookup", value=vl.enabled)
-            backend = st.selectbox(
-                "Backend", backends,
-                index=backends.index(vl.backend) if vl.backend in backends else 0,
-            )
-            searxng_url = st.text_input(
-                "SearXNG URL (only used when backend = searxng)",
-                value=vl.searxng_url,
-                placeholder="https://searxng.example.org",
-            )
-            cache_ttl_days = st.number_input(
-                "Cache TTL (days)", min_value=0, max_value=3650, step=1,
-                value=int(vl.cache_ttl_days),
-                help="How long a fetched vendor summary stays cached before refetch.",
-            )
-            if st.form_submit_button("Save", type="primary"):
-                _persist(
-                    "vendor_lookup",
-                    {
-                        "enabled": bool(enabled),
-                        "backend": backend,
-                        "searxng_url": searxng_url.strip(),
-                        "cache_ttl_days": int(cache_ttl_days),
-                    },
-                    VendorLookupConfig,
-                )
+        # Per-call prompting knobs live with the model picker rather than
+        # under cascade tuning -- users come here to *configure* zero-shot.
+        _render_zeroshot_prompting_form(cfg)
 
 
-def _render_active_learning(cfg) -> None:
+def _render_privacy_body(cfg) -> None:
+    """Privacy / vendor-lookup body."""
+    vl = cfg.vendor_lookup
+    st.caption("Global setting — applies to all accounts.")
+    st.warning(
+        "Only `counterparty_normalized` is ever sent to the search backend "
+        "— never amount, IBAN or Verwendungszweck. This whitelist is "
+        "enforced in code and cannot be widened here."
+    )
+    backends = ["duckduckgo", "searxng"]
+    with st.form("settings_vendor_lookup"):
+        enabled = st.toggle("Enable vendor web lookup", value=vl.enabled)
+        backend = st.selectbox(
+            "Backend", backends,
+            index=backends.index(vl.backend) if vl.backend in backends else 0,
+        )
+        searxng_url = st.text_input(
+            "SearXNG URL (only used when backend = searxng)",
+            value=vl.searxng_url,
+            placeholder="https://searxng.example.org",
+        )
+        cache_ttl_days = st.number_input(
+            "Cache TTL (days)", min_value=0, max_value=3650, step=1,
+            value=int(vl.cache_ttl_days),
+            help="How long a fetched vendor summary stays cached before refetch.",
+        )
+        if st.form_submit_button("Save", type="primary"):
+            _persist(
+                "vendor_lookup",
+                {
+                    "enabled": bool(enabled),
+                    "backend": backend,
+                    "searxng_url": searxng_url.strip(),
+                    "cache_ttl_days": int(cache_ttl_days),
+                },
+                VendorLookupConfig,
+            )
+
+
+def _render_active_learning_body(cfg) -> None:
+    """Active-learning body: defaults for the Review tab batch picker."""
     al = cfg.active_learning
     strategies = ["uncertainty", "low-confidence-first", "diverse", "mixed"]
-    with st.container(border=True):
-        st.subheader("Active learning")
-        st.caption("Global setting — applies to all accounts. Defaults for the Review tab.")
-        with st.form("settings_active_learning"):
-            batch = st.number_input(
-                "Default review batch size", min_value=1, max_value=500, step=1,
-                value=int(al.default_batch_size),
+    st.caption("Global setting — applies to all accounts. Defaults for the Review tab.")
+    with st.form("settings_active_learning"):
+        batch = st.number_input(
+            "Default review batch size", min_value=1, max_value=500, step=1,
+            value=int(al.default_batch_size),
+        )
+        strat = st.selectbox(
+            "Default sampling strategy", strategies,
+            index=strategies.index(al.default_strategy)
+            if al.default_strategy in strategies else 0,
+        )
+        if st.form_submit_button("Save", type="primary"):
+            _persist(
+                "active_learning",
+                {"default_batch_size": int(batch), "default_strategy": strat},
+                ActiveLearningConfig,
             )
-            strat = st.selectbox(
-                "Default sampling strategy", strategies,
-                index=strategies.index(al.default_strategy)
-                if al.default_strategy in strategies else 0,
-            )
-            if st.form_submit_button("Save", type="primary"):
-                _persist(
-                    "active_learning",
-                    {"default_batch_size": int(batch), "default_strategy": strat},
-                    ActiveLearningConfig,
-                )
 
 
-def _render_cascade_advanced(cfg) -> None:
-    with st.container(border=True):
-        st.subheader("Categorization cascade")
-        st.caption("Global setting — applies to all accounts.")
-        with st.expander("Advanced — cascade tuning", expanded=False):
-            st.caption(
-                "Controls the auto-categorization cascade "
-                "(vendor exact match → k-NN → classifier → category similarity "
-                "→ zero-shot NLI). The defaults are well-tuned; change these "
-                "only if you understand the tradeoffs."
-            )
-            _render_classifier_form(cfg)
-            _render_vendor_exact_form(cfg)
-            _render_knn_form(cfg)
-            _render_category_similarity_form(cfg)
-            _render_zeroshot_form(cfg)
+def _render_cascade_body(cfg) -> None:
+    """Per-stage cascade tuning. Stages are listed in pipeline-execution
+    order so the numbering matches the order rows flow through the
+    cascade -- read top to bottom to follow what happens to one row.
+
+    The defaults are well-tuned for German bank text; change a stage
+    only if the Quality tab's leave-one-out ablation tells you the
+    stage is net-negative on your data.
+    """
+    st.caption("Global setting — applies to all accounts.")
+    st.caption(
+        "Pipeline order: each stage gets a chance to predict; the first "
+        "one that meets its confidence threshold wins. Re-run the "
+        "**Quality** tab after any change to measure the impact."
+    )
+    _render_vendor_exact_form(cfg)
+    _render_knn_form(cfg)
+    _render_classifier_form(cfg)
+    _render_category_similarity_form(cfg)
+    _render_zeroshot_form(cfg)
 
 
 def _render_classifier_form(cfg) -> None:
     c = cfg.classifier
     types = ["logistic_regression", "random_forest"]
-    st.markdown("**Classifier**")
+    st.markdown("### 3. Classifier")
     with st.form("settings_classifier"):
         ctype = st.selectbox(
             "Type", types,
@@ -340,7 +380,7 @@ def _render_classifier_form(cfg) -> None:
 
 def _render_vendor_exact_form(cfg) -> None:
     v = cfg.vendor_exact_match
-    st.markdown("**Vendor exact match**")
+    st.markdown("### 1. Vendor exact match")
     with st.form("settings_vendor_exact"):
         enabled = st.toggle("Enabled", value=v.enabled, key="vem_enabled")
         agree = st.number_input(
@@ -357,7 +397,7 @@ def _render_vendor_exact_form(cfg) -> None:
 
 def _render_knn_form(cfg) -> None:
     k = cfg.knn
-    st.markdown("**k-NN (embedding neighbours)**")
+    st.markdown("### 2. k-NN (embedding neighbours)")
     with st.form("settings_knn"):
         enabled = st.toggle("Enabled", value=k.enabled, key="knn_enabled")
         kk = st.number_input(
@@ -377,7 +417,7 @@ def _render_knn_form(cfg) -> None:
 
 def _render_category_similarity_form(cfg) -> None:
     cs = cfg.category_similarity
-    st.markdown("**Category similarity**")
+    st.markdown("### 4. Category similarity")
     with st.form("settings_category_similarity"):
         enabled = st.toggle("Enabled", value=cs.enabled, key="catsim_enabled")
         min_top1 = st.number_input(
@@ -406,8 +446,16 @@ def _render_category_similarity_form(cfg) -> None:
 
 
 def _render_zeroshot_form(cfg) -> None:
+    """Pipeline-level knobs for the zero-shot stage (on/off, when to
+    invoke). Per-call prompting (template, vendor enrichment) lives
+    in :func:`_render_zeroshot_prompting_form` under Models → Zero-Shot
+    where users land when they want to configure zero-shot."""
     z = cfg.zeroshot
-    st.markdown("**Zero-shot NLI (fallback)**")
+    st.markdown("### 5. Zero-shot NLI (fallback)")
+    st.caption(
+        "Template + vendor-context enrichment live under "
+        "**Classification → Models → Zero-Shot** above."
+    )
     with st.form("settings_zeroshot"):
         enabled = st.toggle("Enabled", value=z.enabled, key="zs_enabled")
         below = st.number_input(
@@ -415,106 +463,214 @@ def _render_zeroshot_form(cfg) -> None:
             value=float(z.use_when_confidence_below),
         )
         if st.form_submit_button("Save zero-shot", type="primary"):
+            # Preserve the prompting fields that live in the other form.
             _persist(
                 "zeroshot",
-                {"enabled": bool(enabled), "use_when_confidence_below": float(below)},
+                {
+                    "enabled": bool(enabled),
+                    "use_when_confidence_below": float(below),
+                    "hypothesis_template": z.hypothesis_template,
+                    "use_vendor_context": z.use_vendor_context,
+                    "vendor_summary_max_chars": z.vendor_summary_max_chars,
+                },
                 ZeroshotConfig,
             )
 
 
-def _render_own_ibans(conn) -> None:
-    with st.container(border=True):
-        st.header("My Accounts")
-        st.caption(
-            "Your own IBANs. Rows whose IBAN matches one listed here are "
-            "marked **internal** (`iban_is_known_self = 1`) and become a "
-            "signal the classifier can use to recognise transfers between "
-            "your own accounts. Adding or removing an IBAN here retroactively "
-            "re-flags every matching transaction."
-        )
+def _render_zeroshot_prompting_form(cfg) -> None:
+    """Hypothesis template + vendor-context enrichment.
 
-        own_rows = list_own_ibans(conn)
-        if not own_rows:
-            st.info(
-                "No own IBANs registered yet. Add one below to start tagging "
-                "internal transfers."
+    Rendered inside the Models → Zero-Shot expander so users
+    configuring zero-shot find every per-call knob in one place.
+    The pipeline-level on/off + confidence threshold stay in the
+    cascade tuning section (those are pipeline composition, not
+    prompting).
+    """
+    z = cfg.zeroshot
+    st.markdown("---")
+    st.markdown("**Prompting**")
+    with st.form("settings_zeroshot_prompting"):
+        template = st.text_input(
+            "Hypothesis template",
+            value=z.hypothesis_template,
+            help=(
+                "NLI hypothesis format. The `{}` placeholder is replaced "
+                "with each category label (name + description) at call "
+                "time. The German default `\"In diesem Text geht es um "
+                "{}.\"` performs notably better than English templates "
+                "on German bank text with multilingual mDeBERTa. Switch "
+                "back to `\"This text is about {}.\"` for English data. "
+                "A/B-test impact via the **Quality** tab."
+            ),
+        )
+        use_vendor_context = st.toggle(
+            "Enrich premise with vendor lookup context",
+            value=z.use_vendor_context,
+            key="zs_vendor_ctx",
+            help=(
+                "When ON, the NLI premise is augmented with the cached "
+                "vendor industry tag and a short slice of the cached web "
+                "summary (requires Vendor web lookup to be enabled and "
+                "the cache to be populated). Privacy: nothing new leaves "
+                "the machine — the snippet was already cached locally."
+            ),
+        )
+        summary_max_chars = st.number_input(
+            "Vendor summary cap (chars)",
+            min_value=0, max_value=2000, step=20,
+            value=int(z.vendor_summary_max_chars),
+            help=(
+                "Maximum characters of the cached vendor summary appended "
+                "to the premise. Only used when the toggle above is on."
+            ),
+        )
+        if st.form_submit_button("Save prompting", type="primary"):
+            # Preserve the pipeline knobs from the other form.
+            _persist(
+                "zeroshot",
+                {
+                    "enabled": z.enabled,
+                    "use_when_confidence_below": z.use_when_confidence_below,
+                    "hypothesis_template": template,
+                    "use_vendor_context": bool(use_vendor_context),
+                    "vendor_summary_max_chars": int(summary_max_chars),
+                },
+                ZeroshotConfig,
             )
-        else:
-            # One width tuple shared by header / per-IBAN rows / Add
-            # row so every column lines up vertically.
-            own_widths = [2, 2, 0.6]
-            h = st.columns(own_widths)
-            h[0].markdown("**IBAN**")
-            h[1].markdown("**Label**")
-            h[2].markdown("")
-            for r in own_rows:
-                row = st.columns(own_widths)
-                # Disabled text_input rather than st.code so the IBAN
-                # box renders at the same height as the editable Label
-                # input next to it -- st.code's <pre> block was
-                # systematically shorter and rows looked misaligned.
-                row[0].text_input(
-                    "iban",
-                    value=r.iban,
-                    key=f"own_iban_display_{r.iban}",
-                    label_visibility="collapsed",
-                    disabled=True,
-                )
-                new_lbl = row[1].text_input(
-                    "label",
-                    value=r.label or "",
-                    key=f"own_iban_lbl_{r.iban}",
-                    label_visibility="collapsed",
-                    placeholder="(no label)",
-                )
-                if new_lbl != (r.label or ""):
-                    update_label(conn, r.iban, new_lbl)
-                if row[2].button("✕", key=f"own_iban_del_{r.iban}",
-                                 help=f"Remove {r.iban}",
-                                 use_container_width=True):
-                    rep = remove_own_iban(conn, r.iban)
-                    st.toast(
-                        f"removed; cleared the flag on {rep.n_was_self} "
-                        "transaction(s)."
-                    )
-                    st.rerun()
 
-        st.markdown("**Add own IBAN**")
-        add_cols = st.columns([2, 2, 0.6])
-        new_iban = add_cols[0].text_input(
-            "new iban",
-            key="new_own_iban_iban",
-            label_visibility="collapsed",
-            placeholder="IBAN",
+
+def _render_own_ibans_body(conn) -> None:
+    """My Accounts body (own-IBAN registry + add form)."""
+    st.caption(
+        "Your own IBANs. Rows whose IBAN matches one listed here are "
+        "marked **internal** (`iban_is_known_self = 1`) and become a "
+        "signal the classifier can use to recognise transfers between "
+        "your own accounts. Adding or removing an IBAN here retroactively "
+        "re-flags every matching transaction."
+    )
+
+    own_rows = list_own_ibans(conn)
+    if not own_rows:
+        st.info(
+            "No own IBANs registered yet. Add one below to start tagging "
+            "internal transfers."
         )
-        new_label = add_cols[1].text_input(
-            "new label",
-            key="new_own_iban_label",
-            label_visibility="collapsed",
-            placeholder="Name",
-        )
-        if add_cols[2].button("Add", type="primary", key="new_own_iban_add",
-                              disabled=not new_iban.strip(),
-                              use_container_width=True):
-            try:
-                rep = add_own_iban(conn, new_iban, label=new_label or None)
-            except ValueError as e:
-                st.error(f"refusing: {e}")
-            else:
+    else:
+        # One width tuple shared by header / per-IBAN rows / Add
+        # row so every column lines up vertically.
+        own_widths = [2, 2, 0.6]
+        h = st.columns(own_widths)
+        h[0].markdown("**IBAN**")
+        h[1].markdown("**Label**")
+        h[2].markdown("")
+        for r in own_rows:
+            row = st.columns(own_widths)
+            # Disabled text_input rather than st.code so the IBAN
+            # box renders at the same height as the editable Label
+            # input next to it -- st.code's <pre> block was
+            # systematically shorter and rows looked misaligned.
+            row[0].text_input(
+                "iban",
+                value=r.iban,
+                key=f"own_iban_display_{r.iban}",
+                label_visibility="collapsed",
+                disabled=True,
+            )
+            new_lbl = row[1].text_input(
+                "label",
+                value=r.label or "",
+                key=f"own_iban_lbl_{r.iban}",
+                label_visibility="collapsed",
+                placeholder="(no label)",
+            )
+            if new_lbl != (r.label or ""):
+                update_label(conn, r.iban, new_lbl)
+            if row[2].button("✕", key=f"own_iban_del_{r.iban}",
+                             help=f"Remove {r.iban}",
+                             use_container_width=True):
+                rep = remove_own_iban(conn, r.iban)
                 st.toast(
-                    f"added; flagged {rep.n_now_self} existing transaction(s) "
-                    "as internal."
+                    f"removed; cleared the flag on {rep.n_was_self} "
+                    "transaction(s)."
                 )
-                for k in ("new_own_iban_iban", "new_own_iban_label"):
-                    st.session_state.pop(k, None)
                 st.rerun()
 
+    st.markdown("**Add own IBAN**")
+    add_cols = st.columns([2, 2, 0.6])
+    new_iban = add_cols[0].text_input(
+        "new iban",
+        key="new_own_iban_iban",
+        label_visibility="collapsed",
+        placeholder="IBAN",
+    )
+    new_label = add_cols[1].text_input(
+        "new label",
+        key="new_own_iban_label",
+        label_visibility="collapsed",
+        placeholder="Name",
+    )
+    if add_cols[2].button("Add", type="primary", key="new_own_iban_add",
+                          disabled=not new_iban.strip(),
+                          use_container_width=True):
+        try:
+            rep = add_own_iban(conn, new_iban, label=new_label or None)
+        except ValueError as e:
+            st.error(f"refusing: {e}")
+        else:
+            st.toast(
+                f"added; flagged {rep.n_now_self} existing transaction(s) "
+                "as internal."
+            )
+            for k in ("new_own_iban_iban", "new_own_iban_label"):
+                st.session_state.pop(k, None)
+            st.rerun()
 
-def _render_database_section(cfg, conn) -> None:
-    with st.container(border=True):
-        st.subheader("Database")
-        _render_db_stats(cfg)
-        _render_administration(cfg, conn)
+
+# Keys of buttons whose action would destroy data. Used by
+# :func:`_inject_destructive_button_css` to paint them red so they
+# stand out from the benign Backup / Restore buttons sharing the
+# Database section.
+_DESTRUCTIVE_BUTTON_KEYS: tuple[str, ...] = (
+    "db_delete_user_labels",
+    "db_reset_data",
+    "db_factory_reset",
+)
+
+
+def _inject_destructive_button_css() -> None:
+    """Paint the destructive buttons red.
+
+    Streamlit (1.41) has no native "danger" button type. The standard
+    workaround is to target the ``st-key-<key>`` class Streamlit
+    assigns to each widget's wrapper and override the button colours
+    via a single ``st.html`` injection. Same trick as the chip-colour
+    rendering in :mod:`review_tab`.
+    """
+    rules: list[str] = []
+    for k in _DESTRUCTIVE_BUTTON_KEYS:
+        # Match the wrapper class + the underlying button so the
+        # hover/focus states stay coherent with the danger framing.
+        rules.append(
+            f".st-key-{k} button {{"
+            "  background-color: #d9534f !important;"
+            "  border-color: #d43f3a !important;"
+            "  color: #ffffff !important;"
+            "}}"
+        )
+        rules.append(
+            f".st-key-{k} button:hover {{"
+            "  background-color: #c9302c !important;"
+            "  border-color: #ac2925 !important;"
+            "}}"
+        )
+    st.html("<style>" + " ".join(rules) + "</style>")
+
+
+def _render_database_body(cfg, conn) -> None:
+    """Database section body: stats + backup/restore + destructive ops."""
+    _inject_destructive_button_css()
+    _render_db_stats(cfg)
+    _render_administration(cfg, conn)
 
 
 def _render_db_stats(cfg) -> None:
@@ -535,11 +691,24 @@ def _render_db_stats(cfg) -> None:
 
 
 def _render_administration(cfg, conn) -> None:
+    """Backup / Restore + the three destructive ops.
+
+    Previously the destructive ops sat under a separate "Danger Zone"
+    subheader inside another bordered container. With the whole
+    Database section now in its own collapsed expander, that extra
+    framing was redundant -- the buttons are painted red instead so
+    the visual cue lives on the button itself, not the section header.
+    """
     with st.expander("Backup", expanded=False):
         _render_backup(conn)
     with st.expander("Restore", expanded=False):
         _render_restore(cfg)
-    _render_danger_zone(conn)
+    with st.expander("Delete user labels", expanded=False):
+        _render_delete_user_labels(conn)
+    with st.expander("Empty database", expanded=False):
+        _render_reset_data(conn)
+    with st.expander("Factory reset (incl. category deletion)", expanded=False):
+        _render_factory_reset(conn)
 
 
 def _render_backup(conn) -> None:
@@ -647,65 +816,64 @@ def _render_restore(cfg) -> None:
                 st.error(f"restore failed: {e}")
 
 
-def _render_danger_zone(conn) -> None:
-    with st.container(border=True):
-        st.subheader(":red[Danger Zone]")
-        with st.expander("Delete User Labels", expanded=False):
-            n_user_labels = conn.execute(
-                "SELECT COUNT(*) AS n FROM labels WHERE source='user'"
-            ).fetchone()["n"]
-            st.write(
-                f"Currently **{n_user_labels}** row(s) in `labels` with `source='user'`. "
-                "Deleting them lets you re-run Auto-label across the whole DB without "
-                "your previous confirmations dominating the cascade. Model labels stay, "
-                "so rows that have both keep their visible category via the remaining "
-                "model entry; rows that had **only** a user label become uncategorized."
-            )
-            confirm_user = st.text_input(
-                "Type `delete user labels` to confirm", key="confirm_delete_user_labels"
-            )
-            if st.button("Delete all user labels", type="secondary"):
-                if confirm_user.strip().lower() == "delete user labels":
-                    n = _del_user_labels(conn)
-                    st.success(f"deleted {n} user label row(s)")
-                    st.rerun()
-                else:
-                    st.error("type the confirmation phrase exactly")
+def _render_delete_user_labels(conn) -> None:
+    n_user_labels = conn.execute(
+        "SELECT COUNT(*) AS n FROM labels WHERE source='user'"
+    ).fetchone()["n"]
+    st.write(
+        f"Currently **{n_user_labels}** row(s) in `labels` with `source='user'`. "
+        "Deleting them lets you re-run Auto-label across the whole DB without "
+        "your previous confirmations dominating the cascade. Model labels stay, "
+        "so rows that have both keep their visible category via the remaining "
+        "model entry; rows that had **only** a user label become uncategorized."
+    )
+    confirm_user = st.text_input(
+        "Type `delete user labels` to confirm", key="confirm_delete_user_labels"
+    )
+    if st.button("🗑 Delete all user labels", key="db_delete_user_labels"):
+        if confirm_user.strip().lower() == "delete user labels":
+            n = _del_user_labels(conn)
+            st.success(f"deleted {n} user label row(s)")
+            st.rerun()
+        else:
+            st.error("type the confirmation phrase exactly")
 
-        with st.expander("Empty Database", expanded=False):
-            st.write(
-                "Deletes every row in `expenses`, `labels`, `notes`, `embeddings`, "
-                "`vendor_cache` and `model_versions`. Categories and own-IBANs are kept."
-            )
-            confirm_data = st.text_input(
-                "Type `clear data` to confirm", key="confirm_reset_data"
-            )
-            if st.button("Clear ingested data"):
-                if confirm_data.strip().lower() == "clear data":
-                    report = reset_data(conn)
-                    st.success(
-                        f"deleted {report.total} row(s) across "
-                        f"{len(report.table_counts)} table(s)"
-                    )
-                    st.rerun()
-                else:
-                    st.error("type the confirmation phrase exactly")
 
-        with st.expander("Factory Reset (incl. category deletion)", expanded=False):
-            st.write(
-                "Wipes every table including categories and own-IBANs. The DB schema "
-                "stays so you can immediately re-init."
+def _render_reset_data(conn) -> None:
+    st.write(
+        "Deletes every row in `expenses`, `labels`, `notes`, `embeddings`, "
+        "`vendor_cache` and `model_versions`. Categories and own-IBANs are kept."
+    )
+    confirm_data = st.text_input(
+        "Type `clear data` to confirm", key="confirm_reset_data"
+    )
+    if st.button("🗑 Clear ingested data", key="db_reset_data"):
+        if confirm_data.strip().lower() == "clear data":
+            report = reset_data(conn)
+            st.success(
+                f"deleted {report.total} row(s) across "
+                f"{len(report.table_counts)} table(s)"
             )
-            confirm_all = st.text_input(
-                "Type `factory reset` to confirm", key="confirm_reset_all"
+            st.rerun()
+        else:
+            st.error("type the confirmation phrase exactly")
+
+
+def _render_factory_reset(conn) -> None:
+    st.write(
+        "Wipes every table including categories and own-IBANs. The DB schema "
+        "stays so you can immediately re-init."
+    )
+    confirm_all = st.text_input(
+        "Type `factory reset` to confirm", key="confirm_reset_all"
+    )
+    if st.button("🗑 Factory reset", key="db_factory_reset"):
+        if confirm_all.strip().lower() == "factory reset":
+            report = reset_all(conn)
+            st.success(
+                f"deleted {report.total} row(s) across "
+                f"{len(report.table_counts)} table(s)"
             )
-            if st.button("Factory reset"):
-                if confirm_all.strip().lower() == "factory reset":
-                    report = reset_all(conn)
-                    st.success(
-                        f"deleted {report.total} row(s) across "
-                        f"{len(report.table_counts)} table(s)"
-                    )
-                    st.rerun()
-                else:
-                    st.error("type the confirmation phrase exactly")
+            st.rerun()
+        else:
+            st.error("type the confirmation phrase exactly")

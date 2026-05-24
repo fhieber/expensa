@@ -873,6 +873,194 @@ def vendor_lookup(ctx: click.Context, counterparty: str | None, all_vendors: boo
         conn.close()
 
 
+# --- vendor cache inspection -------------------------------------------------
+
+@cli.group("vendor")
+def vendor() -> None:
+    """Inspect the cached vendor lookup results (industry tags + snippets).
+
+    Read-only. To populate or refresh the cache, use ``expense vendor-lookup``.
+    """
+
+
+@vendor.command("list")
+@click.option("--industry", "industry_filter", default=None,
+              help="Only show entries whose industry contains this substring (case-insensitive).")
+@click.option("--limit", type=int, default=100,
+              help="Cap on rows shown. Use 0 for unlimited.")
+@click.option("--snippet-chars", type=int, default=80,
+              help="Snippet preview width per row. 0 hides snippets entirely.")
+@click.pass_context
+def vendor_list(
+    ctx: click.Context,
+    industry_filter: str | None,
+    limit: int,
+    snippet_chars: int,
+) -> None:
+    """Show every cached vendor with its industry tag and a snippet preview.
+
+    Rows are ordered by fetched_at DESC so the most recently looked-up
+    vendors surface first.
+    """
+    cfg: Config = ctx.obj[_CTX_KEY]["config"]
+    conn = _connect(cfg)
+    try:
+        from expense_analyzer.enrichment.vendor_web import normalize_industry
+
+        rows = conn.execute(
+            """
+            SELECT counterparty_normalized, summary, industry, fetched_at
+            FROM vendor_cache
+            ORDER BY fetched_at DESC, counterparty_normalized ASC
+            """
+        ).fetchall()
+        if not rows:
+            click.echo(
+                "(vendor cache is empty — run `expense vendor-lookup --all` "
+                "to populate it)"
+            )
+            return
+
+        # Filter / migrate / cap, then render in fixed-width columns so
+        # the output is grep-friendly.
+        needle = (industry_filter or "").lower()
+        out: list[tuple[str, str, str, str]] = []
+        for r in rows:
+            ind = normalize_industry(r["industry"]) or "(?)"
+            if needle and needle not in ind.lower():
+                continue
+            snippet = (r["summary"] or "").replace("\n", " ").strip()
+            if snippet_chars > 0 and len(snippet) > snippet_chars:
+                snippet = snippet[:snippet_chars].rstrip() + "…"
+            elif snippet_chars == 0:
+                snippet = ""
+            fetched = str(r["fetched_at"] or "")[:19]
+            out.append((r["counterparty_normalized"], ind, snippet, fetched))
+
+        if not out:
+            click.echo("(no vendor cache entries matched the filter)")
+            return
+
+        if limit > 0:
+            out = out[:limit]
+
+        # Compute column widths from the visible rows so short tables
+        # don't waste horizontal space.
+        cp_w = min(40, max(18, max(len(o[0]) for o in out)))
+        ind_w = min(20, max(8, max(len(o[1]) for o in out)))
+        click.echo(
+            f"{'COUNTERPARTY':<{cp_w}}  {'INDUSTRY':<{ind_w}}  "
+            f"{'FETCHED_AT':<19}  SNIPPET"
+        )
+        click.echo("-" * (cp_w + ind_w + 19 + 12))
+        for cp, ind, snippet, fetched in out:
+            line = (
+                f"{cp[:cp_w]:<{cp_w}}  {ind[:ind_w]:<{ind_w}}  "
+                f"{fetched:<19}  {snippet}"
+            )
+            click.echo(line)
+
+        total = conn.execute("SELECT COUNT(*) AS n FROM vendor_cache").fetchone()["n"]
+        click.echo(f"\n{len(out)} of {total} cached vendor(s) shown.")
+    finally:
+        conn.close()
+
+
+@vendor.command("show")
+@click.argument("counterparty")
+@click.pass_context
+def vendor_show(ctx: click.Context, counterparty: str) -> None:
+    """Print the full cached entry for one counterparty (industry + complete snippet)."""
+    cfg: Config = ctx.obj[_CTX_KEY]["config"]
+    conn = _connect(cfg)
+    try:
+        from expense_analyzer.enrichment.vendor_web import normalize_industry
+        from expense_analyzer.ingestion.normalizer import normalize_counterparty
+
+        # Accept either the raw name or the already-normalized form.
+        cp = normalize_counterparty(counterparty)
+        r = conn.execute(
+            """
+            SELECT counterparty_normalized, summary, industry, fetched_at
+            FROM vendor_cache
+            WHERE counterparty_normalized = ?
+            """,
+            (cp,),
+        ).fetchone()
+        if r is None:
+            click.echo(
+                f"no cache entry for {cp!r}. Run "
+                f"`expense vendor-lookup {counterparty!r}` to populate it.",
+                err=True,
+            )
+            ctx.exit(1)
+        click.echo(f"counterparty: {r['counterparty_normalized']}")
+        click.echo(f"industry:     {normalize_industry(r['industry'])}")
+        click.echo(f"fetched_at:   {r['fetched_at']}")
+        click.echo("snippet:")
+        snippet = (r["summary"] or "").strip()
+        if not snippet:
+            click.echo("  (empty)")
+        else:
+            # Indent each wrapped line for easy visual scanning.
+            for line in snippet.splitlines() or [snippet]:
+                click.echo(f"  {line}")
+    finally:
+        conn.close()
+
+
+@vendor.command("clear")
+@click.option("--counterparty", default=None,
+              help="Remove only this counterparty's cache row. If omitted, clears the whole table.")
+@click.option("--yes", "confirmed", is_flag=True, help="Skip the confirmation prompt.")
+@click.pass_context
+def vendor_clear(
+    ctx: click.Context, counterparty: str | None, confirmed: bool
+) -> None:
+    """Drop cached vendor rows. Use to force a refresh on next lookup."""
+    cfg: Config = ctx.obj[_CTX_KEY]["config"]
+    conn = _connect(cfg)
+    try:
+        from expense_analyzer.ingestion.normalizer import normalize_counterparty
+
+        if counterparty:
+            cp = normalize_counterparty(counterparty)
+            n = conn.execute(
+                "SELECT COUNT(*) AS n FROM vendor_cache WHERE counterparty_normalized = ?",
+                (cp,),
+            ).fetchone()["n"]
+            if n == 0:
+                click.echo(f"no cache entry for {cp!r}.")
+                return
+            if not confirmed and not click.confirm(
+                f"delete cached entry for {cp!r}?"
+            ):
+                click.echo("aborted.")
+                return
+            conn.execute(
+                "DELETE FROM vendor_cache WHERE counterparty_normalized = ?", (cp,)
+            )
+            conn.commit()
+            click.echo("deleted 1 row.")
+        else:
+            n = conn.execute(
+                "SELECT COUNT(*) AS n FROM vendor_cache"
+            ).fetchone()["n"]
+            if n == 0:
+                click.echo("vendor cache already empty.")
+                return
+            if not confirmed and not click.confirm(
+                f"delete ALL {n} cached vendor row(s)?"
+            ):
+                click.echo("aborted.")
+                return
+            conn.execute("DELETE FROM vendor_cache")
+            conn.commit()
+            click.echo(f"deleted {n} row(s).")
+    finally:
+        conn.close()
+
+
 # --- export ------------------------------------------------------------------
 
 @cli.command()

@@ -18,20 +18,71 @@ from datetime import datetime, timedelta, timezone
 
 from expense_analyzer.config import VendorLookupConfig
 
+# German industry labels. We feed these to a German embedding model and
+# (when zeroshot prompting is on) into a German NLI premise -- the
+# previous English labels ("supermarket", "transport") forced the model
+# to cross-language match, weakening the boost.
 _INDUSTRY_HINTS: list[tuple[tuple[str, ...], str]] = [
     (("supermarkt", "lebensmittel", "rewe", "edeka", "aldi", "lidl", "penny", "netto", "kaufland"),
-     "supermarket"),
-    (("restaurant", "gaststaette", "imbiss", "pizzeria", "cafe", "bar"), "restaurant"),
-    (("apotheke", "drogerie", "klinik", "arzt", "praxis", "krankenhaus"), "health"),
-    (("bahn", "bvg", "vbb", "mvg", "tankstelle", "shell", "aral", "esso"), "transport"),
-    (("hotel", "pension", "airline", "lufthansa", "flughafen"), "travel"),
-    (("netflix", "spotify", "amazon prime", "disney", "magenta tv", "sky"), "streaming"),
-    (("telekom", "vodafone", "o2", "1&1"), "telco"),
-    (("strom", "stadtwerke", "gas", "wasser"), "utilities"),
-    (("versicherung", "allianz", "axa", "huk"), "insurance"),
-    (("paypal", "klarna", "amazon", "ebay"), "marketplace"),
-    (("vermieter", "miete", "wohnung"), "rent"),
+     "Supermarkt"),
+    (("restaurant", "gaststaette", "imbiss", "pizzeria", "cafe", "bar"), "Restaurant"),
+    (("apotheke", "drogerie", "klinik", "arzt", "praxis", "krankenhaus"), "Gesundheit"),
+    (("bahn", "bvg", "vbb", "mvg", "tankstelle", "shell", "aral", "esso"), "Verkehr"),
+    (("hotel", "pension", "airline", "lufthansa", "flughafen"), "Reisen"),
+    (("netflix", "spotify", "amazon prime", "disney", "magenta tv", "sky"), "Streaming"),
+    (("telekom", "vodafone", "o2", "1&1"), "Telekommunikation"),
+    (("strom", "stadtwerke", "gas", "wasser"), "Versorgung"),
+    (("versicherung", "allianz", "axa", "huk"), "Versicherung"),
+    (("paypal", "klarna", "amazon", "ebay"), "Onlinehandel"),
+    (("vermieter", "miete", "wohnung"), "Miete"),
 ]
+
+# Sentinel returned when no hint matched. Consumers (cascade stages,
+# CLI display) should treat this -- and the empty string -- as "no
+# usable industry signal" and skip the enrichment.
+INDUSTRY_OTHER = "Sonstige"
+
+# Migration map: old English-labelled cache rows get translated on read
+# so legacy entries don't show up untranslated in the UI/CLI or
+# pollute the cascade with English tokens. Re-running ``expense vendor
+# refresh`` would rewrite them, but most users won't bother.
+_LEGACY_TO_GERMAN: dict[str, str] = {
+    "supermarket": "Supermarkt",
+    "restaurant": "Restaurant",
+    "health": "Gesundheit",
+    "transport": "Verkehr",
+    "travel": "Reisen",
+    "streaming": "Streaming",
+    "telco": "Telekommunikation",
+    "utilities": "Versorgung",
+    "insurance": "Versicherung",
+    "marketplace": "Onlinehandel",
+    "rent": "Miete",
+    "other": INDUSTRY_OTHER,
+}
+
+
+def is_meaningful_industry(industry: str | None) -> bool:
+    """Return True iff this industry tag carries actionable signal.
+
+    Empty strings and the ``Sonstige``/``other`` sentinel are filtered
+    so they never make it into the cascade premise or category-
+    similarity bonus -- they'd just dilute the signal.
+    """
+    if not industry:
+        return False
+    return industry.strip().lower() not in {"sonstige", "other", ""}
+
+
+def normalize_industry(industry: str | None) -> str:
+    """Translate legacy English labels to their German equivalents.
+
+    Cheap O(1) lookup applied at read time so existing caches don't
+    have to be wiped. Unknown values pass through untouched.
+    """
+    if not industry:
+        return ""
+    return _LEGACY_TO_GERMAN.get(industry.strip().lower(), industry)
 
 
 def _heuristic_industry(counterparty: str, summary: str) -> str:
@@ -39,7 +90,7 @@ def _heuristic_industry(counterparty: str, summary: str) -> str:
     for keys, label in _INDUSTRY_HINTS:
         if any(k in blob for k in keys):
             return label
-    return "other"
+    return INDUSTRY_OTHER
 
 
 @dataclass
@@ -71,7 +122,10 @@ def _cached(conn: sqlite3.Connection, counterparty: str, ttl_days: int) -> Vendo
         fetched_dt = fetched_dt.replace(tzinfo=timezone.utc)
     if datetime.now(timezone.utc) - fetched_dt > timedelta(days=ttl_days):
         return None
-    return VendorInfo(counterparty, r["summary"] or "", r["industry"] or "other")
+    # Migrate legacy English industry labels to German on read so the
+    # UI/CLI and cascade never have to think about either dialect.
+    industry = normalize_industry(r["industry"]) or INDUSTRY_OTHER
+    return VendorInfo(counterparty, r["summary"] or "", industry)
 
 
 def _cache_put(
@@ -135,7 +189,7 @@ def lookup_vendor(
             "vendor_lookup.enabled is False. Enable it in config to use this feature."
         )
     if not counterparty_normalized:
-        return VendorInfo("", "", "other")
+        return VendorInfo("", "", INDUSTRY_OTHER)
     cached = _cached(conn, counterparty_normalized, config.cache_ttl_days)
     if cached is not None:
         return cached
