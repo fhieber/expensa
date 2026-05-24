@@ -12,6 +12,7 @@ class Category:
     name: str
     description: str
     color: str
+    is_savings: bool = False
 
 
 def upsert_category(
@@ -32,21 +33,47 @@ def upsert_category(
 
 def list_categories(conn: sqlite3.Connection) -> list[Category]:
     rows = conn.execute(
-        "SELECT id, name, description, color FROM categories ORDER BY name"
+        "SELECT id, name, description, color, is_savings FROM categories ORDER BY name"
     ).fetchall()
     return [
-        Category(int(r["id"]), r["name"], r["description"] or "", r["color"] or "#888")
+        Category(
+            int(r["id"]), r["name"], r["description"] or "", r["color"] or "#888",
+            bool(r["is_savings"]),
+        )
         for r in rows
     ]
 
 
 def get_category_by_name(conn: sqlite3.Connection, name: str) -> Category | None:
     r = conn.execute(
-        "SELECT id, name, description, color FROM categories WHERE name = ?", (name,)
+        "SELECT id, name, description, color, is_savings FROM categories WHERE name = ?",
+        (name,),
     ).fetchone()
     if r is None:
         return None
-    return Category(int(r["id"]), r["name"], r["description"] or "", r["color"] or "#888")
+    return Category(
+        int(r["id"]), r["name"], r["description"] or "", r["color"] or "#888",
+        bool(r["is_savings"]),
+    )
+
+
+def set_category_savings(
+    conn: sqlite3.Connection, category_id: int, is_savings: bool
+) -> None:
+    """Flag (or unflag) a category as a savings category. Rows in a savings
+    category are treated as neutral by the dashboard aggregates."""
+    conn.execute(
+        "UPDATE categories SET is_savings = ? WHERE id = ?",
+        (1 if is_savings else 0, category_id),
+    )
+
+
+def savings_category_names(conn: sqlite3.Connection) -> list[str]:
+    """Names of all categories flagged as savings (``is_savings = 1``)."""
+    rows = conn.execute(
+        "SELECT name FROM categories WHERE is_savings = 1 ORDER BY name"
+    ).fetchall()
+    return [r["name"] for r in rows]
 
 
 def add_label(

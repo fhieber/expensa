@@ -16,12 +16,11 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from expense_analyzer.storage.categories import list_categories
+from expense_analyzer.storage.categories import list_categories, savings_category_names
 from expense_analyzer.ui._components import chart_expander, date_preset_row, de_eur
 from expense_analyzer.ui._shared import get_conn
 from expense_analyzer.utils.colors import readable_text_color
 from expense_analyzer.viz import (
-    DEFAULT_SAVINGS_CATEGORIES,
     anomalies,
     bar_spend_by_category,
     income_vs_expense_chart,
@@ -60,18 +59,21 @@ def render() -> None:
         return
 
     since, until = date_preset_row(key_prefix="dashboard")
-    _render_headline_tiles(conn, since, until)
-    _render_charts(conn, since, until)
+    savings = tuple(savings_category_names(conn))
+    _render_headline_tiles(conn, since, until, savings)
+    _render_charts(conn, since, until, savings)
     st.divider()
     _render_records_table(conn, since, until)
     _render_alltime_helpers(conn)
 
 
-def _render_headline_tiles(conn, since, until) -> None:
+def _render_headline_tiles(conn, since, until, savings) -> None:
     """Savings rate / income / expenses / to-savings tiles + caption.
     Wrapped in a bordered container so it reads as one grouped unit."""
-    ivex_df = monthly_income_vs_expense(conn, since=since, until=until)
-    sav_df = savings_flow(conn, since=since, until=until)
+    ivex_df = monthly_income_vs_expense(
+        conn, since=since, until=until, savings_categories=savings
+    )
+    sav_df = savings_flow(conn, since=since, until=until, savings_categories=savings)
     total_income = float(ivex_df["income"].sum()) if not ivex_df.empty else 0.0
     total_exp = float(ivex_df["expenses"].sum()) if not ivex_df.empty else 0.0
     total_to_sav = float(sav_df["to_savings"].sum()) if not sav_df.empty else 0.0
@@ -90,22 +92,31 @@ def _render_headline_tiles(conn, since, until) -> None:
         sr_cols[0].metric("Savings rate", sr_value)
         sr_cols[1].metric("Income", de_eur(total_income))
         sr_cols[2].metric("Expenses", de_eur(total_exp))
+        sav_label = ", ".join(savings) if savings else "your savings categories"
         sr_cols[3].metric(
             "💰 To savings (net)",
             de_eur(net_to_sav),
             help=(
-                f"Money moved to your own accounts (category Sparen) "
+                f"Money moved to your own accounts (category: {sav_label}) "
                 f"minus what came back. Gross out: {de_eur(total_to_sav)} · "
                 f"gross in: {de_eur(total_from_sav)}."
             ),
         )
+        if savings:
+            savings_note = (
+                f"Rows categorised **{sav_label}** and rows matching a "
+                "registered own IBAN (`iban_is_known_self`) are treated as "
+                "neutral on both the income and expense sides — so the savings "
+                "rate captures real income vs real consumption."
+            )
+        else:
+            savings_note = (
+                "Tip: mark a category as **Sparen** in the Categories tab to "
+                "treat transfers to your own accounts as neutral here."
+            )
         st.caption(
             "Reflects the currently selected date range above. "
-            "🟢 ≥20% · 🟡 0–20% · 🔴 negative. "
-            "Rows categorised **Sparen** and rows matching a registered "
-            "own IBAN (`iban_is_known_self`) are treated as neutral on "
-            "both the income and expense sides — so the savings rate "
-            "captures real income vs real consumption."
+            "🟢 ≥20% · 🟡 0–20% · 🔴 negative. " + savings_note
         )
 
     # Stash the ivex_df under session_state so the Income-vs-Expense chart
@@ -114,9 +125,9 @@ def _render_headline_tiles(conn, since, until) -> None:
     st.session_state["_dashboard_ivex_df"] = ivex_df
 
 
-def _render_charts(conn, since, until) -> None:
-    """Collapsible per-category charts. Sparen pre-hidden where shown
-    inline (the monthly-saldo chart drops Sparen upstream)."""
+def _render_charts(conn, since, until, savings) -> None:
+    """Collapsible per-category charts. Savings categories pre-hidden where
+    shown inline (the monthly-saldo chart drops them upstream)."""
     dash_cats = list_categories(conn)
     color_map: dict[str, str] = {c.name: c.color for c in dash_cats}
     color_map["(unkategorisiert)"] = "#bbbbbb"
@@ -126,7 +137,7 @@ def _render_charts(conn, since, until) -> None:
         bar_spend_by_category(
             spend_by_category(conn, since=since, until=until),
             color_map=color_map,
-            hidden_categories=DEFAULT_SAVINGS_CATEGORIES,
+            hidden_categories=savings,
         ),
         expanded=True,
         key="dashboard_bar_chart",
@@ -136,7 +147,7 @@ def _render_charts(conn, since, until) -> None:
         stacked_weekly_by_category(
             weekly_by_category(conn, since=since, until=until),
             color_map=color_map,
-            hidden_categories=DEFAULT_SAVINGS_CATEGORIES,
+            hidden_categories=savings,
         ),
         expanded=False,
         key="dashboard_weekly_chart",
@@ -144,7 +155,9 @@ def _render_charts(conn, since, until) -> None:
     chart_expander(
         "Monatlicher Saldo je Kategorie",
         stacked_monthly_by_category(
-            monthly_flow_by_category(conn, since=since, until=until),
+            monthly_flow_by_category(
+                conn, since=since, until=until, savings_categories=savings
+            ),
             color_map=color_map,
         ),
         expanded=True,
@@ -153,7 +166,9 @@ def _render_charts(conn, since, until) -> None:
     ivex_df = st.session_state.get("_dashboard_ivex_df")
     if ivex_df is None:
         # Defensive: should always be populated by _render_headline_tiles.
-        ivex_df = monthly_income_vs_expense(conn, since=since, until=until)
+        ivex_df = monthly_income_vs_expense(
+            conn, since=since, until=until, savings_categories=savings
+        )
     chart_expander(
         "Einkommen vs Ausgaben (monatlich)",
         income_vs_expense_chart(ivex_df),

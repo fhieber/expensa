@@ -33,6 +33,19 @@ _MIGRATIONS: list[tuple[int, str]] = [
         ALTER TABLE expenses DROP COLUMN cluster_id;
         """,
     ),
+    (
+        3,
+        # v2 -> v3: per-category savings flag. ADD COLUMN can't take an
+        # IF NOT EXISTS guard, but it's a single statement that only runs
+        # when schema_version < 3, so it's safe (fresh DBs get the column
+        # from schema.sql and skip this). The UPDATE backfills installs
+        # that already used a "Sparen" category so their dashboards keep
+        # behaving as before the flag existed.
+        """
+        ALTER TABLE categories ADD COLUMN is_savings INTEGER NOT NULL DEFAULT 0;
+        UPDATE categories SET is_savings = 1 WHERE name = 'Sparen';
+        """,
+    ),
 ]
 
 

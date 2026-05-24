@@ -15,9 +15,19 @@ import tempfile as _tempfile
 from pathlib import Path
 
 import streamlit as st
+from pydantic import ValidationError
 
 from expense_analyzer.accounts import slugify
-from expense_analyzer.config import save_user_config
+from expense_analyzer.config import (
+    ActiveLearningConfig,
+    CategorySimilarityConfig,
+    ClassifierConfig,
+    KnnConfig,
+    VendorExactMatchConfig,
+    VendorLookupConfig,
+    ZeroshotConfig,
+    save_user_config,
+)
 from expense_analyzer.features.model_registry import (
     EMBEDDING_MODELS,
     ZEROSHOT_MODELS,
@@ -57,15 +67,53 @@ def render() -> None:
     _render_device_section(cfg)
     _render_model_sections(cfg)
     _render_privacy(cfg)
+    _render_active_learning(cfg)
+    _render_cascade_advanced(cfg)
     _render_own_ibans(conn)
     _render_database_section(cfg, conn)
+
+
+def _persist(key: str, values: dict, model_cls) -> None:
+    """Validate ``values`` against ``model_cls``, then merge ``{key: values}``
+    into the global ``config.yaml`` and drop the cached GlobalConfig so the
+    next render reads the new value. Shows an error and skips the write if
+    validation fails."""
+    try:
+        model_cls(**values)
+    except ValidationError as e:
+        st.error(f"invalid settings — not saved: {e}")
+        return
+    save_user_config({key: values}, data_dir=get_global_home())
+    invalidate_global_config()
+    st.success("Saved.")
+
+
+def _persist_scalar(updates: dict) -> None:
+    save_user_config(updates, data_dir=get_global_home())
+    invalidate_global_config()
+    st.success("Saved.")
+
+
+_DEVICE_CHOICES = ["auto", "cpu", "cuda", "mps"]
 
 
 def _render_device_section(cfg) -> None:
     with st.container(border=True):
         st.subheader("Compute Device")
         st.caption("Global setting — applies to all accounts.")
-        st.write(f"**Device:** `{cfg.device}`")
+        with st.form("settings_device"):
+            picked = st.selectbox(
+                "Device",
+                _DEVICE_CHOICES,
+                index=_DEVICE_CHOICES.index(cfg.device)
+                if cfg.device in _DEVICE_CHOICES else 0,
+                help=(
+                    "`auto` picks the best available: CUDA on NVIDIA, MPS on "
+                    "Apple Silicon, otherwise CPU. Override per host if needed."
+                ),
+            )
+            if st.form_submit_button("Save", type="primary"):
+                _persist_scalar({"device": picked})
         st.caption(f"HF cache: `{hf_cache_dir()}`")
 
 
@@ -160,22 +208,217 @@ def _render_model_sections(cfg) -> None:
                 ),
                 cfg=cfg,
             )
+        with st.form("settings_embedding_batch"):
+            batch = st.number_input(
+                "Embedding batch size",
+                min_value=1, max_value=1024, step=1,
+                value=int(cfg.embedding_batch_size),
+                help=(
+                    "How many expense texts are embedded per forward pass. "
+                    "Higher uses more memory but is faster on a GPU."
+                ),
+            )
+            if st.form_submit_button("Save", type="primary"):
+                _persist_scalar({"embedding_batch_size": int(batch)})
 
 
 def _render_privacy(cfg) -> None:
+    vl = cfg.vendor_lookup
     with st.container(border=True):
-        st.subheader("Privacy")
+        st.subheader("Privacy — Vendor web lookup")
         st.caption("Global setting — applies to all accounts.")
-        st.write(f"Vendor web lookup enabled: **{cfg.vendor_lookup.enabled}**")
-        if cfg.vendor_lookup.enabled:
-            st.warning(
-                "Vendor lookup is ON. Only `counterparty_normalized` is sent to "
-                f"{cfg.vendor_lookup.backend}; never amount/IBAN/Verwendungszweck."
+        st.warning(
+            "Only `counterparty_normalized` is ever sent to the search backend "
+            "— never amount, IBAN or Verwendungszweck. This whitelist is "
+            "enforced in code and cannot be widened here."
+        )
+        backends = ["duckduckgo", "searxng"]
+        with st.form("settings_vendor_lookup"):
+            enabled = st.toggle("Enable vendor web lookup", value=vl.enabled)
+            backend = st.selectbox(
+                "Backend", backends,
+                index=backends.index(vl.backend) if vl.backend in backends else 0,
             )
-        else:
-            st.info(
-                "Vendor lookup is OFF. Set `vendor_lookup.enabled: true` in your "
-                "config to enable."
+            searxng_url = st.text_input(
+                "SearXNG URL (only used when backend = searxng)",
+                value=vl.searxng_url,
+                placeholder="https://searxng.example.org",
+            )
+            cache_ttl_days = st.number_input(
+                "Cache TTL (days)", min_value=0, max_value=3650, step=1,
+                value=int(vl.cache_ttl_days),
+                help="How long a fetched vendor summary stays cached before refetch.",
+            )
+            if st.form_submit_button("Save", type="primary"):
+                _persist(
+                    "vendor_lookup",
+                    {
+                        "enabled": bool(enabled),
+                        "backend": backend,
+                        "searxng_url": searxng_url.strip(),
+                        "cache_ttl_days": int(cache_ttl_days),
+                    },
+                    VendorLookupConfig,
+                )
+
+
+def _render_active_learning(cfg) -> None:
+    al = cfg.active_learning
+    strategies = ["uncertainty", "low-confidence-first", "diverse", "mixed"]
+    with st.container(border=True):
+        st.subheader("Active learning")
+        st.caption("Global setting — applies to all accounts. Defaults for the Review tab.")
+        with st.form("settings_active_learning"):
+            batch = st.number_input(
+                "Default review batch size", min_value=1, max_value=500, step=1,
+                value=int(al.default_batch_size),
+            )
+            strat = st.selectbox(
+                "Default sampling strategy", strategies,
+                index=strategies.index(al.default_strategy)
+                if al.default_strategy in strategies else 0,
+            )
+            if st.form_submit_button("Save", type="primary"):
+                _persist(
+                    "active_learning",
+                    {"default_batch_size": int(batch), "default_strategy": strat},
+                    ActiveLearningConfig,
+                )
+
+
+def _render_cascade_advanced(cfg) -> None:
+    with st.container(border=True):
+        st.subheader("Categorization cascade")
+        st.caption("Global setting — applies to all accounts.")
+        with st.expander("Advanced — cascade tuning", expanded=False):
+            st.caption(
+                "Controls the auto-categorization cascade "
+                "(vendor exact match → k-NN → classifier → category similarity "
+                "→ zero-shot NLI). The defaults are well-tuned; change these "
+                "only if you understand the tradeoffs."
+            )
+            _render_classifier_form(cfg)
+            _render_vendor_exact_form(cfg)
+            _render_knn_form(cfg)
+            _render_category_similarity_form(cfg)
+            _render_zeroshot_form(cfg)
+
+
+def _render_classifier_form(cfg) -> None:
+    c = cfg.classifier
+    types = ["logistic_regression", "random_forest"]
+    st.markdown("**Classifier**")
+    with st.form("settings_classifier"):
+        ctype = st.selectbox(
+            "Type", types,
+            index=types.index(c.type) if c.type in types else 0,
+        )
+        conf = st.number_input(
+            "Confidence threshold (below → flagged for review)",
+            min_value=0.0, max_value=1.0, step=0.01, value=float(c.confidence_threshold),
+        )
+        rf_switch = st.number_input(
+            "Switch to random forest after N labels",
+            min_value=1, step=1, value=int(c.rf_switch_threshold),
+        )
+        retrain = st.number_input(
+            "Retrain after N new labels",
+            min_value=1, step=1, value=int(c.retrain_after_n_new_labels),
+        )
+        if st.form_submit_button("Save classifier", type="primary"):
+            _persist(
+                "classifier",
+                {
+                    "type": ctype,
+                    "confidence_threshold": float(conf),
+                    "rf_switch_threshold": int(rf_switch),
+                    "retrain_after_n_new_labels": int(retrain),
+                },
+                ClassifierConfig,
+            )
+
+
+def _render_vendor_exact_form(cfg) -> None:
+    v = cfg.vendor_exact_match
+    st.markdown("**Vendor exact match**")
+    with st.form("settings_vendor_exact"):
+        enabled = st.toggle("Enabled", value=v.enabled, key="vem_enabled")
+        agree = st.number_input(
+            "Agreement min (fraction of past labels for the vendor that must agree)",
+            min_value=0.0, max_value=1.0, step=0.01, value=float(v.agreement_min),
+        )
+        if st.form_submit_button("Save vendor exact match", type="primary"):
+            _persist(
+                "vendor_exact_match",
+                {"enabled": bool(enabled), "agreement_min": float(agree)},
+                VendorExactMatchConfig,
+            )
+
+
+def _render_knn_form(cfg) -> None:
+    k = cfg.knn
+    st.markdown("**k-NN (embedding neighbours)**")
+    with st.form("settings_knn"):
+        enabled = st.toggle("Enabled", value=k.enabled, key="knn_enabled")
+        kk = st.number_input(
+            "k (neighbours)", min_value=1, max_value=100, step=1, value=int(k.k),
+        )
+        agree = st.number_input(
+            "Agreement min (neighbours that must share the winning category)",
+            min_value=1, max_value=100, step=1, value=int(k.agreement_min),
+        )
+        if st.form_submit_button("Save k-NN", type="primary"):
+            _persist(
+                "knn",
+                {"enabled": bool(enabled), "k": int(kk), "agreement_min": int(agree)},
+                KnnConfig,
+            )
+
+
+def _render_category_similarity_form(cfg) -> None:
+    cs = cfg.category_similarity
+    st.markdown("**Category similarity**")
+    with st.form("settings_category_similarity"):
+        enabled = st.toggle("Enabled", value=cs.enabled, key="catsim_enabled")
+        min_top1 = st.number_input(
+            "Min top-1 cosine", min_value=0.0, max_value=1.0, step=0.01,
+            value=float(cs.min_top1),
+        )
+        min_margin = st.number_input(
+            "Min margin (top1 − top2)", min_value=0.0, max_value=1.0, step=0.01,
+            value=float(cs.min_margin),
+        )
+        use_industry = st.toggle(
+            "Use vendor industry tag", value=cs.use_vendor_industry,
+            key="catsim_industry",
+        )
+        if st.form_submit_button("Save category similarity", type="primary"):
+            _persist(
+                "category_similarity",
+                {
+                    "enabled": bool(enabled),
+                    "min_top1": float(min_top1),
+                    "min_margin": float(min_margin),
+                    "use_vendor_industry": bool(use_industry),
+                },
+                CategorySimilarityConfig,
+            )
+
+
+def _render_zeroshot_form(cfg) -> None:
+    z = cfg.zeroshot
+    st.markdown("**Zero-shot NLI (fallback)**")
+    with st.form("settings_zeroshot"):
+        enabled = st.toggle("Enabled", value=z.enabled, key="zs_enabled")
+        below = st.number_input(
+            "Use when confidence below", min_value=0.0, max_value=1.0, step=0.01,
+            value=float(z.use_when_confidence_below),
+        )
+        if st.form_submit_button("Save zero-shot", type="primary"):
+            _persist(
+                "zeroshot",
+                {"enabled": bool(enabled), "use_when_confidence_below": float(below)},
+                ZeroshotConfig,
             )
 
 

@@ -16,7 +16,7 @@ def test_fresh_db_is_at_current_schema_version(tmp_path: Path) -> None:
             "SELECT value FROM schema_meta WHERE key='schema_version'"
         ).fetchone()["value"]
         # Bump expected version when adding migrations.
-        assert int(v) == 2
+        assert int(v) == 3
     finally:
         conn.close()
 
@@ -44,9 +44,10 @@ def test_latest_label_view_exists(tmp_path: Path) -> None:
         conn.close()
 
 
-def test_v1_to_v2_drops_cluster_id(tmp_path: Path) -> None:
-    """Build an old-style v1 DB by hand (cluster_id present, no view),
-    then run apply_migrations and verify cluster_id is gone."""
+def test_v1_to_latest_drops_cluster_id_and_adds_is_savings(tmp_path: Path) -> None:
+    """Build an old-style v1 DB by hand (cluster_id present, categories
+    without is_savings), run apply_migrations and verify both the v2 drop
+    and the v3 add land."""
     db_path = tmp_path / "old.sqlite"
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
@@ -60,6 +61,13 @@ def test_v1_to_v2_drops_cluster_id(tmp_path: Path) -> None:
             dedup_hash TEXT NOT NULL UNIQUE
         );
         CREATE INDEX idx_expenses_cluster ON expenses(cluster_id);
+        CREATE TABLE categories (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            description TEXT,
+            color TEXT
+        );
+        INSERT INTO categories(name) VALUES ('Sparen'), ('Lebensmittel');
         CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT);
         INSERT INTO schema_meta(key, value) VALUES ('schema_version', '1');
         """
@@ -72,7 +80,7 @@ def test_v1_to_v2_drops_cluster_id(tmp_path: Path) -> None:
     conn.commit()
 
     applied = apply_migrations(conn)
-    assert applied == [2]
+    assert applied == [2, 3]
 
     cols = [r["name"] for r in conn.execute("PRAGMA table_info(expenses)").fetchall()]
     assert "cluster_id" not in cols
@@ -83,7 +91,43 @@ def test_v1_to_v2_drops_cluster_id(tmp_path: Path) -> None:
     v = conn.execute(
         "SELECT value FROM schema_meta WHERE key='schema_version'"
     ).fetchone()["value"]
-    assert int(v) == 2
+    assert int(v) == 3
+
+    # Re-running is a no-op.
+    assert apply_migrations(conn) == []
+    conn.close()
+
+
+def test_v2_to_v3_adds_is_savings_and_backfills_sparen(tmp_path: Path) -> None:
+    """A v2 DB gains the is_savings column; a pre-existing 'Sparen'
+    category is flagged on, others stay off."""
+    db_path = tmp_path / "v2.sqlite"
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE categories (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            description TEXT,
+            color TEXT
+        );
+        INSERT INTO categories(name) VALUES ('Sparen'), ('Lebensmittel');
+        CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT);
+        INSERT INTO schema_meta(key, value) VALUES ('schema_version', '2');
+        """
+    )
+    conn.commit()
+
+    assert apply_migrations(conn) == [3]
+
+    cols = [r["name"] for r in conn.execute("PRAGMA table_info(categories)").fetchall()]
+    assert "is_savings" in cols
+    flags = {
+        r["name"]: int(r["is_savings"])
+        for r in conn.execute("SELECT name, is_savings FROM categories").fetchall()
+    }
+    assert flags == {"Sparen": 1, "Lebensmittel": 0}
 
     # Re-running is a no-op.
     assert apply_migrations(conn) == []
