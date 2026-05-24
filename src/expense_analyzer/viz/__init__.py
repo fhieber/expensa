@@ -1,15 +1,19 @@
 """Visualizations: SQL data views + Plotly chart factories + file export."""
 
 from expense_analyzer.viz.charts import (
+    ablation_cumulative_curve,
+    ablation_leave_one_out_bar,
     bar_spend_by_category,
     bar_top_counterparties,
     calendar_heatmap,
+    confusion_matrix_heatmap,
     histogram_amounts,
     income_vs_expense_chart,
     pie_chart,
     stacked_daily_by_category,
     stacked_monthly_by_category,
     stacked_weekly_by_category,
+    stage_breakdown_bar,
     trend_lines,
 )
 from expense_analyzer.viz.data import (
@@ -38,12 +42,15 @@ CHART_BUILDERS = {
 }
 
 __all__ = [
+    "ablation_cumulative_curve",
+    "ablation_leave_one_out_bar",
     "amount_distribution",
     "anomalies",
     "bar_spend_by_category",
     "bar_top_counterparties",
     "calendar_heatmap",
     "CHART_BUILDERS",
+    "confusion_matrix_heatmap",
     "daily_by_category",
     "daily_calendar",
     "DEFAULT_SAVINGS_CATEGORIES",
@@ -59,6 +66,7 @@ __all__ = [
     "stacked_daily_by_category",
     "stacked_monthly_by_category",
     "stacked_weekly_by_category",
+    "stage_breakdown_bar",
     "top_counterparties",
     "trend_lines",
     "weekly_by_category",

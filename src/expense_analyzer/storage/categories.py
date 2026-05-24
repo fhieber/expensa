@@ -140,20 +140,32 @@ def labeled_ids_with_categories(
 
 
 def vendor_label_distribution(
-    conn: sqlite3.Connection, counterparty_normalized: str
+    conn: sqlite3.Connection,
+    counterparty_normalized: str,
+    restrict_ids: set[int] | None = None,
 ) -> dict[int, int]:
-    """How many user labels each category has received for a given vendor."""
-    rows = conn.execute(
-        """
+    """How many user labels each category has received for a given vendor.
+
+    ``restrict_ids``, if given, limits the count to labels on those
+    expense ids -- used by cross-validation so a held-out test fold's own
+    labels don't leak into the vendor-exact-match stage.
+    """
+    sql = """
         SELECT l.category_id, COUNT(*) AS n
         FROM labels l
         JOIN expenses e ON e.id = l.expense_id
         WHERE l.source = 'user'
           AND e.counterparty_normalized = ?
-        GROUP BY l.category_id
-        """,
-        (counterparty_normalized,),
-    ).fetchall()
+    """
+    params: list = [counterparty_normalized]
+    if restrict_ids is not None:
+        if not restrict_ids:
+            return {}
+        placeholders = ",".join("?" * len(restrict_ids))
+        sql += f"  AND l.expense_id IN ({placeholders})\n"
+        params.extend(sorted(restrict_ids))
+    sql += "        GROUP BY l.category_id"
+    rows = conn.execute(sql, params).fetchall()
     return {int(r["category_id"]): int(r["n"]) for r in rows}
 
 

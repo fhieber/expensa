@@ -706,6 +706,85 @@ def predict(ctx: click.Context, threshold: float | None, dry_run: bool) -> None:
         conn.close()
 
 
+@cli.command("eval")
+@click.option("--folds", type=int, default=5, show_default=True,
+              help="Number of cross-validation folds.")
+@click.option("--seed", type=int, default=0, show_default=True)
+@click.option("--ablation/--no-ablation", "do_ablation", default=True,
+              help="Also run cumulative + leave-one-out stage ablation.")
+@click.option("--no-zeroshot", is_flag=True,
+              help="Skip the slow zero-shot NLI stage during evaluation.")
+@click.pass_context
+def evaluate(
+    ctx: click.Context, folds: int, seed: int, do_ablation: bool, no_zeroshot: bool
+) -> None:
+    """Cross-validate the cascade on user labels and report quality metrics."""
+    cfg: Config = ctx.obj[_CTX_KEY]["config"]
+    if no_zeroshot:
+        cfg.zeroshot.enabled = False
+    conn = _connect(cfg)
+    try:
+        from expense_analyzer.ml.evaluation import ablation, cross_validate
+        from expense_analyzer.storage.categories import list_categories
+
+        click.echo(f"loading embedding model `{cfg.embedding_model}`...")
+        emb = _embedder(cfg)
+        click.echo(f"cross-validating ({folds} folds)...")
+        result = cross_validate(conn, cfg, emb, n_folds=folds, seed=seed)
+
+        if result.n_folds == 0:
+            click.echo(result.notes or "not enough labeled data to evaluate")
+            return
+
+        id_to_name = {c.id: c.name for c in list_categories(conn)}
+        click.echo(
+            f"\nlabels evaluated: {result.n_labeled} · folds: {result.n_folds}"
+        )
+        if result.dropped_singletons:
+            click.echo(
+                f"  ({result.dropped_singletons} dropped: category had <2 examples)"
+            )
+        click.echo(
+            f"accuracy={result.accuracy:.3f} "
+            f"accuracy_covered={result.accuracy_covered:.3f} "
+            f"coverage={result.coverage:.3f}"
+        )
+        click.echo(
+            f"macro_f1={result.macro_f1:.3f} weighted_f1={result.weighted_f1:.3f}"
+        )
+
+        click.echo("\nper-stage contribution (coverage / accuracy):")
+        for s in result.stage_breakdown:
+            click.echo(
+                f"  {s.stage:<20} fired={s.n_predicted:<4} "
+                f"correct={s.n_correct:<4} acc={s.accuracy:.3f}"
+            )
+
+        click.echo("\nper-category (precision / recall / f1 / support):")
+        for pc in result.per_category:
+            name = id_to_name.get(pc.category_id, str(pc.category_id))
+            click.echo(
+                f"  {name:<24} P={pc.precision:.3f} R={pc.recall:.3f} "
+                f"F1={pc.f1:.3f} n={pc.support}"
+            )
+
+        if do_ablation:
+            click.echo("\nrunning stage ablation...")
+            abl = ablation(conn, cfg, emb, n_folds=folds, seed=seed)
+            click.echo("cumulative stages (accuracy / macro_f1):")
+            for label, acc, f1 in abl.cumulative:
+                click.echo(f"  {label:<60} acc={acc:.3f} f1={f1:.3f}")
+            click.echo(
+                f"leave-one-out (full accuracy={abl.full_accuracy:.3f}):"
+            )
+            for stage, acc, _f1, delta in abl.leave_one_out:
+                click.echo(
+                    f"  without {stage:<20} acc={acc:.3f} (Δ={delta:+.3f})"
+                )
+    finally:
+        conn.close()
+
+
 # --- viz ---------------------------------------------------------------------
 
 @cli.command()
