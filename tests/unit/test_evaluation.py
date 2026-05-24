@@ -62,7 +62,13 @@ def test_cross_validate_populates_result(
     assert result.n_folds == 2
     assert 0.0 <= result.accuracy <= 1.0
     assert 0.0 <= result.macro_f1 <= 1.0
+    assert 0.0 <= result.weighted_f1 <= 1.0
     assert 0.0 <= result.coverage <= 1.0
+    # Accuracy-among-covered is >= overall accuracy (abstentions only hurt
+    # the latter), and NaN only when nothing was predicted.
+    if result.coverage > 0:
+        assert 0.0 <= result.accuracy_covered <= 1.0
+        assert result.accuracy_covered + 1e-9 >= result.accuracy
     assert result.per_category
     assert result.confusion.shape == (
         len(result.confusion_labels),

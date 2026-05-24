@@ -746,8 +746,11 @@ def evaluate(
             )
         click.echo(
             f"accuracy={result.accuracy:.3f} "
-            f"macro_f1={result.macro_f1:.3f} "
+            f"accuracy_covered={result.accuracy_covered:.3f} "
             f"coverage={result.coverage:.3f}"
+        )
+        click.echo(
+            f"macro_f1={result.macro_f1:.3f} weighted_f1={result.weighted_f1:.3f}"
         )
 
         click.echo("\nper-stage contribution (coverage / accuracy):")

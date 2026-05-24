@@ -70,8 +70,10 @@ def render() -> None:
         )
         return
 
-    max_per_class = max(int(r["n"]) for r in labeled if int(r["n"]) >= 2)
-    fold_cap = max(2, min(10, max_per_class))
+    # Stratified k-fold is bounded by the SMALLEST eligible class: each
+    # class needs at least one example per fold to appear in every split.
+    min_eligible_class = min(int(r["n"]) for r in labeled if int(r["n"]) >= 2)
+    fold_cap = max(2, min(10, min_eligible_class))
 
     c1, c2, c3 = st.columns([2, 1, 2])
     with c1:
@@ -158,12 +160,20 @@ def _render_results(result, abl, id_to_name: dict[int, str]) -> None:
         st.warning(result.notes or "Not enough labeled data per category.")
         return
 
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Accuracy", f"{result.accuracy:.1%}")
-    m2.metric("Macro-F1", f"{result.macro_f1:.2f}")
-    m3.metric("Coverage", f"{result.coverage:.1%}")
-    m4.metric("Labels evaluated", f"{result.n_labeled}")
+    covered = (
+        "—" if result.accuracy_covered != result.accuracy_covered  # NaN guard
+        else f"{result.accuracy_covered:.1%}"
+    )
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Accuracy", f"{result.accuracy:.1%}", help="Over all held-out rows; abstentions count as errors.")
+    m2.metric("Accuracy (covered)", covered, help="Over only the rows the cascade actually predicted (excludes abstentions).")
+    m3.metric("Coverage", f"{result.coverage:.1%}", help="Fraction of rows that got a concrete prediction (vs. abstaining).")
+    m4, m5, m6 = st.columns(3)
+    m4.metric("Macro-F1", f"{result.macro_f1:.2f}", help="Unweighted mean of per-category F1 — surfaces weak rare categories.")
+    m5.metric("Weighted-F1", f"{result.weighted_f1:.2f}", help="Per-category F1 weighted by support — closer to the overall hit rate.")
+    m6.metric("Labels evaluated", f"{result.n_labeled}")
 
+    st.caption(f"{result.n_folds}-fold stratified cross-validation.")
     if result.dropped_singletons:
         st.caption(
             f"{result.dropped_singletons} label(s) excluded: their category "

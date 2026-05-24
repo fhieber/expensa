@@ -58,7 +58,9 @@ class EvalResult:
     n_labeled: int
     n_folds: int
     accuracy: float
+    accuracy_covered: float  # accuracy over rows that got a concrete prediction
     macro_f1: float
+    weighted_f1: float
     coverage: float  # fraction of test rows that got a concrete prediction
     per_category: list[PerCategory]
     confusion: np.ndarray  # (C, C) rows=true, cols=pred, over confusion_labels
@@ -154,7 +156,9 @@ def cross_validate(
             n_labeled=n_labeled,
             n_folds=0,
             accuracy=float("nan"),
+            accuracy_covered=float("nan"),
             macro_f1=float("nan"),
+            weighted_f1=float("nan"),
             coverage=0.0,
             per_category=[],
             confusion=np.zeros((0, 0), dtype=np.int64),
@@ -190,12 +194,23 @@ def cross_validate(
 
     cat_labels = sorted(set(y_true.tolist()))
     accuracy = float(accuracy_score(y_true, y_pred))
-    # Macro-F1 over the real categories only; abstentions (pred -1) lower a
-    # category's recall but don't form their own spurious class.
+    # F1 over the real categories only; abstentions (pred -1) lower a
+    # category's recall but don't form their own spurious class. Macro
+    # weights every category equally (surfaces weak rare classes); weighted
+    # weights by support (closer to the overall hit rate).
     macro_f1 = float(
         f1_score(y_true, y_pred, labels=cat_labels, average="macro", zero_division=0)
     )
-    coverage = float(np.mean([r[2] is not None for r in records])) if records else 0.0
+    weighted_f1 = float(
+        f1_score(y_true, y_pred, labels=cat_labels, average="weighted", zero_division=0)
+    )
+    covered = [r for r in records if r[2] is not None]
+    coverage = (len(covered) / len(records)) if records else 0.0
+    # Accuracy among rows the cascade actually predicted -- separates model
+    # correctness from abstention so a low-coverage run isn't read as wrong.
+    accuracy_covered = (
+        sum(r[4] for r in covered) / len(covered) if covered else float("nan")
+    )
 
     confusion = confusion_matrix(y_true, y_pred, labels=cat_labels)
     prec, rec, f1, support = precision_recall_fscore_support(
@@ -218,7 +233,9 @@ def cross_validate(
         n_labeled=n_labeled,
         n_folds=len(folds),
         accuracy=accuracy,
+        accuracy_covered=accuracy_covered,
         macro_f1=macro_f1,
+        weighted_f1=weighted_f1,
         coverage=coverage,
         per_category=per_category,
         confusion=confusion,
