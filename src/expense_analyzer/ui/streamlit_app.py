@@ -24,6 +24,7 @@ from expense_analyzer.ui import (
     categories_tab,
     dashboard,
     data_tab,
+    eval_tab,
     review_tab,
     settings,
 )
@@ -338,8 +339,8 @@ def _render_header() -> None:
 _render_account_picker()
 _render_header()
 
-tab_dash, tab_review, tab_data, tab_cats, tab_settings = st.tabs(
-    ["Dashboard", "Review", "Data", "Categories", "Settings"]
+tab_dash, tab_review, tab_data, tab_cats, tab_quality, tab_settings = st.tabs(
+    ["Dashboard", "Review", "Data", "Categories", "Quality", "Settings"]
 )
 
 # Render order matches tab order so a future side-effect from an
@@ -353,6 +354,8 @@ with tab_data:
     data_tab.render()
 with tab_cats:
     categories_tab.render()
+with tab_quality:
+    eval_tab.render()
 with tab_settings:
     settings.render()
 

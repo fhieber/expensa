@@ -301,3 +301,111 @@ def stacked_weekly_by_category(
     fig.update_layout(barmode="stack", legend_title_text="Kategorie")
     _hide_traces(fig, hidden_categories)
     return fig
+
+
+# ---------------------------------------------------------------------------
+# Model-quality / evaluation charts (consumed by the Quality tab + CLI).
+# These take plain Python/numpy inputs (not the SQL DataFrames above) since
+# they render the output of expense_analyzer.ml.evaluation.
+# ---------------------------------------------------------------------------
+
+
+def confusion_matrix_heatmap(matrix, labels: list[str]) -> go.Figure:
+    """Annotated confusion heatmap. ``labels`` are category names in the
+    same order as the rows/cols of ``matrix`` (rows=true, cols=predicted)."""
+    import numpy as np
+
+    mat = np.asarray(matrix)
+    if mat.size == 0:
+        return go.Figure(layout={"title": "Confusion matrix (no data)"})
+    fig = px.imshow(
+        mat,
+        x=labels,
+        y=labels,
+        text_auto=True,
+        color_continuous_scale="Blues",
+        labels={"x": "Predicted", "y": "True", "color": "Count"},
+        title="Confusion matrix",
+    )
+    fig.update_xaxes(side="bottom")
+    return fig
+
+
+def stage_breakdown_bar(stage_breakdown) -> go.Figure:
+    """Per-stage coverage (how many rows each stage fired on) and accuracy
+    among those rows. ``stage_breakdown`` is a list of
+    ``ml.evaluation.StageBreakdown``."""
+    if not stage_breakdown:
+        return go.Figure(layout={"title": "Stage breakdown (no data)"})
+    stages = [s.stage for s in stage_breakdown]
+    fig = go.Figure()
+    fig.add_bar(
+        x=stages,
+        y=[s.n_predicted for s in stage_breakdown],
+        name="Predicted (coverage)",
+        marker_color="#4C78A8",
+    )
+    fig.add_bar(
+        x=stages,
+        y=[s.n_correct for s in stage_breakdown],
+        name="Correct",
+        marker_color="#54A24B",
+    )
+    fig.add_scatter(
+        x=stages,
+        y=[s.accuracy for s in stage_breakdown],
+        name="Accuracy",
+        yaxis="y2",
+        mode="lines+markers",
+        marker_color="#E45756",
+    )
+    fig.update_layout(
+        title="Per-stage contribution",
+        barmode="group",
+        yaxis=dict(title="Rows"),
+        yaxis2=dict(
+            title="Accuracy", overlaying="y", side="right", range=[0, 1.05]
+        ),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+    )
+    return fig
+
+
+def ablation_cumulative_curve(points) -> go.Figure:
+    """Accuracy + macro-F1 as stages are added cumulatively. ``points`` is a
+    list of ``(label, accuracy, macro_f1)``."""
+    if not points:
+        return go.Figure(layout={"title": "Cumulative ablation (no data)"})
+    labels = [p[0] for p in points]
+    fig = go.Figure()
+    fig.add_scatter(
+        x=labels, y=[p[1] for p in points], name="Accuracy", mode="lines+markers"
+    )
+    fig.add_scatter(
+        x=labels, y=[p[2] for p in points], name="Macro-F1", mode="lines+markers"
+    )
+    fig.update_layout(
+        title="Cumulative stages enabled",
+        xaxis=dict(title="Stages", tickangle=-30),
+        yaxis=dict(title="Score", range=[0, 1.05]),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+    )
+    return fig
+
+
+def ablation_leave_one_out_bar(deltas) -> go.Figure:
+    """Accuracy delta when each stage is removed from the full cascade.
+    ``deltas`` is a list of ``(stage, accuracy, macro_f1, delta_vs_full)``;
+    a negative delta means removing the stage *hurt* (the stage matters)."""
+    if not deltas:
+        return go.Figure(layout={"title": "Leave-one-out ablation (no data)"})
+    stages = [d[0] for d in deltas]
+    vals = [d[3] for d in deltas]
+    colors = ["#E45756" if v < 0 else "#54A24B" for v in vals]
+    fig = go.Figure(go.Bar(x=stages, y=vals, marker_color=colors))
+    fig.update_layout(
+        title="Accuracy change when a stage is removed",
+        xaxis=dict(title="Removed stage", tickangle=-30),
+        yaxis=dict(title="Δ accuracy vs. full cascade"),
+    )
+    return fig

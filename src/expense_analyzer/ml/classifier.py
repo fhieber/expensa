@@ -89,11 +89,14 @@ def _build_x(df, embeddings: np.ndarray) -> np.ndarray:
 
 
 def _vendor_exact_match(
-    conn: sqlite3.Connection, counterparty_normalized: str, agreement_min: float
+    conn: sqlite3.Connection,
+    counterparty_normalized: str,
+    agreement_min: float,
+    restrict_ids: set[int] | None = None,
 ) -> tuple[int, float] | None:
     if not counterparty_normalized:
         return None
-    dist = vendor_label_distribution(conn, counterparty_normalized)
+    dist = vendor_label_distribution(conn, counterparty_normalized, restrict_ids=restrict_ids)
     total = sum(dist.values())
     if total == 0:
         return None
@@ -128,16 +131,34 @@ def _knn_vote(
 class CategorizationCascade:
     """Glue holding all stages plus the trained sklearn model."""
 
-    def __init__(self, conn: sqlite3.Connection, config: Config, embedder: Embedder) -> None:
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        config: Config,
+        embedder: Embedder,
+        train_ids: set[int] | None = None,
+    ) -> None:
         self.conn = conn
         self.cfg = config
         self.embedder = embedder
+        # When set, every label read (classifier fit, kNN neighbours,
+        # vendor-exact-match) is restricted to these expense ids. Used by
+        # cross-validation to keep a held-out fold's own labels invisible.
+        self._train_ids = train_ids
         self._sk = None  # sklearn pipeline
         self._classes_: np.ndarray | None = None
         self._feature_dim: int | None = None
         self._zs = None  # zeroshot pipeline (lazy)
         # Category-similarity stage cache: (cat_ids, embedding_matrix)
         self._cat_emb_cache: tuple[np.ndarray, np.ndarray] | None = None
+
+    def _user_labels(self) -> list[tuple[int, int]]:
+        """User labels (expense_id, category_id), restricted to
+        ``self._train_ids`` when a training whitelist is set."""
+        labels = labeled_ids_with_categories(self.conn, source="user")
+        if self._train_ids is not None:
+            labels = [(eid, cid) for eid, cid in labels if eid in self._train_ids]
+        return labels
 
     # ---- category similarity (zero-shot via embeddings) -----------------
 
@@ -249,7 +270,7 @@ class CategorizationCascade:
         if self.cfg.category_similarity.enabled:
             self._populate_category_embeddings()
 
-        labels = labeled_ids_with_categories(self.conn, source="user")
+        labels = self._user_labels()
         if len(labels) < 2:
             return FitReport(
                 n_train=len(labels),
@@ -328,7 +349,7 @@ class CategorizationCascade:
             return []
         df, emb = build_full_features(self.conn, embedder=self.embedder, expense_ids=list(expense_ids))
         # Build the labeled-set view for k-NN
-        labels = labeled_ids_with_categories(self.conn, source="user")
+        labels = self._user_labels()
         train_ids_arr = np.array([eid for eid, _ in labels], dtype=np.int64)
         train_y = np.array([cid for _, cid in labels], dtype=np.int64)
         if len(train_ids_arr) > 0:
@@ -394,6 +415,7 @@ class CategorizationCascade:
                         self.conn,
                         str(row.get("counterparty_normalized") or ""),
                         self.cfg.vendor_exact_match.agreement_min,
+                        restrict_ids=self._train_ids,
                     )
                     if hit:
                         cid, agreement = hit
@@ -417,7 +439,7 @@ class CategorizationCascade:
                         continue
 
                 # Stage 3: supervised classifier
-                if self._sk is not None:
+                if self.cfg.classifier.enabled and self._sk is not None:
                     if X_cache is None:
                         X_cache = _build_x(df, emb)
                     target_pos = list(df.index).index(eid)

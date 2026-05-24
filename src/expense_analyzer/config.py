@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field, field_validator
 
 
 class ClassifierConfig(BaseModel):
+    enabled: bool = True
     type: Literal["logistic_regression", "random_forest"] = "logistic_regression"
     rf_switch_threshold: int = 200
     confidence_threshold: float = 0.7

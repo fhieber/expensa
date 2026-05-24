@@ -112,6 +112,42 @@ def test_train_with_mocked_embedder(tmp_path: Path, fixtures_dir: Path) -> None:
     assert "trained" in r.output
 
 
+def test_eval_with_mocked_embedder(tmp_path: Path, fixtures_dir: Path) -> None:
+    """`expense eval` runs CV on user labels with the HashEmbedder."""
+    runner = CliRunner()
+    runner.invoke(cli, ["init"], env=_runner_env(tmp_path))
+    runner.invoke(
+        cli, ["ingest", "--no-embed", str(fixtures_dir / "sample_de.csv")],
+        env=_runner_env(tmp_path),
+    )
+    import sqlite3
+
+    conn = sqlite3.connect(str(tmp_path / "db.sqlite"))
+    # Two categories, three labels each -> 2-fold stratifiable.
+    for eid in (1, 2, 3):
+        conn.execute(
+            "INSERT INTO labels(expense_id, category_id, source) VALUES (?, 1, 'user')",
+            (eid,),
+        )
+    for eid in (4, 5, 6):
+        conn.execute(
+            "INSERT INTO labels(expense_id, category_id, source) VALUES (?, 2, 'user')",
+            (eid,),
+        )
+    conn.commit()
+    conn.close()
+
+    with patch("expense_analyzer.cli._embedder", return_value=HashEmbedder(dim=64)):
+        r = runner.invoke(
+            cli,
+            ["eval", "--folds", "2", "--no-zeroshot", "--no-ablation"],
+            env=_runner_env(tmp_path),
+        )
+    assert r.exit_code == 0, r.output
+    assert "accuracy=" in r.output
+    assert "per-stage contribution" in r.output
+
+
 def test_vendor_lookup_disabled_message(tmp_path: Path) -> None:
     runner = CliRunner()
     runner.invoke(cli, ["init"], env=_runner_env(tmp_path))

@@ -200,6 +200,7 @@ _TAB_STATE_PREFIXES = (
     "cat_",
     "data_",
     "review_",
+    "eval_",
     "own_iban_",
     "new_own_iban_",
     "confirm_",

@@ -116,3 +116,36 @@ def test_chart_factories_handle_empty_db(tmp_db: sqlite3.Connection) -> None:
     assert isinstance(fig, go.Figure)
     fig = trend_lines(monthly_flow_by_category(tmp_db))
     assert isinstance(fig, go.Figure)
+
+
+def test_evaluation_chart_factories() -> None:
+    """The evaluation charts return Figures for synthetic inputs and for
+    empty inputs (no crash)."""
+    import numpy as np
+
+    from expense_analyzer.ml.evaluation import StageBreakdown
+    from expense_analyzer.viz import (
+        ablation_cumulative_curve,
+        ablation_leave_one_out_bar,
+        confusion_matrix_heatmap,
+        stage_breakdown_bar,
+    )
+
+    cm = np.array([[3, 1], [0, 4]])
+    assert isinstance(confusion_matrix_heatmap(cm, ["A", "B"]), go.Figure)
+    assert isinstance(confusion_matrix_heatmap(np.zeros((0, 0)), []), go.Figure)
+
+    breakdown = [
+        StageBreakdown("vendor_exact_match", 5, 5, 1.0),
+        StageBreakdown("knn", 3, 2, 2 / 3),
+    ]
+    assert isinstance(stage_breakdown_bar(breakdown), go.Figure)
+    assert isinstance(stage_breakdown_bar([]), go.Figure)
+
+    cumulative = [("vendor_exact_match", 0.5, 0.4), ("vendor_exact_match+knn", 0.7, 0.6)]
+    assert isinstance(ablation_cumulative_curve(cumulative), go.Figure)
+    assert isinstance(ablation_cumulative_curve([]), go.Figure)
+
+    loo = [("knn", 0.6, 0.5, -0.1), ("classifier", 0.72, 0.6, 0.02)]
+    assert isinstance(ablation_leave_one_out_bar(loo), go.Figure)
+    assert isinstance(ablation_leave_one_out_bar([]), go.Figure)
