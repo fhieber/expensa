@@ -1,0 +1,6 @@
+"Buchungsdatum";"Wertstellung";"Status";"Zahlungspflichtige*r";"Zahlungsempfänger*in";"Verwendungszweck";"Umsatztyp";"IBAN";"Betrag (€)";"Gläubiger-ID";"Mandatsreferenz";"Kundenreferenz"
+"05.03.2026";"05.03.2026";"Gebucht";"";"PayPal Europe";"PP.1234.PP Ihr Einkauf 99887766";"Lastschrift";"LU96ZZZPP0000000000";"-19,80";"LU96ZZZ0000000058";"MR-PP-1";""
+"10.03.2026";"10.03.2026";"Gebucht";"";"PayPal Europe";"PP.5678.PP Ihr Einkauf 11223344";"Lastschrift";"LU96ZZZPP0000000000";"-45,00";"LU96ZZZ0000000058";"MR-PP-2";""
+"12.03.2026";"12.03.2026";"Gebucht";"";"PayPal Europe";"PP.9999.PP Ihr Einkauf 55667788";"Lastschrift";"LU96ZZZPP0000000000";"-50,00";"LU96ZZZ0000000058";"MR-PP-3";""
+"15.03.2026";"15.03.2026";"Gebucht";"";"REWE Markt GmbH";"REWE Lebensmittel";"Kartenzahlung";"DE21701500000000123456";"-30,00";"";"";""
+"20.03.2026";"20.03.2026";"Gebucht";"";"PayPal Europe";"PP.0000.PP Ihr Einkauf 00001111";"Lastschrift";"LU96ZZZPP0000000000";"-99,99";"LU96ZZZ0000000058";"MR-PP-5";""

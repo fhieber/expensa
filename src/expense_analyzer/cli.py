@@ -653,12 +653,23 @@ def reset(ctx: click.Context, wipe_all: bool, yes: bool) -> None:
 @click.argument("csvs", nargs=-1, type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("--no-embed", is_flag=True,
               help="Skip computing embeddings for new rows. They'll be computed lazily later.")
+@click.option("--enrich", "enrich_csvs", multiple=True,
+              type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              help="Secondary-source CSV(s) (e.g. a PayPal activity export) to "
+                   "match against the ingested rows and enrich. Source auto-detected.")
 @click.pass_context
-def ingest(ctx: click.Context, csvs: tuple[Path, ...], no_embed: bool) -> None:
+def ingest(
+    ctx: click.Context,
+    csvs: tuple[Path, ...],
+    no_embed: bool,
+    enrich_csvs: tuple[Path, ...],
+) -> None:
     """Ingest one or more German bank-export CSVs (dedup-aware).
 
     By default also computes sentence-transformer embeddings for every newly
-    inserted row, so downstream label/predict commands are fast.
+    inserted row, so downstream label/predict commands are fast. Pass
+    ``--enrich`` with a secondary CSV (e.g. PayPal) to enrich matched rows in
+    the same run.
     """
     if not csvs:
         click.echo("no files given", err=True)
@@ -680,6 +691,59 @@ def ingest(ctx: click.Context, csvs: tuple[Path, ...], no_embed: bool) -> None:
                 f"{r.file:<40} parsed={r.parsed:>4}  new={r.inserted:>4}  "
                 f"duplicate={r.duplicates:>4}  embedded={r.embedded:>4}"
             )
+
+        for path in enrich_csvs:
+            _run_enrich(conn, cfg, path, source="auto", embedder=emb)
+    finally:
+        conn.close()
+
+
+def _run_enrich(conn, cfg: Config, path: Path, source: str, embedder) -> None:
+    """Resolve an adapter for ``path``, parse it, run the enrichment engine
+    and echo a one-line report. Shared by ``ingest --enrich`` and ``enrich``."""
+    from expense_analyzer.enrichment.secondary import enrich_from_records
+    from expense_analyzer.ingestion.sources import detect_adapter, get_adapter
+
+    adapter = get_adapter(source) if source != "auto" else detect_adapter(path)
+    records = adapter.parse(path)
+    rep = enrich_from_records(
+        conn, records, adapter, embedder=embedder,
+        date_window_days=cfg.enrichment.date_window_days,
+    )
+    click.echo(
+        f"{path.name:<40} source={rep.source}  parsed={rep.parsed:>4}  "
+        f"matched={rep.matched:>4}  ambiguous={rep.ambiguous:>4}  "
+        f"unmatched={rep.unmatched_expenses:>4}  reembedded={rep.reembedded:>4}"
+    )
+
+
+@cli.command()
+@click.argument("csvs", nargs=-1, type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--source", default="auto",
+              help="Secondary-source adapter name (e.g. 'paypal') or 'auto' to detect.")
+@click.option("--no-embed", is_flag=True,
+              help="Skip re-embedding enriched rows. Their combined_text is still updated.")
+@click.pass_context
+def enrich(ctx: click.Context, csvs: tuple[Path, ...], source: str, no_embed: bool) -> None:
+    """Enrich already-ingested expenses from a secondary CSV.
+
+    A secondary source (e.g. a PayPal "Aktivitäten" export) is matched to the
+    bank transactions already in the DB by amount + nearby date; the matched
+    expense gets the real merchant/item and is re-embedded so categorization
+    improves. Re-running is idempotent.
+    """
+    if not csvs:
+        click.echo("no files given", err=True)
+        ctx.exit(2)
+    cfg: Config = ctx.obj[_CTX_KEY]["config"]
+    conn = _connect(cfg)
+    try:
+        emb = None
+        if not no_embed:
+            click.echo(f"loading embedding model `{cfg.embedding_model}`...")
+            emb = _embedder(cfg)
+        for path in csvs:
+            _run_enrich(conn, cfg, path, source=source, embedder=emb)
     finally:
         conn.close()
 

@@ -247,6 +247,48 @@ def test_vendor_clear_single_and_all(tmp_path: Path) -> None:
     assert "empty" in r3.output.lower()
 
 
+def test_enrich_command_reports_matches(tmp_path: Path, fixtures_dir: Path) -> None:
+    runner = CliRunner()
+    runner.invoke(cli, ["init"], env=_runner_env(tmp_path))
+    runner.invoke(
+        cli, ["ingest", "--no-embed", str(fixtures_dir / "sample_de_paypal.csv")],
+        env=_runner_env(tmp_path),
+    )
+    r = runner.invoke(
+        cli,
+        ["enrich", "--no-embed", "--source", "paypal",
+         str(fixtures_dir / "sample_paypal.csv")],
+        env=_runner_env(tmp_path),
+    )
+    assert r.exit_code == 0, r.output
+    assert "source=paypal" in r.output
+    assert "matched=   2" in r.output
+
+
+def test_ingest_with_enrich_flag(tmp_path: Path, fixtures_dir: Path) -> None:
+    runner = CliRunner()
+    runner.invoke(cli, ["init"], env=_runner_env(tmp_path))
+    r = runner.invoke(
+        cli,
+        ["ingest", "--no-embed",
+         "--enrich", str(fixtures_dir / "sample_paypal.csv"),
+         str(fixtures_dir / "sample_de_paypal.csv")],
+        env=_runner_env(tmp_path),
+    )
+    assert r.exit_code == 0, r.output
+    assert "matched=   2" in r.output
+    # The Etsy line is enriched in the same run.
+    import sqlite3
+
+    conn = sqlite3.connect(str(tmp_path / "db.sqlite"))
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT enriched_counterparty FROM expenses WHERE betrag_cents = -1980"
+    ).fetchone()
+    conn.close()
+    assert row["enriched_counterparty"] == "Etsy Inc"
+
+
 def test_vendor_lookup_disabled_message(tmp_path: Path) -> None:
     runner = CliRunner()
     runner.invoke(cli, ["init"], env=_runner_env(tmp_path))

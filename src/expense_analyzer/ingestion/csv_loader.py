@@ -16,9 +16,24 @@ from __future__ import annotations
 
 import csv
 from dataclasses import dataclass
-from datetime import date, datetime
-from decimal import Decimal, InvalidOperation
+from datetime import date
+from decimal import Decimal
 from pathlib import Path
+
+from expense_analyzer.ingestion._parsing import (
+    CsvParseError,
+    detect_encoding as _detect_encoding,
+    parse_german_amount as _parse_amount,
+    parse_german_date as _parse_date,
+)
+
+# Re-exported for backward compatibility with existing imports/tests.
+__all__ = [
+    "EXPECTED_HEADERS",
+    "ParsedRow",
+    "CsvParseError",
+    "parse_csv",
+]
 
 # The canonical headers we expect, after lowercasing + ASCII-folding the asterisks/umlauts.
 EXPECTED_HEADERS = [
@@ -35,10 +50,6 @@ EXPECTED_HEADERS = [
     "mandatsreferenz",
     "kundenreferenz",
 ]
-
-
-# Encodings to try, in order. The first that decodes the whole file wins.
-_ENCODINGS = ["utf-8-sig", "utf-8", "cp1252", "latin-1"]
 
 
 @dataclass(frozen=True)
@@ -65,22 +76,6 @@ class ParsedRow:
         return int((self.betrag * 100).to_integral_value())
 
 
-class CsvParseError(ValueError):
-    """Unrecoverable problem parsing a CSV row."""
-
-
-def _detect_encoding(path: Path) -> str:
-    """Try encodings until one decodes the entire file."""
-    raw = path.read_bytes()
-    for enc in _ENCODINGS:
-        try:
-            raw.decode(enc)
-            return enc
-        except UnicodeDecodeError:
-            continue
-    raise CsvParseError(f"Could not decode {path} with any of {_ENCODINGS}")
-
-
 def _normalize_header(h: str) -> str:
     """Map the German header (with umlauts and asterisks) to a Python-friendly key."""
     s = h.strip().lower()
@@ -89,41 +84,6 @@ def _normalize_header(h: str) -> str:
     s = s.replace(" (€)", "").replace("(€)", "").strip()
     s = s.replace("-", "_").replace(" ", "_")
     return s
-
-
-def _parse_amount(raw: str) -> Decimal:
-    """German format: '1.234,56' or '-12,34' -> Decimal."""
-    if raw is None or raw == "":
-        raise CsvParseError("empty amount")
-    s = raw.strip().replace(".", "").replace(",", ".")
-    try:
-        return Decimal(s)
-    except InvalidOperation as e:
-        raise CsvParseError(f"bad amount {raw!r}") from e
-
-
-def _parse_date(raw: str) -> date | None:
-    """Parse a date cell. Supports the formats actually emitted by German
-    bank exports:
-
-      * ``DD.MM.YYYY``  -- canonical 4-digit form (e.g. ``08.05.2026``)
-      * ``DD.MM.YY``    -- 2-digit form (e.g. ``08.05.26``); see below
-      * ``YYYY-MM-DD``  -- ISO, occasionally emitted
-      * ``DD/MM/YYYY``  -- slash variant
-
-    The 2-digit ``%y`` directive follows POSIX: 00-68 → 2000-2068,
-    69-99 → 1969-1999. That covers any realistic bank transaction we'll
-    see.
-    """
-    if not raw or not raw.strip():
-        return None
-    s = raw.strip()
-    for fmt in ("%d.%m.%Y", "%d.%m.%y", "%Y-%m-%d", "%d/%m/%Y", "%d/%m/%y"):
-        try:
-            return datetime.strptime(s, fmt).date()
-        except ValueError:
-            continue
-    raise CsvParseError(f"bad date {raw!r}")
 
 
 def _find_header_index(reader_rows: list[list[str]]) -> int:

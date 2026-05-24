@@ -192,6 +192,15 @@ def _show_inspect_dialog(eid: int) -> None:
     meta_cols[1].write(f"**IBAN:** {full_dict.get('iban') or '—'}")
     meta_cols[2].write(f"**Umsatztyp:** {full_dict.get('umsatztyp') or '—'}")
 
+    if full_dict.get("enriched_counterparty"):
+        src = full_dict.get("enrichment_source") or "secondary source"
+        st.markdown(f"**Enriched from `{src}`**")
+        enr_cols = st.columns(2)
+        enr_cols[0].write(f"**Merchant:** {full_dict.get('enriched_counterparty')}")
+        enr_cols[1].write(f"**Reference:** {full_dict.get('enrichment_ref') or '—'}")
+        if full_dict.get("enriched_description"):
+            st.caption(f"Detail: {full_dict['enriched_description']}")
+
     note = get_note(conn, eid) or ""
     new_note = st.text_area("Note", value=note, key=f"inspect_note_{eid}")
     btn_cols = st.columns([1, 1, 4])
@@ -292,10 +301,19 @@ def _render_import_expander(conn) -> None:
             "CSV file(s)", accept_multiple_files=True, type=["csv"],
             key="data_import_files",
         )
-        ingest_clicked = st.button(
-            "Ingest", type="primary", disabled=not files, key="data_ingest_btn",
+        enrich_files = st.file_uploader(
+            "Enrichment CSV(s) — optional (e.g. PayPal activity export)",
+            accept_multiple_files=True, type=["csv"],
+            key="data_enrich_files",
+            help="A secondary CSV describing the same transactions with more "
+                 "detail. Matched to bank rows by amount + nearby date; the "
+                 "real merchant/item is attached and the row re-embedded.",
         )
-        if ingest_clicked and files:
+        ingest_clicked = st.button(
+            "Ingest", type="primary", disabled=not (files or enrich_files),
+            key="data_ingest_btn",
+        )
+        if ingest_clicked and (files or enrich_files):
             emb = get_embedder()
             new_ids: list[int] = []
             with st.status("Importing…", expanded=True) as status:
@@ -326,6 +344,7 @@ def _render_import_expander(conn) -> None:
                         f"{f.name}: parsed={r.parsed} · new={r.inserted} · "
                         f"duplicate={r.duplicates} · embedded={r.embedded}"
                     )
+                _run_ui_enrichment(conn, enrich_files, emb, status)
                 progress.empty()
                 status.update(
                     label=f"Imported {len(new_ids)} new row(s).",
@@ -334,8 +353,36 @@ def _render_import_expander(conn) -> None:
             if new_ids:
                 st.session_state["data_pinned_ids"] = new_ids
                 st.rerun()
-            else:
+            elif files:
                 st.info("Nothing new — all records were duplicates.")
+
+
+def _run_ui_enrichment(conn, enrich_files, emb, status) -> None:
+    """Match each uploaded secondary CSV against existing expenses and
+    enrich. Source is auto-detected per file."""
+    if not enrich_files:
+        return
+    from expense_analyzer.enrichment.secondary import enrich_from_records
+    from expense_analyzer.ingestion.sources import detect_adapter
+
+    cfg = get_config()
+    for f in enrich_files:
+        with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tmp:
+            tmp.write(f.read())
+            p = Path(tmp.name)
+        try:
+            adapter = detect_adapter(p)
+            records = adapter.parse(p)
+            rep = enrich_from_records(
+                conn, records, adapter, embedder=emb,
+                date_window_days=cfg.enrichment.date_window_days,
+            )
+            status.write(
+                f"{f.name}: enriched via {rep.source} · matched={rep.matched} · "
+                f"ambiguous={rep.ambiguous} · unmatched={rep.unmatched_expenses}"
+            )
+        except Exception as e:  # noqa: BLE001 - surface parse/detect errors in UI
+            status.write(f"{f.name}: enrichment skipped ({e})")
 
 
 def _render_pinned_banner() -> list[int]:

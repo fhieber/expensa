@@ -16,7 +16,7 @@ def test_fresh_db_is_at_current_schema_version(tmp_path: Path) -> None:
             "SELECT value FROM schema_meta WHERE key='schema_version'"
         ).fetchone()["value"]
         # Bump expected version when adding migrations.
-        assert int(v) == 3
+        assert int(v) == 4
     finally:
         conn.close()
 
@@ -80,7 +80,8 @@ def test_v1_to_latest_drops_cluster_id_and_adds_is_savings(tmp_path: Path) -> No
     conn.commit()
 
     applied = apply_migrations(conn)
-    assert applied == [2, 3]
+    # A v1 DB now chains all the way through the latest migration.
+    assert applied == [2, 3, 4]
 
     cols = [r["name"] for r in conn.execute("PRAGMA table_info(expenses)").fetchall()]
     assert "cluster_id" not in cols
@@ -91,7 +92,7 @@ def test_v1_to_latest_drops_cluster_id_and_adds_is_savings(tmp_path: Path) -> No
     v = conn.execute(
         "SELECT value FROM schema_meta WHERE key='schema_version'"
     ).fetchone()["value"]
-    assert int(v) == 3
+    assert int(v) == 4
 
     # Re-running is a no-op.
     assert apply_migrations(conn) == []
@@ -119,7 +120,7 @@ def test_v2_to_v3_adds_is_savings_and_backfills_sparen(tmp_path: Path) -> None:
     )
     conn.commit()
 
-    assert apply_migrations(conn) == [3]
+    assert apply_migrations(conn) == [3, 4]
 
     cols = [r["name"] for r in conn.execute("PRAGMA table_info(categories)").fetchall()]
     assert "is_savings" in cols
@@ -130,5 +131,50 @@ def test_v2_to_v3_adds_is_savings_and_backfills_sparen(tmp_path: Path) -> None:
     assert flags == {"Sparen": 1, "Lebensmittel": 0}
 
     # Re-running is a no-op.
+    assert apply_migrations(conn) == []
+    conn.close()
+
+
+def test_fresh_db_has_enrichment_columns(tmp_path: Path) -> None:
+    """v3 enrichment columns must be present on a fresh DB (landed directly
+    from schema.sql, migrations a no-op)."""
+    conn = get_or_create_database(tmp_path / "fresh.sqlite")
+    try:
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(expenses)")}
+        for c in (
+            "enrichment_source", "enrichment_ref", "enriched_counterparty",
+            "enriched_description", "enriched_at",
+        ):
+            assert c in cols
+    finally:
+        conn.close()
+
+
+def test_v2_to_v3_adds_enrichment_columns_idempotently(tmp_path: Path) -> None:
+    """A v2 DB (no enrichment columns) gains them on migrate, and the
+    migration is safe to re-run."""
+    db_path = tmp_path / "v2.sqlite"
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE expenses (
+            id INTEGER PRIMARY KEY,
+            buchungsdatum DATE NOT NULL,
+            betrag_cents INTEGER NOT NULL,
+            dedup_hash TEXT NOT NULL UNIQUE
+        );
+        CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT);
+        INSERT INTO schema_meta(key, value) VALUES ('schema_version', '2');
+        """
+    )
+    conn.commit()
+
+    assert apply_migrations(conn) == [3, 4]
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(expenses)")}
+    assert "enriched_counterparty" in cols
+    assert "enrichment_ref" in cols
+
+    # Idempotent re-run.
     assert apply_migrations(conn) == []
     conn.close()

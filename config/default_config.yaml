@@ -60,6 +60,10 @@ vendor_lookup:
   cache_ttl_days: 90
   # SAFETY: only counterparty_normalized is ever sent. Hard-coded; do not add fields here.
 
+# --- Secondary-source enrichment (e.g. PayPal activity CSV) ---
+enrichment:
+  date_window_days: 4   # max days between the secondary record and the bank booking
+
 # --- Streamlit ---
 streamlit:
   host: 127.0.0.1

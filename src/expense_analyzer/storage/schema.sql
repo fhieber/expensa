@@ -36,6 +36,14 @@ CREATE TABLE IF NOT EXISTS expenses (
     mandatsreferenz_present     INTEGER,
     is_likely_recurring         INTEGER,
 
+    -- Secondary-source enrichment (e.g. a PayPal activity CSV). Source-
+    -- agnostic: `enrichment_source` records which adapter produced it.
+    enrichment_source           TEXT,
+    enrichment_ref              TEXT,
+    enriched_counterparty       TEXT,
+    enriched_description        TEXT,
+    enriched_at                 TIMESTAMP,
+
     source_file                 TEXT,
     imported_at                 TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     dedup_hash                  TEXT NOT NULL UNIQUE
@@ -124,4 +132,4 @@ CREATE TABLE IF NOT EXISTS schema_meta (
     key   TEXT PRIMARY KEY,
     value TEXT
 );
-INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('schema_version', '3');
+INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('schema_version', '4');
