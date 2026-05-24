@@ -57,7 +57,11 @@ CREATE TABLE IF NOT EXISTS categories (
     id          INTEGER PRIMARY KEY,
     name        TEXT NOT NULL UNIQUE,
     description TEXT,
-    color       TEXT
+    color       TEXT,
+    -- Rows labelled with a savings category are treated as NEUTRAL by the
+    -- dashboard (excluded from income / expense aggregates; drive the
+    -- "to savings" tile). Set per-category from the Categories tab.
+    is_savings  INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS labels (
@@ -120,4 +124,4 @@ CREATE TABLE IF NOT EXISTS schema_meta (
     key   TEXT PRIMARY KEY,
     value TEXT
 );
-INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('schema_version', '2');
+INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('schema_version', '3');

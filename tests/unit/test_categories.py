@@ -12,9 +12,37 @@ from expense_analyzer.storage.categories import (
     latest_label,
     latest_user_label,
     list_categories,
+    savings_category_names,
+    set_category_savings,
     upsert_category,
     vendor_label_distribution,
 )
+
+
+def test_set_category_savings_round_trips(tmp_db: sqlite3.Connection) -> None:
+    cid = upsert_category(tmp_db, "Sparen")
+    assert get_category_by_name(tmp_db, "Sparen").is_savings is False
+    set_category_savings(tmp_db, cid, True)
+    assert get_category_by_name(tmp_db, "Sparen").is_savings is True
+    assert savings_category_names(tmp_db) == ["Sparen"]
+    set_category_savings(tmp_db, cid, False)
+    assert get_category_by_name(tmp_db, "Sparen").is_savings is False
+    assert savings_category_names(tmp_db) == []
+
+
+def test_savings_category_names_only_flagged(tmp_db: sqlite3.Connection) -> None:
+    s = upsert_category(tmp_db, "Sparen")
+    upsert_category(tmp_db, "Lebensmittel")
+    set_category_savings(tmp_db, s, True)
+    assert savings_category_names(tmp_db) == ["Sparen"]
+
+
+def test_upsert_does_not_clear_savings_flag(tmp_db: sqlite3.Connection) -> None:
+    cid = upsert_category(tmp_db, "Sparen")
+    set_category_savings(tmp_db, cid, True)
+    # Editing description/color via upsert must not reset the flag.
+    upsert_category(tmp_db, "Sparen", "Money to own accounts", "#abc")
+    assert get_category_by_name(tmp_db, "Sparen").is_savings is True
 
 
 def test_upsert_category_idempotent(tmp_db: sqlite3.Connection) -> None:

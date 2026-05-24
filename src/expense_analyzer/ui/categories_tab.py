@@ -40,6 +40,7 @@ from expense_analyzer.config import packaged_default_categories
 from expense_analyzer.storage.admin import category_removal_impact, remove_category
 from expense_analyzer.storage.categories import (
     import_categories_from_yaml,
+    set_category_savings,
     upsert_category,
 )
 from expense_analyzer.storage.stats import category_stats, uncategorized_stat
@@ -102,6 +103,14 @@ def _save_cat_color(account_id: str, cat_id: int) -> None:
     conn.execute("UPDATE categories SET color=? WHERE id=?", (new_color, cat_id))
 
 
+def _save_cat_savings(account_id: str, cat_id: int) -> None:
+    if not _active_account_matches(account_id):
+        return
+    conn = get_conn()
+    is_savings = bool(st.session_state.get(f"cat_{account_id}_{cat_id}_savings"))
+    set_category_savings(conn, cat_id, is_savings)
+
+
 def render() -> None:
     conn = get_conn()
     account_id = get_active_account().id
@@ -128,19 +137,23 @@ def render() -> None:
     if stats:
         st.caption(
             "Edit any cell to save immediately. Name and description commit on "
-            "blur/Enter; color commits when you pick a new one. Click ✕ to "
-            "delete (cascade prompt if labels reference it)."
+            "blur/Enter; color commits when you pick a new one. Tick **Sparen** "
+            "to mark a category as savings — its rows are treated as neutral on "
+            "the Dashboard (excluded from income/expenses, drive the "
+            "*To savings* tile). Click ✕ to delete (cascade prompt if labels "
+            "reference it)."
         )
 
-        widths = [2, 3, 1, 1, 1, 1.2, 0.5]
+        widths = [2, 3, 1, 0.7, 1, 1, 1.2, 0.5]
         h = st.columns(widths)
         h[0].markdown("**Name**")
         h[1].markdown("**Description**")
         h[2].markdown("**Color**")
-        h[3].markdown("**# Records**")
-        h[4].markdown("**Abs total €**")
-        h[5].markdown("**Last seen**")
-        h[6].markdown("")
+        h[3].markdown("**Sparen?**")
+        h[4].markdown("**# Records**")
+        h[5].markdown("**Abs total €**")
+        h[6].markdown("**Last seen**")
+        h[7].markdown("")
 
         for s in stats:
             # Every widget key embeds the active account id, so that:
@@ -152,6 +165,7 @@ def render() -> None:
             name_key  = f"cat_{account_id}_{s.id}_name"
             desc_key  = f"cat_{account_id}_{s.id}_desc"
             color_key = f"cat_{account_id}_{s.id}_color"
+            sav_key   = f"cat_{account_id}_{s.id}_savings"
             del_key   = f"cat_{account_id}_{s.id}_del"
             del_y_key = f"cat_{account_id}_{s.id}_del_yes"
             del_n_key = f"cat_{account_id}_{s.id}_del_no"
@@ -187,10 +201,20 @@ def render() -> None:
                     on_change=_save_cat_color,
                     args=(account_id, s.id),
                 )
-            row[3].write(s.n_expenses)
-            row[4].write(f"{s.abs_total_eur:.2f}")
-            row[5].write(s.last_seen or "—")
-            with row[6]:
+            with row[3]:
+                st.checkbox(
+                    "savings",
+                    value=s.is_savings,
+                    key=sav_key,
+                    label_visibility="collapsed",
+                    help="Treat this category as savings (neutral on the Dashboard).",
+                    on_change=_save_cat_savings,
+                    args=(account_id, s.id),
+                )
+            row[4].write(s.n_expenses)
+            row[5].write(f"{s.abs_total_eur:.2f}")
+            row[6].write(s.last_seen or "—")
+            with row[7]:
                 if st.button("✕", key=del_key, help=f"Delete {s.name!r}"):
                     # Re-verify the active account at click time. Button
                     # bodies run during the script run (after on_change

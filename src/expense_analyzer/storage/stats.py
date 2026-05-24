@@ -16,11 +16,12 @@ class CategoryStat:
     total_eur: float       # signed sum
     abs_total_eur: float   # sum of |betrag|
     last_seen: str | None  # ISO date or None
+    is_savings: bool = False
 
 
 _CATEGORY_STATS_SQL = """
 SELECT
-    c.id, c.name, c.description, c.color,
+    c.id, c.name, c.description, c.color, c.is_savings,
     COUNT(e.id)                                                AS n_expenses,
     COALESCE(SUM(e.betrag_cents) / 100.0, 0.0)                 AS total_eur,
     COALESCE(SUM(ABS(e.betrag_cents)) / 100.0, 0.0)            AS abs_total_eur,
@@ -28,7 +29,7 @@ SELECT
 FROM categories c
 LEFT JOIN latest_label ll ON ll.category_id = c.id
 LEFT JOIN expenses e ON e.id = ll.expense_id
-GROUP BY c.id, c.name, c.description, c.color
+GROUP BY c.id, c.name, c.description, c.color, c.is_savings
 ORDER BY abs_total_eur DESC, c.name
 """
 
@@ -47,6 +48,7 @@ def category_stats(conn: sqlite3.Connection) -> list[CategoryStat]:
             total_eur=float(r["total_eur"] or 0.0),
             abs_total_eur=float(r["abs_total_eur"] or 0.0),
             last_seen=(str(r["last_seen"]) if r["last_seen"] is not None else None),
+            is_savings=bool(r["is_savings"]),
         )
         for r in rows
     ]
