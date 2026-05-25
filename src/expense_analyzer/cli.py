@@ -1107,6 +1107,12 @@ def _build_streamlit_args(cfg: Config) -> list[str]:
         "--server.runOnSave", "true",         # auto-reload on file change
         "--server.fileWatcherType", "auto",
         "--browser.gatherUsageStats", "false",
+        # Anthropic-inspired light theme
+        "--theme.primaryColor", "#d97757",
+        "--theme.backgroundColor", "#faf9f5",
+        "--theme.secondaryBackgroundColor", "#e8e6dc",
+        "--theme.textColor", "#141413",
+        "--theme.font", "sans serif",
     ]
 
 

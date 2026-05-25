@@ -50,7 +50,8 @@ Thumbs.db
 *.sqlite-shm
 data/
 .expense-analyzer/
-.streamlit/
+.streamlit/*
+!.streamlit/config.toml
 hf_cache/
 *.csv
 
