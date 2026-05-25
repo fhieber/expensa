@@ -166,6 +166,12 @@ def enrich_from_records(
 
     for cand, rec in result.matches:
         eid = int(cand.key)
+        # Re-derive the normalized counterparty from the enriched name so
+        # the cascade's vendor_exact_match keys on the merchant ("amazon",
+        # "betterplace org") rather than on every bank Lastschrift
+        # collapsing to "paypal europe". Falls back to the bank-side
+        # value if the enrichment lacks a usable name.
+        enriched_cp_norm = normalize_counterparty(rec.counterparty or "")
         conn.execute(
             """
             UPDATE expenses
@@ -174,6 +180,7 @@ def enrich_from_records(
                    enriched_counterparty = ?,
                    enriched_description = ?,
                    enriched_at = CURRENT_TIMESTAMP,
+                   counterparty_normalized = COALESCE(NULLIF(?, ''), counterparty_normalized),
                    combined_text = ?
              WHERE id = ?
             """,
@@ -182,6 +189,7 @@ def enrich_from_records(
                 rec.source_ref,
                 rec.counterparty,
                 rec.description,
+                enriched_cp_norm,
                 _rebuilt_combined_text(cand.verwendungszweck, rec),
                 eid,
             ),

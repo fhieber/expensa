@@ -681,3 +681,51 @@ def test_account_encrypt_then_decrypt_round_trip(tmp_path: Path) -> None:
     rd = runner.invoke(cli, ["account", "decrypt"], env=env)
     assert rd.exit_code == 0, rd.output
     assert crypto.looks_encrypted(db) is False
+
+
+def test_clean_whitespace_cli_reports_changes(
+    tmp_path: Path, fixtures_dir: Path
+) -> None:
+    """End-to-end: ingest, plant noise via SQL, run `expense
+    clean-whitespace`, assert the row got cleaned."""
+    import sqlite3
+
+    runner = CliRunner()
+    runner.invoke(cli, ["init"], env=_runner_env(tmp_path))
+    runner.invoke(
+        cli, ["ingest", "--no-embed", str(fixtures_dir / "sample_de.csv")],
+        env=_runner_env(tmp_path),
+    )
+    conn = sqlite3.connect(tmp_path / "db.sqlite")
+    conn.execute(
+        "UPDATE expenses SET counterparty = ? WHERE id = 1",
+        ("PayPal Europe\t\t22-24   Boulevard Royal",),
+    )
+    conn.commit()
+    conn.close()
+
+    # Dry run reports what would change but writes nothing.
+    r_dry = runner.invoke(
+        cli, ["clean-whitespace", "--dry-run"], env=_runner_env(tmp_path),
+    )
+    assert r_dry.exit_code == 0, r_dry.output
+    assert "would update 1 row" in r_dry.output
+    assert "dry run" in r_dry.output
+
+    # Real run applies and persists.
+    r = runner.invoke(cli, ["clean-whitespace"], env=_runner_env(tmp_path))
+    assert r.exit_code == 0, r.output
+    assert "updated 1 row" in r.output
+
+    conn = sqlite3.connect(tmp_path / "db.sqlite")
+    conn.row_factory = sqlite3.Row
+    after = conn.execute(
+        "SELECT counterparty FROM expenses WHERE id = 1"
+    ).fetchone()
+    conn.close()
+    assert after["counterparty"] == "PayPal Europe 22-24 Boulevard Royal"
+
+    # Re-running on the now-clean DB reports zero updates.
+    r_again = runner.invoke(cli, ["clean-whitespace"], env=_runner_env(tmp_path))
+    assert r_again.exit_code == 0, r_again.output
+    assert "updated 0 row" in r_again.output

@@ -647,6 +647,54 @@ def reset(ctx: click.Context, wipe_all: bool, yes: bool) -> None:
         conn.close()
 
 
+@cli.command("clean-whitespace")
+@click.option("--dry-run", is_flag=True,
+              help="Show what would change without writing.")
+@click.pass_context
+def clean_whitespace(ctx: click.Context, dry_run: bool) -> None:
+    """Collapse tab / multi-space runs in already-ingested text columns.
+
+    Backfill helper: ingestion now strips these whitespace runs at
+    parse time, but rows imported under the old code-path still
+    carry the noise. Touches counterparty, verwendungszweck,
+    zahlungspflichtiger, status, umsatztyp, glaeubiger_id,
+    mandatsreferenz, kundenreferenz, enriched_counterparty and
+    enriched_description. Categories, labels, notes and embeddings
+    are untouched.
+
+    Idempotent -- safe to re-run; a clean DB reports zero updates.
+    """
+    cfg: Config = ctx.obj[_CTX_KEY]["config"]
+    conn = _connect(cfg)
+    try:
+        from expense_analyzer.storage.admin import collapse_text_whitespace
+
+        if dry_run:
+            # Open a SAVEPOINT, apply, report, roll back. Cleanest way
+            # to show "what would change" without duplicating the diff
+            # logic outside collapse_text_whitespace.
+            conn.execute("SAVEPOINT clean_ws_dry_run")
+            try:
+                report = collapse_text_whitespace(conn)
+            finally:
+                conn.execute("ROLLBACK TO SAVEPOINT clean_ws_dry_run")
+                conn.execute("RELEASE SAVEPOINT clean_ws_dry_run")
+            verb = "would update"
+        else:
+            report = collapse_text_whitespace(conn)
+            conn.commit()
+            verb = "updated"
+        click.echo(
+            f"scanned {report.rows_scanned} expense row(s); "
+            f"{verb} {report.rows_updated} row(s) "
+            f"({report.fields_changed} field-level changes)."
+        )
+        if dry_run and report.rows_updated:
+            click.echo("(dry run -- nothing written. Re-run without --dry-run to apply.)")
+    finally:
+        conn.close()
+
+
 # --- ingest ------------------------------------------------------------------
 
 @cli.command()

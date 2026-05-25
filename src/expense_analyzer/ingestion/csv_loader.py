@@ -15,6 +15,7 @@ The format is the "Buchungen-Export" produced by most German banks:
 from __future__ import annotations
 
 import csv
+import re
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
@@ -26,6 +27,25 @@ from expense_analyzer.ingestion._parsing import (
     parse_german_amount,
     parse_german_date,
 )
+
+# Many banks (and some PayPal exports) emit multi-line cell content using
+# embedded newlines or tabs that get unquoted into the cell as whitespace
+# runs -- the UI then shows "PayPal Europe    22-24 Boulevard..." with
+# huge gaps. The normalized columns already collapse whitespace, but the
+# raw column we display does not, so we do it here at ingest time.
+_WS_RUN = re.compile(r"\s+")
+
+
+def _clean_text(s: str) -> str:
+    """Strip leading/trailing whitespace and collapse any internal run of
+    whitespace (spaces, tabs, embedded newlines) to a single space.
+
+    Idempotent. Returns ``""`` for None / empty so caller code can pass
+    raw dict lookups straight in.
+    """
+    if not s:
+        return ""
+    return _WS_RUN.sub(" ", s).strip()
 
 # Private aliases kept so existing imports/tests (e.g. csv_loader._parse_amount)
 # keep working after the parsing helpers moved to _parsing.
@@ -135,16 +155,19 @@ def parse_csv(path: Path) -> list[ParsedRow]:
                 ParsedRow(
                     buchungsdatum=_parse_date(rec["buchungsdatum"]) or _raise("buchungsdatum required"),
                     wertstellung=_parse_date(rec.get("wertstellung", "")),
-                    status=(rec.get("status") or "").strip(),
-                    zahlungspflichtiger=(rec.get("zahlungspflichtiger") or "").strip(),
-                    zahlungsempfaenger=(rec.get("zahlungsempfaenger") or "").strip(),
-                    verwendungszweck=(rec.get("verwendungszweck") or "").strip(),
-                    umsatztyp=(rec.get("umsatztyp") or "").strip(),
+                    status=_clean_text(rec.get("status", "")),
+                    zahlungspflichtiger=_clean_text(rec.get("zahlungspflichtiger", "")),
+                    zahlungsempfaenger=_clean_text(rec.get("zahlungsempfaenger", "")),
+                    verwendungszweck=_clean_text(rec.get("verwendungszweck", "")),
+                    umsatztyp=_clean_text(rec.get("umsatztyp", "")),
+                    # IBANs are intentionally rendered with grouping spaces by
+                    # some banks ("DE89 3704 0044 ..."); strip every internal
+                    # space so equality/lookup still works.
                     iban=(rec.get("iban") or "").strip().replace(" ", ""),
                     betrag=_parse_amount(rec["betrag"]),
-                    glaeubiger_id=(rec.get("glaeubiger_id") or "").strip(),
-                    mandatsreferenz=(rec.get("mandatsreferenz") or "").strip(),
-                    kundenreferenz=(rec.get("kundenreferenz") or "").strip(),
+                    glaeubiger_id=_clean_text(rec.get("glaeubiger_id", "")),
+                    mandatsreferenz=_clean_text(rec.get("mandatsreferenz", "")),
+                    kundenreferenz=_clean_text(rec.get("kundenreferenz", "")),
                     source_file=path.name,
                     source_row=offset,
                 )
