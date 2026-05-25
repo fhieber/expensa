@@ -706,14 +706,25 @@ def ingest(
         conn.close()
 
 
+def _adapter_and_records(path: Path, source: str):
+    """Resolve a secondary-source adapter for ``path`` and parse it, turning
+    detection/parse failures into a clean CLI error rather than a traceback."""
+    from expense_analyzer.ingestion._parsing import CsvParseError
+    from expense_analyzer.ingestion.sources import detect_adapter, get_adapter
+
+    try:
+        adapter = get_adapter(source) if source != "auto" else detect_adapter(path)
+        return adapter, adapter.parse(path)
+    except CsvParseError as e:
+        raise click.ClickException(f"{path.name}: {e}") from e
+
+
 def _run_enrich(conn, cfg: Config, path: Path, source: str, embedder) -> None:
     """Resolve an adapter for ``path``, parse it, run the enrichment engine
     and echo a one-line report. Shared by ``ingest --enrich`` and ``enrich``."""
     from expense_analyzer.enrichment.secondary import enrich_from_records
-    from expense_analyzer.ingestion.sources import detect_adapter, get_adapter
 
-    adapter = get_adapter(source) if source != "auto" else detect_adapter(path)
-    records = adapter.parse(path)
+    adapter, records = _adapter_and_records(path, source)
     rep = enrich_from_records(
         conn, records, adapter, embedder=embedder,
         date_window_days=cfg.enrichment.date_window_days,
@@ -733,7 +744,6 @@ def _preview_enrich(
     after. Writes nothing."""
     from expense_analyzer.enrichment.secondary import preview_enrichment
     from expense_analyzer.ingestion.csv_loader import parse_csv
-    from expense_analyzer.ingestion.sources import detect_adapter
 
     if not enrich_csvs:
         click.echo(
@@ -746,8 +756,7 @@ def _preview_enrich(
     click.echo(f"parsed {len(rows)} bank row(s) from {len(csvs)} file(s) (not stored)\n")
 
     for path in enrich_csvs:
-        adapter = detect_adapter(path)
-        records = adapter.parse(path)
+        adapter, records = _adapter_and_records(path, "auto")
         rep = preview_enrichment(
             rows, records, adapter,
             date_window_days=cfg.enrichment.date_window_days,

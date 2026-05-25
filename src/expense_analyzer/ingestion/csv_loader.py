@@ -22,10 +22,16 @@ from pathlib import Path
 
 from expense_analyzer.ingestion._parsing import (
     CsvParseError,
-    detect_encoding as _detect_encoding,
-    parse_german_amount as _parse_amount,
-    parse_german_date as _parse_date,
+    detect_encoding,
+    parse_german_amount,
+    parse_german_date,
 )
+
+# Private aliases kept so existing imports/tests (e.g. csv_loader._parse_amount)
+# keep working after the parsing helpers moved to _parsing.
+_detect_encoding = detect_encoding
+_parse_amount = parse_german_amount
+_parse_date = parse_german_date
 
 # Re-exported for backward compatibility with existing imports/tests.
 __all__ = [

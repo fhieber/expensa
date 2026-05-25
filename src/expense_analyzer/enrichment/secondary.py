@@ -15,6 +15,7 @@ here. The same matching core powers a no-DB ``preview_enrichment`` used by the
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date
 
@@ -46,12 +47,12 @@ class EnrichReport:
 @dataclass
 class _Candidate:
     """A transaction that could be enriched, abstracted away from whether it
-    came from the DB (a ``sqlite3.Row``) or a freshly-parsed bank CSV."""
+    came from the DB or a freshly-parsed bank CSV."""
 
-    key: object              # DB id, or source_row for a parsed bank row
+    key: int                 # DB expense id, or list index for a parsed bank row
     txn_date: date
     betrag_cents: int
-    filter_row: object       # dict-like / sqlite3.Row passed to candidate_filter
+    filter_row: Mapping[str, object]  # passed to adapter.candidate_filter
     verwendungszweck: str
 
 
@@ -83,7 +84,7 @@ def _match_candidates(
     ambiguous = 0
     unmatched = 0
 
-    for cand in sorted(eligible_cands, key=lambda c: (c.txn_date, str(c.key))):
+    for cand in sorted(eligible_cands, key=lambda c: (c.txn_date, c.key)):
         pool = [
             rec
             for rec in by_cents.get(abs(cand.betrag_cents), [])
@@ -149,7 +150,7 @@ def enrich_from_records(
             key=int(row["id"]),
             txn_date=row["buchungsdatum"],
             betrag_cents=int(row["betrag_cents"]),
-            filter_row=row,
+            filter_row=dict(row),
             verwendungszweck=row["verwendungszweck"] or "",
         )
         for row in conn.execute(_CANDIDATE_SELECT).fetchall()
@@ -248,9 +249,11 @@ def preview_enrichment(
 ) -> PreviewReport:
     """Match parsed bank rows against secondary records purely in memory and
     return a before/after view for each match. No DB, no writes."""
+    # Key by position in the combined list -- source_row restarts per file,
+    # so it isn't unique when several bank CSVs are previewed together.
     candidates = [
         _Candidate(
-            key=row.source_row,
+            key=i,
             txn_date=row.buchungsdatum,
             betrag_cents=row.betrag_cents,
             filter_row={
@@ -259,16 +262,15 @@ def preview_enrichment(
             },
             verwendungszweck=row.verwendungszweck,
         )
-        for row in rows
+        for i, row in enumerate(rows)
     ]
-    by_source_row = {row.source_row: row for row in rows}
 
     result = _match_candidates(candidates, records, adapter, date_window_days)
     previews = [
         EnrichmentPreview(
-            row=by_source_row[cand.key],
+            row=rows[cand.key],
             record=rec,
-            combined_before=_row_combined_text(by_source_row[cand.key]),
+            combined_before=_row_combined_text(rows[cand.key]),
             combined_after=_rebuilt_combined_text(cand.verwendungszweck, rec),
         )
         for cand, rec in result.matches

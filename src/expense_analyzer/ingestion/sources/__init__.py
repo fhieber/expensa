@@ -14,11 +14,12 @@ the engine, the DB schema and the UI never know which source produced a record.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Protocol
 
 from expense_analyzer.ingestion._parsing import CsvParseError
 
@@ -36,15 +37,12 @@ class EnrichmentRecord:
     counterparty: str
     description: str
     source_ref: str  # stable id in the source (e.g. PayPal Transaktionscode)
-    source_file: str = ""
-    source_row: int = 0
 
     @property
     def amount_cents(self) -> int:
         return int((self.amount * 100).to_integral_value())
 
 
-@runtime_checkable
 class SourceAdapter(Protocol):
     """Pluggable parser for one secondary-CSV format."""
 
@@ -59,11 +57,12 @@ class SourceAdapter(Protocol):
         """Parse the whole file into enrichment records."""
         ...
 
-    def candidate_filter(self, expense_row) -> bool:
-        """Return True if ``expense_row`` (a ``sqlite3.Row``) could plausibly
-        be enriched by this source. Lets e.g. the PayPal adapter restrict
-        matching to PayPal direct-debit lines and avoid spurious
-        amount+date collisions with unrelated transactions."""
+    def candidate_filter(self, expense_row: Mapping[str, object]) -> bool:
+        """Return True if ``expense_row`` (a mapping of bank-expense fields,
+        e.g. a ``sqlite3.Row``) could plausibly be enriched by this source.
+        Lets e.g. the PayPal adapter restrict matching to PayPal direct-debit
+        lines and avoid spurious amount+date collisions with unrelated
+        transactions."""
         ...
 
 
@@ -73,10 +72,6 @@ def _adapters() -> list[SourceAdapter]:
     from expense_analyzer.ingestion.sources.paypal import PaypalAdapter
 
     return [PaypalAdapter()]
-
-
-def available_adapters() -> list[SourceAdapter]:
-    return _adapters()
 
 
 def get_adapter(name: str) -> SourceAdapter:

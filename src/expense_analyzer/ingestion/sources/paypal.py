@@ -18,6 +18,7 @@ Typical German header (comma-separated, quoted), of which we use a handful:
 from __future__ import annotations
 
 import csv
+from collections.abc import Mapping
 from pathlib import Path
 
 from expense_analyzer.ingestion._parsing import (
@@ -99,11 +100,9 @@ class PaypalAdapter:
 
     def parse(self, path: Path) -> list[EnrichmentRecord]:
         records: list[EnrichmentRecord] = []
-        for i, rec in enumerate(_read_table(path), start=1):
+        for rec in _read_table(path):
             ref = (rec.get(_KEY_REF) or "").strip()
-            if not ref:
-                continue
-            if _fold(rec.get(_KEY_STATUS, "")) in _REJECT_STATUS:
+            if not ref or _fold(rec.get(_KEY_STATUS, "")) in _REJECT_STATUS:
                 continue
             raw_amount = (rec.get(_KEY_GROSS) or rec.get(_KEY_NET) or "").strip()
             raw_date = (rec.get(_KEY_DATE) or "").strip()
@@ -128,17 +127,14 @@ class PaypalAdapter:
                     counterparty=(rec.get(_KEY_NAME) or "").strip(),
                     description=description,
                     source_ref=ref,
-                    source_file=path.name,
-                    source_row=i,
                 )
             )
         return records
 
-    def candidate_filter(self, expense_row) -> bool:
+    def candidate_filter(self, expense_row: Mapping[str, object]) -> bool:
         # PayPal debits show up with the raw counterparty containing "paypal"
         # (normalization strips the word, so we must read the raw columns).
         for col in ("zahlungsempfaenger", "zahlungspflichtiger"):
-            val = (expense_row[col] if col in expense_row.keys() else "") or ""
-            if "paypal" in val.lower():
+            if "paypal" in str(expense_row.get(col) or "").lower():
                 return True
         return False
