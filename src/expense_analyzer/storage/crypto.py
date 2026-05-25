@@ -247,14 +247,22 @@ def encrypt_file(
     if tmp.exists():
         tmp.unlink()
     # Open the plaintext DB with the SQLCipher driver and *no* key, attach
-    # the encrypted target, and copy every page across.
-    conn = drv.connect(str(plain_path))
+    # the encrypted target, and copy every page across. autocommit so the
+    # checkpoint + export take effect immediately.
+    conn = drv.connect(str(plain_path), isolation_level=None)
     try:
+        # Fold any committed WAL frames back into the main file *before* we
+        # copy it as the plaintext safety copy below -- otherwise that copy
+        # (a bare file copy of the main DB) could miss recent rows.
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         conn.execute(f"ATTACH DATABASE {_q(str(tmp))} AS encrypted KEY {_q(password)}")
         conn.execute("SELECT sqlcipher_export('encrypted')")
         conn.execute("DETACH DATABASE encrypted")
-    finally:
+    except Exception:
         conn.close()
+        tmp.unlink(missing_ok=True)
+        raise
+    conn.close()
 
     safety: Path | None = None
     if keep_safety:
@@ -284,11 +292,17 @@ def decrypt_file(
     if tmp.exists():
         tmp.unlink()
     try:
+        # Materialise committed WAL frames so the encrypted safety copy
+        # below (a bare file copy) reflects the full database.
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         conn.execute(f"ATTACH DATABASE {_q(str(tmp))} AS plaintext KEY ''")
         conn.execute("SELECT sqlcipher_export('plaintext')")
         conn.execute("DETACH DATABASE plaintext")
-    finally:
+    except Exception:
         conn.close()
+        tmp.unlink(missing_ok=True)
+        raise
+    conn.close()
 
     safety: Path | None = None
     if keep_safety:

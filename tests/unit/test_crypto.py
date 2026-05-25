@@ -119,6 +119,32 @@ def test_export_decrypted_copy_is_plaintext(tmp_path: Path) -> None:
         conn.close()
 
 
+def test_safety_copy_matches_encrypted_contents(tmp_path: Path) -> None:
+    db = tmp_path / "db.sqlite"
+    conn = get_or_create_database(db)
+    try:
+        for i in range(25):
+            upsert_category(conn, f"Cat{i}")
+    finally:
+        conn.close()
+
+    safety = crypto.encrypt_file(db, "pw", keep_safety=True)
+    assert safety is not None
+
+    import sqlite3
+
+    plain = sqlite3.connect(str(safety))
+    enc = get_or_create_database(db, "pw")
+    try:
+        n_plain = plain.execute("SELECT COUNT(*) FROM categories").fetchone()[0]
+        n_enc = enc.execute("SELECT COUNT(*) FROM categories").fetchone()[0]
+    finally:
+        plain.close()
+        enc.close()
+    # The plaintext safety copy is a complete snapshot, not a stale main file.
+    assert n_plain == n_enc >= 25
+
+
 def test_encrypt_rejects_already_encrypted(tmp_path: Path) -> None:
     db = tmp_path / "db.sqlite"
     _make_plaintext_db(db)
