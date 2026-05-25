@@ -142,3 +142,54 @@ def test_restore_no_safety_copy_when_disabled(
     # The target directory should NOT contain a *.pre-restore.*.sqlite.
     pre = list(tmp_path.glob("**/*.pre-restore.*.sqlite"))
     assert pre == []
+
+
+@pytest.mark.skipif(
+    __import__("importlib").util.find_spec("sqlcipher3") is None,
+    reason="SQLCipher driver not installed",
+)
+def test_encrypted_backup_validate_and_restore_round_trip(
+    tmp_db: sqlite3.Connection, fixtures_dir: Path, tmp_path: Path
+) -> None:
+    """An encrypted account backs up to an encrypted file; validate/restore
+    require the password and yield an encrypted database."""
+    from expense_analyzer.storage import crypto
+
+    ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
+    cid = upsert_category(tmp_db, "Lebensmittel")
+    eid = int(tmp_db.execute("SELECT id FROM expenses LIMIT 1").fetchone()["id"])
+    add_label(tmp_db, eid, cid, "user")
+    src_counts = _row_counts(tmp_db)
+
+    # Stand up an encrypted account DB, then export the encrypted backup.
+    account_db = tmp_path / "account.sqlite"
+    export_database(tmp_db, account_db)
+    tmp_db.close()
+    crypto.encrypt_file(account_db, "secret", keep_safety=False)
+
+    bk = tmp_path / "backup.enc.sqlite"
+    crypto.export_encrypted_copy(account_db, "secret", bk)
+    assert crypto.looks_encrypted(bk) is True
+
+    # Validation: flagged-not-accepted without a password; rejected on wrong.
+    no_pw = validate_backup(bk)
+    assert no_pw.ok is False and no_pw.encrypted is True
+    assert validate_backup(bk, password="nope").ok is False
+    ok = validate_backup(bk, password="secret")
+    assert ok.ok is True and ok.encrypted is True
+
+    # Restore into a fresh target; it stays encrypted under the backup key.
+    target = tmp_path / "restored" / "db.sqlite"
+    target.parent.mkdir()
+    get_or_create_database(target).close()
+    report = restore_database(target, bk, keep_safety=True, password="secret")
+    assert crypto.looks_encrypted(target) is True
+    assert ".pre-restore." in report.safety_copy.name
+
+    conn2 = get_or_create_database(target, "secret")
+    try:
+        for t, n in src_counts.items():
+            got = int(conn2.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0])
+            assert got == n
+    finally:
+        conn2.close()

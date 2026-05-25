@@ -51,7 +51,8 @@ from expense_analyzer.storage.crypto import (
     decrypt_file,
     encrypt_file,
     encryption_available,
-    export_decrypted_copy,
+    export_encrypted_copy,
+    looks_encrypted,
 )
 from expense_analyzer.storage.own_ibans import (
     add_own_iban,
@@ -939,16 +940,20 @@ def _render_administration(cfg, conn) -> None:
 def _render_backup(cfg, conn) -> None:
     encrypted = account_is_encrypted()
     st.caption(
-        "Download a complete copy of the SQLite database. Includes every "
+        "Download a complete copy of the database. Includes every "
         "ingested row, label, embedding, note, vendor-cache entry, and "
-        "category. The file is a standard SQLite 3 DB -- open it in any "
-        "SQLite browser, or re-import here on another machine."
+        "category."
     )
     if encrypted:
-        st.warning(
-            "This account is encrypted. The downloaded backup is a "
-            "**decrypted, plaintext** SQLite file so it stays portable — "
-            "store it somewhere safe."
+        st.info(
+            "This account is encrypted, so the backup is **also encrypted** "
+            "under this account's current password. You'll need that same "
+            "password to restore it."
+        )
+    else:
+        st.caption(
+            "The file is a standard SQLite 3 DB -- open it in any SQLite "
+            "browser, or re-import here on another machine."
         )
     # Render the backup bytes lazily into the download_button. SQLite's
     # online backup API is safe with the live UI connection open.
@@ -960,9 +965,9 @@ def _render_backup(cfg, conn) -> None:
         with _tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as _td:
             _bk_tmp = Path(_td) / "backup.sqlite"
             if encrypted:
-                # conn.backup() can't copy across the sqlcipher↔sqlite3
-                # driver boundary, so export a decrypted plaintext copy.
-                export_decrypted_copy(
+                # Export a self-contained SQLCipher copy under the same key
+                # (conn.backup() can't cross the sqlcipher↔sqlite3 boundary).
+                export_encrypted_copy(
                     cfg.db_path, get_password_for(get_active_account().id), _bk_tmp
                 )
             else:
@@ -974,14 +979,17 @@ def _render_backup(cfg, conn) -> None:
         # picks up something funky from a hand-edit.
         active = get_active_account()
         slug = slugify(active.id) or "account"
+        # `.enc.sqlite` hints the file is encrypted; restore detects it by
+        # header regardless of name.
+        ext = "enc.sqlite" if encrypted else "sqlite"
         st.download_button(
             "⬇️ Download backup",
             data=_bk_bytes,
             file_name=(
                 f"expense-analyzer-{slug}-backup-"
-                f"{_dt.date.today().isoformat()}.sqlite"
+                f"{_dt.date.today().isoformat()}.{ext}"
             ),
-            mime="application/x-sqlite3",
+            mime="application/octet-stream" if encrypted else "application/x-sqlite3",
             key="db_backup_download",
             type="primary",
         )
@@ -991,19 +999,13 @@ def _render_backup(cfg, conn) -> None:
 
 def _render_restore(cfg) -> None:
     st.caption(
-        "Replace the **current** database with an uploaded `.sqlite` backup. "
+        "Replace the **current** database with an uploaded backup. "
         "A timestamped safety copy of the current DB is saved alongside it "
         "(`db.pre-restore.<ts>.sqlite`) so you can roll back manually if "
         "the restore turns out to be the wrong file."
     )
-    if account_is_encrypted():
-        st.warning(
-            "This account is encrypted. Restoring a plaintext backup leaves "
-            "the database **unencrypted** — re-encrypt it afterwards under "
-            "Encryption above if you want it protected again."
-        )
     upload = st.file_uploader(
-        "Pick a backup file (.sqlite)",
+        "Pick a backup file (.sqlite / .enc.sqlite)",
         type=["sqlite", "db"],
         key="db_restore_uploader",
     )
@@ -1015,7 +1017,21 @@ def _render_restore(cfg) -> None:
     with _tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as _td:
         _upload_path = Path(_td) / "uploaded_backup.sqlite"
         _upload_path.write_bytes(upload.getbuffer())
-        result = validate_backup(_upload_path)
+        encrypted_upload = looks_encrypted(_upload_path)
+
+        backup_pw: str | None = None
+        if encrypted_upload:
+            st.info(
+                "This backup is **encrypted**. Enter the password it was "
+                "created with — the restored account will use that password."
+            )
+            backup_pw = st.text_input(
+                "Backup password", type="password", key="db_restore_pw"
+            )
+            if not backup_pw:
+                return  # wait for the password before validating
+
+        result = validate_backup(_upload_path, password=backup_pw)
         if not result.ok:
             st.error("upload is not a valid backup: " + "; ".join(result.errors))
             return
@@ -1023,6 +1039,12 @@ def _render_restore(cfg) -> None:
             "valid backup — rows: "
             + ", ".join(f"{k}={v}" for k, v in result.table_counts.items())
         )
+        if account_is_encrypted() and not encrypted_upload:
+            st.warning(
+                "Heads up: this account is encrypted but the backup is "
+                "plaintext — restoring leaves the database **unencrypted**. "
+                "Re-encrypt it afterwards under Encryption above."
+            )
         confirm_restore = st.text_input(
             "Type `restore` to confirm",
             key="confirm_db_restore",
@@ -1045,13 +1067,19 @@ def _render_restore(cfg) -> None:
                 # model didn't change, and so does the GlobalConfig and
                 # account registry.
                 invalidate_connection()
-                # Backups are plaintext, so the restored file is plaintext;
-                # drop any stale session password so the unlock gate (and
-                # get_conn) treat the account as unencrypted from now on.
-                clear_password_for(get_active_account().id)
                 report = restore_database(
                     cfg.db_path, _upload_path, keep_safety=True,
+                    password=backup_pw,
                 )
+                # Sync the session password to whatever the restored file
+                # is: the backup's password if encrypted, else cleared so
+                # the account is treated as plaintext.
+                active_id = get_active_account().id
+                if encrypted_upload:
+                    set_password_for(active_id, backup_pw)
+                else:
+                    clear_password_for(active_id)
+                invalidate_connection()
                 st.success(
                     "restored: "
                     + ", ".join(

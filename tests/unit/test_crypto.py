@@ -101,22 +101,31 @@ def test_decrypt_roundtrip(tmp_path: Path) -> None:
         conn.close()
 
 
-def test_export_decrypted_copy_is_plaintext(tmp_path: Path) -> None:
+def test_export_encrypted_copy_stays_encrypted(tmp_path: Path) -> None:
     db = tmp_path / "db.sqlite"
     _make_plaintext_db(db, "Auto")
     crypto.encrypt_file(db, "pw", keep_safety=False)
-    out = tmp_path / "backup.sqlite"
-    crypto.export_decrypted_copy(db, "pw", out)
+    out = tmp_path / "backup.enc.sqlite"
+    crypto.export_encrypted_copy(db, "pw", out)
 
-    assert crypto.looks_encrypted(out) is False
-    import sqlite3
-
-    conn = sqlite3.connect(str(out))
-    conn.row_factory = sqlite3.Row
+    # The backup is itself an encrypted SQLCipher file readable with the key.
+    assert crypto.looks_encrypted(out) is True
+    assert crypto.verify_password(out, "pw") is True
+    conn = get_or_create_database(out, "pw")
     try:
-        assert "Auto" in {r["name"] for r in conn.execute("SELECT name FROM categories")}
+        assert "Auto" in _category_names(conn)
     finally:
         conn.close()
+
+
+def test_export_encrypted_copy_with_distinct_password(tmp_path: Path) -> None:
+    db = tmp_path / "db.sqlite"
+    _make_plaintext_db(db, "Auto")
+    crypto.encrypt_file(db, "accountpw", keep_safety=False)
+    out = tmp_path / "backup.enc.sqlite"
+    crypto.export_encrypted_copy(db, "accountpw", out, dest_password="backuppw")
+    assert crypto.verify_password(out, "backuppw") is True
+    assert crypto.verify_password(out, "accountpw") is False
 
 
 def test_safety_copy_matches_encrypted_contents(tmp_path: Path) -> None:

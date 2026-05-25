@@ -330,26 +330,39 @@ def change_password(db_path: Path | str, old_password: str, new_password: str) -
         conn.close()
 
 
-def export_decrypted_copy(
-    src_path: Path | str, password: str, dest_path: Path | str
+def export_encrypted_copy(
+    src_path: Path | str,
+    password: str,
+    dest_path: Path | str,
+    dest_password: str | None = None,
 ) -> Path:
-    """Write a plaintext, portable copy of an encrypted DB to ``dest_path``.
+    """Write an encrypted, self-contained SQLCipher copy of an encrypted DB.
 
-    Used by the backup flow so an encrypted account still produces a
-    standard SQLite file the user can open anywhere. The caller is
-    responsible for warning that the copy is unencrypted.
+    Used by the backup flow so an encrypted account's backup stays
+    encrypted on disk. ``dest_password`` defaults to ``password`` (back up
+    under the account's current key), so restoring the file later requires
+    that same password.
     """
+    dest_password = dest_password or password
+    if not dest_password:
+        raise PasswordRequired("the backup password cannot be empty")
     dest_path = Path(dest_path)
     dest_path.parent.mkdir(parents=True, exist_ok=True)
     if dest_path.exists():
         dest_path.unlink()
     conn = open_connection(src_path, password)
     try:
-        conn.execute(f"ATTACH DATABASE {_q(str(dest_path))} AS plaintext KEY ''")
-        conn.execute("SELECT sqlcipher_export('plaintext')")
-        conn.execute("DETACH DATABASE plaintext")
-    finally:
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        conn.execute(
+            f"ATTACH DATABASE {_q(str(dest_path))} AS backup KEY {_q(dest_password)}"
+        )
+        conn.execute("SELECT sqlcipher_export('backup')")
+        conn.execute("DETACH DATABASE backup")
+    except Exception:
         conn.close()
+        dest_path.unlink(missing_ok=True)
+        raise
+    conn.close()
     return dest_path
 
 

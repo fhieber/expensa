@@ -82,15 +82,23 @@ dependency stays optional.
   `streamlit_app.py` (`_render_unlock_gate`), which `st.stop()`s the page
   until the right password is entered. Set / change / remove the password
   under **Settings → Database → Encryption**.
+- **CLI parity:** `expense account encrypt|decrypt|passwd [NAME]`
+  (defaults to the active account). encrypt prompts for a new password;
+  decrypt/passwd read `EXPENSE_ANALYZER_DB_PASSWORD` or prompt. Read-only
+  commands open encrypted DBs via the same env var / interactive prompt.
 - **Set-password migration:** `crypto.encrypt_file` exports the plain DB
   into a fresh SQLCipher file and keeps a timestamped **plaintext**
   `*.pre-encrypt.*.sqlite` safety copy (UI warns to delete it).
   `decrypt_file` / `change_password` (PRAGMA rekey) mirror this.
-- **Backups** of an encrypted account export **decrypted**
-  (`crypto.export_decrypted_copy`) since `conn.backup()` can't cross the
-  sqlcipher↔sqlite3 driver boundary; the UI warns the file is plaintext.
-  Restoring a (plaintext) backup leaves the account unencrypted and the
-  session password is cleared.
+- **Backups follow the account:** an encrypted account exports an
+  **encrypted** SQLCipher backup under its current key
+  (`crypto.export_encrypted_copy`); a plaintext account exports plaintext
+  (`backup.export_database`). `validate_backup` / `restore_database` take
+  an optional `password=`; encrypted uploads require it (the UI prompts),
+  and the restored DB stays encrypted under that key (session password is
+  synced). Restoring a plaintext backup into an encrypted account leaves
+  it plaintext (password cleared). A non-SQLite/SQLCipher upload is
+  rejected by header + page-size sanity check.
 
 The same Settings → Database section gained a **detailed structure
 overview** (`stats.database_overview`): file size, encryption status +
@@ -99,9 +107,11 @@ breakdown of row/column counts plus each table's columns
 (type / not-null / PK), views and indexes.
 
 Key files: `storage/crypto.py` (all encryption logic, Streamlit-free),
-`storage/database.py` (`connect(..., password=)`), `storage/stats.py`,
+`storage/database.py` (`connect(..., password=)`), `storage/backup.py`
+(password-aware validate/restore + encrypted export), `storage/stats.py`,
 `ui/_shared.py` (unlock/password helpers + password-keyed connection
-cache), `ui/streamlit_app.py` (unlock gate), `ui/settings.py`.
+cache), `ui/streamlit_app.py` (unlock gate), `ui/settings.py`,
+`cli.py` (`account encrypt|decrypt|passwd`).
 
 ### 2026-05-22 — Multi-account support
 
