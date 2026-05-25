@@ -657,24 +657,32 @@ def reset(ctx: click.Context, wipe_all: bool, yes: bool) -> None:
               type=click.Path(exists=True, dir_okay=False, path_type=Path),
               help="Secondary-source CSV(s) (e.g. a PayPal activity export) to "
                    "match against the ingested rows and enrich. Source auto-detected.")
+@click.option("--dry-run", is_flag=True,
+              help="Don't touch the DB. With --enrich, show on concrete records "
+                   "how the secondary source would enrich them (before vs after).")
 @click.pass_context
 def ingest(
     ctx: click.Context,
     csvs: tuple[Path, ...],
     no_embed: bool,
     enrich_csvs: tuple[Path, ...],
+    dry_run: bool,
 ) -> None:
     """Ingest one or more German bank-export CSVs (dedup-aware).
 
     By default also computes sentence-transformer embeddings for every newly
     inserted row, so downstream label/predict commands are fast. Pass
     ``--enrich`` with a secondary CSV (e.g. PayPal) to enrich matched rows in
-    the same run.
+    the same run, or add ``--dry-run`` to preview the enrichment without
+    writing anything.
     """
     if not csvs:
         click.echo("no files given", err=True)
         ctx.exit(2)
     cfg: Config = ctx.obj[_CTX_KEY]["config"]
+    if dry_run:
+        _preview_enrich(cfg, csvs, enrich_csvs)
+        return
     conn = _connect(cfg)
     try:
         from expense_analyzer.ingestion import ingest_csv
@@ -715,6 +723,57 @@ def _run_enrich(conn, cfg: Config, path: Path, source: str, embedder) -> None:
         f"matched={rep.matched:>4}  ambiguous={rep.ambiguous:>4}  "
         f"unmatched={rep.unmatched_expenses:>4}  reembedded={rep.reembedded:>4}"
     )
+
+
+def _preview_enrich(
+    cfg: Config, csvs: tuple[Path, ...], enrich_csvs: tuple[Path, ...]
+) -> None:
+    """``ingest --dry-run`` showcase: parse the bank CSV(s) and the secondary
+    CSV(s) in memory, match them, and print each enriched record before vs
+    after. Writes nothing."""
+    from expense_analyzer.enrichment.secondary import preview_enrichment
+    from expense_analyzer.ingestion.csv_loader import parse_csv
+    from expense_analyzer.ingestion.sources import detect_adapter
+
+    if not enrich_csvs:
+        click.echo(
+            "--dry-run showcases secondary-source enrichment; "
+            "pass --enrich <csv> (e.g. a PayPal export) to see it."
+        )
+        return
+
+    rows = [row for path in csvs for row in parse_csv(path)]
+    click.echo(f"parsed {len(rows)} bank row(s) from {len(csvs)} file(s) (not stored)\n")
+
+    for path in enrich_csvs:
+        adapter = detect_adapter(path)
+        records = adapter.parse(path)
+        rep = preview_enrichment(
+            rows, records, adapter,
+            date_window_days=cfg.enrichment.date_window_days,
+        )
+        click.echo(
+            f"=== {path.name} (source={rep.source}) — "
+            f"matched={rep.matched}, ambiguous={rep.ambiguous}, "
+            f"unmatched={rep.unmatched} of {rep.candidate_rows} candidate row(s) ==="
+        )
+        if not rep.previews:
+            click.echo("  (no records matched a bank row)\n")
+            continue
+        for pv in rep.previews:
+            amount = pv.row.betrag_cents / 100
+            click.echo(
+                f"\n● {pv.row.buchungsdatum}  {amount:>9.2f} €  "
+                f"{pv.row.zahlungsempfaenger or pv.row.zahlungspflichtiger}"
+            )
+            click.echo(f"    bank Verwendungszweck : {pv.row.verwendungszweck or '—'}")
+            click.echo(f"    without enrichment    : {pv.combined_before}")
+            click.echo(f"    with enrichment       : {pv.combined_after}")
+            click.echo(
+                f"    └ {rep.source} txn {pv.record.source_ref}: "
+                f"{pv.record.counterparty} — {pv.record.description or '—'}"
+            )
+        click.echo("")
 
 
 @cli.command()

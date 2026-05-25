@@ -112,6 +112,31 @@ def test_train_with_mocked_embedder(tmp_path: Path, fixtures_dir: Path) -> None:
     assert "trained" in r.output
 
 
+def test_ingest_dry_run_previews_without_writing(tmp_path: Path, fixtures_dir: Path) -> None:
+    runner = CliRunner()
+    runner.invoke(cli, ["init"], env=_runner_env(tmp_path))
+    r = runner.invoke(
+        cli,
+        ["ingest", "--dry-run",
+         "--enrich", str(fixtures_dir / "sample_paypal.csv"),
+         str(fixtures_dir / "sample_de_paypal.csv")],
+        env=_runner_env(tmp_path),
+    )
+    assert r.exit_code == 0, r.output
+    # Shows the before/after for a concrete matched record.
+    assert "without enrichment" in r.output
+    assert "with enrichment" in r.output
+    assert "Etsy Inc" in r.output
+    assert "matched=2" in r.output
+    # Nothing was written to the DB.
+    import sqlite3
+
+    conn = sqlite3.connect(str(tmp_path / "db.sqlite"))
+    n = conn.execute("SELECT COUNT(*) FROM expenses").fetchone()[0]
+    conn.close()
+    assert n == 0
+
+
 def test_eval_with_mocked_embedder(tmp_path: Path, fixtures_dir: Path) -> None:
     """`expense eval` runs CV on user labels with the HashEmbedder."""
     runner = CliRunner()
