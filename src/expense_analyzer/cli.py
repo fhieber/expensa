@@ -422,13 +422,21 @@ def _resolve_account_for_crypto(ctx: click.Context, name: str | None) -> Account
 
 @account.command("encrypt")
 @click.argument("name", required=False)
+@click.option(
+    "--delete-plaintext/--keep-plaintext",
+    "delete_plain",
+    default=None,
+    help="Delete (or keep) the plaintext safety copy without prompting. "
+    "If neither is given you're asked interactively.",
+)
 @click.pass_context
-def account_encrypt(ctx: click.Context, name: str | None) -> None:
+def account_encrypt(
+    ctx: click.Context, name: str | None, delete_plain: bool | None
+) -> None:
     """Encrypt an account's database at rest (AES-256 via SQLCipher).
 
-    Prompts for a new password (twice). Keeps a timestamped plaintext
-    safety copy next to the DB -- delete it once you've confirmed the
-    password works."""
+    Prompts for a new password (twice), then offers to delete the
+    timestamped plaintext safety copy it keeps next to the DB."""
     from expense_analyzer.storage import crypto
 
     info = _resolve_account_for_crypto(ctx, name)
@@ -449,9 +457,25 @@ def account_encrypt(ctx: click.Context, name: str | None) -> None:
     except crypto.EncryptionError as e:
         raise click.ClickException(str(e)) from e
     click.echo(f"encrypted {info.db_path}")
-    if safety is not None:
+    if safety is None:
+        return
+    # Offer to remove the plaintext safety copy. Default to keeping it; when
+    # the flag isn't set, ask interactively (but only if there's a TTY, so a
+    # piped/cron run keeps the copy rather than aborting on the prompt).
+    if delete_plain is None:
+        delete_plain = sys.stdin.isatty() and click.confirm(
+            f"A plaintext copy was saved at {safety}. Delete it now?",
+            default=False,
+        )
+    if delete_plain:
+        try:
+            safety.unlink()
+            click.echo("  deleted the plaintext safety copy.")
+        except OSError as e:
+            click.echo(f"  could not delete the plaintext copy: {e}", err=True)
+    else:
         click.echo(
-            f"  plaintext safety copy: {safety}\n"
+            f"  plaintext safety copy kept: {safety}\n"
             "  delete it once you've confirmed the password works."
         )
 

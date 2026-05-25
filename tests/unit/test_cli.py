@@ -547,3 +547,70 @@ def test_legacy_db_auto_registers_default(tmp_path: Path) -> None:
     # The default account points at the global home itself -- no data
     # has been moved.
     assert str(tmp_path) in r.output
+
+
+# --- Encryption commands --------------------------------------------------
+
+import importlib.util as _ilu  # noqa: E402
+
+import pytest  # noqa: E402
+
+_NO_SQLCIPHER = _ilu.find_spec("sqlcipher3") is None
+
+
+@pytest.mark.skipif(_NO_SQLCIPHER, reason="SQLCipher driver not installed")
+def test_account_encrypt_keep_plaintext(tmp_path: Path) -> None:
+    from expense_analyzer.storage import crypto
+
+    runner = CliRunner()
+    runner.invoke(cli, ["init"], env=_runner_env(tmp_path))
+    r = runner.invoke(
+        cli, ["account", "encrypt", "--keep-plaintext"],
+        input="pw\npw\n", env=_runner_env(tmp_path),
+    )
+    assert r.exit_code == 0, r.output
+    assert "kept" in r.output
+    db = tmp_path / "db.sqlite"
+    assert crypto.looks_encrypted(db) is True
+    # The plaintext safety copy survives.
+    assert list(tmp_path.glob("db.pre-encrypt.*.sqlite"))
+
+
+@pytest.mark.skipif(_NO_SQLCIPHER, reason="SQLCipher driver not installed")
+def test_account_encrypt_delete_plaintext(tmp_path: Path) -> None:
+    from expense_analyzer.storage import crypto
+
+    runner = CliRunner()
+    runner.invoke(cli, ["init"], env=_runner_env(tmp_path))
+    r = runner.invoke(
+        cli, ["account", "encrypt", "--delete-plaintext"],
+        input="pw\npw\n", env=_runner_env(tmp_path),
+    )
+    assert r.exit_code == 0, r.output
+    assert "deleted the plaintext safety copy" in r.output
+    db = tmp_path / "db.sqlite"
+    assert crypto.looks_encrypted(db) is True
+    # No plaintext leftover remains.
+    assert list(tmp_path.glob("db.pre-encrypt.*.sqlite")) == []
+
+
+@pytest.mark.skipif(_NO_SQLCIPHER, reason="SQLCipher driver not installed")
+def test_account_encrypt_then_decrypt_round_trip(tmp_path: Path) -> None:
+    from expense_analyzer.storage import crypto
+
+    runner = CliRunner()
+    runner.invoke(cli, ["init"], env=_runner_env(tmp_path))
+    runner.invoke(
+        cli, ["account", "encrypt", "--delete-plaintext"],
+        input="secret\nsecret\n", env=_runner_env(tmp_path),
+    )
+    db = tmp_path / "db.sqlite"
+    assert crypto.looks_encrypted(db)
+    # Read-only command needs the password via env var.
+    env = _runner_env(tmp_path) | {"EXPENSE_ANALYZER_DB_PASSWORD": "secret"}
+    r = runner.invoke(cli, ["status"], env=env)
+    assert r.exit_code == 0, r.output
+    # Decrypt with env password.
+    rd = runner.invoke(cli, ["account", "decrypt"], env=env)
+    assert rd.exit_code == 0, rd.output
+    assert crypto.looks_encrypted(db) is False

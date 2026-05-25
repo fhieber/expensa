@@ -83,13 +83,18 @@ dependency stays optional.
   until the right password is entered. Set / change / remove the password
   under **Settings → Database → Encryption**.
 - **CLI parity:** `expense account encrypt|decrypt|passwd [NAME]`
-  (defaults to the active account). encrypt prompts for a new password;
-  decrypt/passwd read `EXPENSE_ANALYZER_DB_PASSWORD` or prompt. Read-only
-  commands open encrypted DBs via the same env var / interactive prompt.
+  (defaults to the active account). encrypt prompts for a new password,
+  then asks whether to delete the plaintext safety copy
+  (`--delete-plaintext/--keep-plaintext` to skip the prompt; non-TTY
+  keeps it). decrypt/passwd read `EXPENSE_ANALYZER_DB_PASSWORD` or
+  prompt. Read-only commands open encrypted DBs via the same env var /
+  interactive prompt.
 - **Set-password migration:** `crypto.encrypt_file` exports the plain DB
   into a fresh SQLCipher file and keeps a timestamped **plaintext**
-  `*.pre-encrypt.*.sqlite` safety copy (UI warns to delete it).
-  `decrypt_file` / `change_password` (PRAGMA rekey) mirror this.
+  `*.pre-encrypt.*.sqlite` safety copy. The Settings → Encryption section
+  globs for leftover `*.pre-encrypt.*.sqlite` copies (from UI *or* CLI)
+  and offers a per-file Delete button. `decrypt_file` /
+  `change_password` (PRAGMA rekey) mirror the export approach.
 - **Backups follow the account:** an encrypted account exports an
   **encrypted** SQLCipher backup under its current key
   (`crypto.export_encrypted_copy`); a plaintext account exports plaintext

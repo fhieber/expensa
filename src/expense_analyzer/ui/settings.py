@@ -810,12 +810,46 @@ def _render_encryption(cfg) -> None:
         )
         return
 
+    _render_plaintext_safety_cleanup(cfg)
+
     if encrypted:
         _render_change_password(cfg, active)
         st.markdown("---")
         _render_remove_encryption(cfg, active)
     else:
         _render_set_password(cfg, active)
+
+
+def _plaintext_safety_copies(cfg) -> list[Path]:
+    """Leftover plaintext ``*.pre-encrypt.*.sqlite`` snapshots next to the DB.
+
+    These are written when an account is encrypted (UI or CLI) so a
+    forgotten password isn't fatal -- but they're unencrypted, so we
+    surface them for deletion once the password is confirmed working."""
+    db_path = Path(cfg.db_path)
+    return sorted(db_path.parent.glob(f"{db_path.stem}.pre-encrypt.*.sqlite"))
+
+
+def _render_plaintext_safety_cleanup(cfg) -> None:
+    leftovers = _plaintext_safety_copies(cfg)
+    if not leftovers:
+        return
+    st.warning(
+        "A **plaintext** safety copy from encrypting this account is still "
+        "on disk — your data is readable from it regardless of the password. "
+        "Delete it once you've confirmed the password works."
+    )
+    for p in leftovers:
+        cols = st.columns([5, 1])
+        cols[0].code(str(p), language=None)
+        if cols[1].button("Delete", key=f"del_safety_{p.name}",
+                          use_container_width=True):
+            try:
+                p.unlink()
+                st.toast(f"deleted {p.name}")
+            except OSError as e:
+                st.error(f"could not delete: {e}")
+            st.rerun()
 
 
 def _close_live_connection() -> None:
