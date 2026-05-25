@@ -63,6 +63,46 @@ See the "Proposed feature set per expense" section of `../../.claude/plans/build
 
 (Append new instructions here verbatim with date so context is preserved.)
 
+### 2026-05-25 — Per-account database encryption (SQLCipher)
+
+Accounts can be encrypted at rest with AES-256 via SQLCipher.
+Encryption is **opt-in per account** and the driver is an **optional
+extra** (`pip install expense-analyzer-de[encryption]`, package
+`sqlcipher3-wheels` — ships Linux/macOS/**Windows** wheels, imports as
+`sqlcipher3`). Plaintext accounts keep using stdlib `sqlite3`, so the
+dependency stays optional.
+
+- **Source of truth:** a file is encrypted iff its header is *not* the
+  plaintext `b"SQLite format 3\x00"` magic (`crypto.looks_encrypted`).
+  No flag in `accounts.yaml` to drift.
+- **Passwords are never persisted.** In the UI they live only in
+  `st.session_state["_account_passwords"]` (per slug). The CLI reads
+  `EXPENSE_ANALYZER_DB_PASSWORD` or prompts interactively.
+- **UI flow:** switching to an encrypted account hits the unlock gate in
+  `streamlit_app.py` (`_render_unlock_gate`), which `st.stop()`s the page
+  until the right password is entered. Set / change / remove the password
+  under **Settings → Database → Encryption**.
+- **Set-password migration:** `crypto.encrypt_file` exports the plain DB
+  into a fresh SQLCipher file and keeps a timestamped **plaintext**
+  `*.pre-encrypt.*.sqlite` safety copy (UI warns to delete it).
+  `decrypt_file` / `change_password` (PRAGMA rekey) mirror this.
+- **Backups** of an encrypted account export **decrypted**
+  (`crypto.export_decrypted_copy`) since `conn.backup()` can't cross the
+  sqlcipher↔sqlite3 driver boundary; the UI warns the file is plaintext.
+  Restoring a (plaintext) backup leaves the account unencrypted and the
+  session password is cleared.
+
+The same Settings → Database section gained a **detailed structure
+overview** (`stats.database_overview`): file size, encryption status +
+cipher version, schema version, table count, total rows, and a per-table
+breakdown of row/column counts plus each table's columns
+(type / not-null / PK), views and indexes.
+
+Key files: `storage/crypto.py` (all encryption logic, Streamlit-free),
+`storage/database.py` (`connect(..., password=)`), `storage/stats.py`,
+`ui/_shared.py` (unlock/password helpers + password-keyed connection
+cache), `ui/streamlit_app.py` (unlock gate), `ui/settings.py`.
+
 ### 2026-05-22 — Multi-account support
 
 The package now supports multiple accounts (e.g. Personal vs Business)

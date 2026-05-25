@@ -92,9 +92,21 @@ def _resolve_account(
 # --- Helpers -----------------------------------------------------------------
 
 def _connect(cfg: Config) -> sqlite3.Connection:
+    from expense_analyzer.storage import crypto
     from expense_analyzer.storage.database import get_or_create_database
 
-    return get_or_create_database(cfg.db_path)
+    password: str | None = None
+    if crypto.looks_encrypted(cfg.db_path):
+        password = os.environ.get("EXPENSE_ANALYZER_DB_PASSWORD")
+        if not password:
+            if sys.stdin.isatty():
+                password = click.prompt("Database password", hide_input=True)
+            else:
+                raise click.ClickException(
+                    "database is encrypted: set EXPENSE_ANALYZER_DB_PASSWORD "
+                    "or run the command interactively to be prompted."
+                )
+    return get_or_create_database(cfg.db_path, password)
 
 
 def _embedder(cfg: Config, verbose: bool = True):

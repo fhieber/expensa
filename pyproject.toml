@@ -55,6 +55,13 @@ dev = [
 vendor-lookup = [
     "duckduckgo-search>=5.0",
 ]
+# At-rest database encryption via SQLCipher. `sqlcipher3-wheels` ships
+# prebuilt wheels for Linux, macOS and Windows (no system SQLCipher
+# needed) and imports as `sqlcipher3`. Opt-in per account from the
+# Settings → Database → Encryption section.
+encryption = [
+    "sqlcipher3-wheels>=0.5",
+]
 # Static image export for `expense viz --out *.png` (or *.svg / *.pdf).
 # Plotly's write_image() needs kaleido; HTML export needs nothing extra.
 png-export = [

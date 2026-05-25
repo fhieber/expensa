@@ -35,9 +35,11 @@ from expense_analyzer.ui._shared import (
     get_config,
     get_conn,
     get_registry,
+    is_unlocked,
     remove_account_via_ui,
     rename_account_via_ui,
     set_active_account,
+    unlock,
 )
 
 # ---------------------------------------------------------------------------
@@ -266,6 +268,48 @@ def _render_account_picker() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Unlock gate for encrypted accounts.
+# ---------------------------------------------------------------------------
+
+
+def _render_unlock_gate() -> bool:
+    """Gate the rest of the page behind a password when the active account
+    is encrypted and not yet unlocked this session.
+
+    Returns True when the account is accessible (plaintext or already
+    unlocked); otherwise renders a password prompt and returns False so the
+    caller can ``st.stop()`` before any tab touches the locked DB. Switching
+    to an encrypted account triggers a rerun that lands here, which is what
+    makes the UI ask for the password on account switch."""
+    active = get_active_account()
+    if is_unlocked(active):
+        return True
+
+    from expense_analyzer.storage.crypto import encryption_available
+
+    st.title("🔒 Locked account")
+    st.write(
+        f"Account **{active.name}** is encrypted. Enter its password to continue."
+    )
+    if not encryption_available():
+        st.error(
+            "This database is encrypted but the SQLCipher dependency isn't "
+            "installed in the running environment. Install it with "
+            "`pip install expense-analyzer-de[encryption]` and restart the UI."
+        )
+        return False
+    with st.form("unlock_form"):
+        pw = st.text_input("Password", type="password", key="unlock_pw")
+        if st.form_submit_button("Unlock", type="primary"):
+            if unlock(active, pw):
+                st.session_state.pop("unlock_pw", None)
+                st.rerun()
+            else:
+                st.error("Incorrect password.")
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Top header bar (replaces the old sidebar).
 # ---------------------------------------------------------------------------
 
@@ -337,6 +381,8 @@ def _render_header() -> None:
 
 
 _render_account_picker()
+if not _render_unlock_gate():
+    st.stop()
 _render_header()
 
 tab_dash, tab_review, tab_data, tab_cats, tab_quality, tab_settings = st.tabs(
