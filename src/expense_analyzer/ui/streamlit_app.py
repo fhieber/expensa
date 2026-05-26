@@ -252,10 +252,10 @@ def _render_account_picker() -> None:
         index = 0
 
     label_col, picker_col, add_col, rename_col, remove_col = st.columns(
-        [0.9, 2, 0.5, 0.5, 0.5], width=440, gap="small", vertical_alignment="bottom",
+        [0.9, 2, 0.5, 0.5, 0.5], width=440, gap="small", vertical_alignment="center",
     )
     with label_col:
-        st.write("Expensa Account:")
+        st.markdown("<p style='text-align:right'>Account:</p>", unsafe_allow_html=True)
     with picker_col:
         st.selectbox(
             "Account",
