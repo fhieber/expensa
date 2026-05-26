@@ -251,11 +251,9 @@ def _render_account_picker() -> None:
     except ValueError:
         index = 0
 
-    label_col, picker_col, add_col, rename_col, remove_col = st.columns(
-        [0.9, 2, 0.5, 0.5, 0.5], width=440, gap="small", vertical_alignment="center",
+    picker_col, add_col, rename_col, remove_col = st.columns(
+        [2, 0.5, 0.5, 0.5], width=350, gap="small",
     )
-    with label_col:
-        st.markdown("<p style='text-align:right'>Account:</p>", unsafe_allow_html=True)
     with picker_col:
         st.selectbox(
             "Account",
