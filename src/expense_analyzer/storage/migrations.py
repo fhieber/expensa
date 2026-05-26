@@ -78,6 +78,7 @@ def _migrate_v5(conn: sqlite3.Connection) -> None:
         return
 
     # Step 1: migrate previously-enriched rows.
+    migrated_ids: list[int] = []
     if "enriched_counterparty" in cols:
         for row in conn.execute(
             "SELECT id, enriched_counterparty FROM expenses "
@@ -93,6 +94,12 @@ def _migrate_v5(conn: sqlite3.Connection) -> None:
                 "combined_text = ? WHERE id = ?",
                 (new_vz, _nvz(new_vz), cp_norm, _ct(cp_norm, _nvz(new_vz)), row["id"]),
             )
+            migrated_ids.append(row["id"])
+    # Invalidate embeddings for migrated rows — combined_text changed so
+    # any previously stored vector is now stale.
+    if migrated_ids:
+        ph = ",".join("?" * len(migrated_ids))
+        conn.execute(f"DELETE FROM embeddings WHERE expense_id IN ({ph})", migrated_ids)
 
     # Step 2: simplify existing PayPal rows with "Ihr Einkauf bei <merchant>" in VZ.
     _step2_cols = {"verwendungszweck", "zahlungsempfaenger", "zahlungspflichtiger"}
