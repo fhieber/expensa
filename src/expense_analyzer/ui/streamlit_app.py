@@ -253,6 +253,7 @@ def _render_account_picker() -> None:
 
     picker_col, add_col, rename_col, remove_col = st.columns([2, 0.5, 0.5, 0.5], width=350, gap='small')
     with picker_col:
+        st.caption("Expensa Account:")
         st.selectbox(
             "Account",
             labels,

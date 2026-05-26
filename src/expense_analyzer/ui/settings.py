@@ -100,7 +100,7 @@ def render() -> None:
     conn = get_conn()
     st.title("Settings")
 
-    with st.expander("My Accounts", expanded=False):
+    with st.expander("My Bank Accounts", expanded=False):
         _render_own_ibans_body(conn)
 
     with st.expander("Active Learning", expanded=False):
