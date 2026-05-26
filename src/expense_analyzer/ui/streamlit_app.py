@@ -251,9 +251,12 @@ def _render_account_picker() -> None:
     except ValueError:
         index = 0
 
-    picker_col, add_col, rename_col, remove_col = st.columns([2, 0.5, 0.5, 0.5], width=350, gap='small')
+    label_col, picker_col, add_col, rename_col, remove_col = st.columns(
+        [0.9, 2, 0.5, 0.5, 0.5], gap="small", vertical_alignment="bottom",
+    )
+    with label_col:
+        st.write("Expensa Account:")
     with picker_col:
-        st.caption("Expensa Account:")
         st.selectbox(
             "Account",
             labels,
