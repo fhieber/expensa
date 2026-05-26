@@ -381,10 +381,20 @@ def _run_ui_enrichment(conn, enrich_files, emb, status) -> None:
                 conn, records, adapter, embedder=emb,
                 date_window_days=cfg.enrichment.date_window_days,
             )
-            status.write(
-                f"{f.name}: enriched via {rep.source} · matched={rep.matched} · "
-                f"ambiguous={rep.ambiguous} · unmatched={rep.unmatched_expenses}"
-            )
+            parts = [
+                f"source: {rep.source}",
+                f"parsed: {rep.parsed}",
+                f"matched: {rep.matched}",
+            ]
+            if rep.already_enriched:
+                parts.append(f"already enriched: {rep.already_enriched}")
+            if rep.ambiguous:
+                parts.append(f"ambiguous: {rep.ambiguous}")
+            if rep.unmatched:
+                parts.append(f"no match: {rep.unmatched}")
+            if rep.reembedded:
+                parts.append(f"re-embedded: {rep.reembedded}")
+            status.write(f"{f.name}: " + " · ".join(parts))
         except Exception as e:  # noqa: BLE001 - surface parse/detect errors in UI
             status.write(f"{f.name}: enrichment skipped ({e})")
 

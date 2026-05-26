@@ -31,10 +31,20 @@ DEFAULT_DATE_WINDOW_DAYS = 4
 @dataclass
 class EnrichReport:
     source: str
-    parsed: int = 0
-    matched: int = 0
+    parsed: int = 0          # records in the secondary CSV
+    already_enriched: int = 0  # records skipped — ref already in DB
+    matched: int = 0         # bank rows updated in this run
+    ambiguous: int = 0       # records with tied nearest-date candidates
+    unmatched: int = 0       # eligible records with no matching bank row
     reembedded: int = 0
     enriched_ids: list[int] = field(default_factory=list)
+
+
+@dataclass
+class _MatchResult:
+    matches: list[tuple[dict, EnrichmentRecord]]
+    ambiguous: int   # records dropped due to tied nearest-date candidates
+    unmatched: int   # eligible records with no bank row in window
 
 
 def _match(
@@ -42,7 +52,7 @@ def _match(
     records: list[EnrichmentRecord],
     adapter: SourceAdapter,
     date_window_days: int,
-) -> list[tuple[dict, EnrichmentRecord]]:
+) -> _MatchResult:
     """Return one-to-one (candidate, record) pairs by |amount| + nearest date.
 
     Eligible candidates are those passing ``adapter.candidate_filter``.
@@ -56,6 +66,7 @@ def _match(
         by_cents.setdefault(abs(rec.amount_cents), []).append(rec)
 
     consumed: set[str] = set()
+    ambiguous_refs: set[str] = set()
     matches: list[tuple[dict, EnrichmentRecord]] = []
 
     for cand in sorted(eligible, key=lambda c: (c["buchungsdatum"], c["id"])):
@@ -70,12 +81,20 @@ def _match(
         best = min(abs((cand["buchungsdatum"] - r.txn_date).days) for r in pool)
         closest = [r for r in pool if abs((cand["buchungsdatum"] - r.txn_date).days) == best]
         if len(closest) > 1:
-            continue  # ambiguous
+            for r in closest:
+                ambiguous_refs.add(r.source_ref)
+            continue
         rec = closest[0]
         consumed.add(rec.source_ref)
         matches.append((cand, rec))
 
-    return matches
+    matched_refs = {rec.source_ref for _, rec in matches}
+    unmatched = sum(
+        1 for rec in records
+        if rec.source_ref not in matched_refs
+        and rec.source_ref not in ambiguous_refs
+    )
+    return _MatchResult(matches=matches, ambiguous=len(ambiguous_refs), unmatched=unmatched)
 
 
 def enrich_from_records(
@@ -98,7 +117,9 @@ def enrich_from_records(
             "SELECT enrichment_ref FROM expenses WHERE enrichment_ref IS NOT NULL"
         ).fetchall()
     }
+    already_enriched = [r for r in records if r.source_ref in used_refs]
     eligible = [r for r in records if r.source_ref not in used_refs]
+    report.already_enriched = len(already_enriched)
 
     candidates = [
         dict(row)
@@ -109,8 +130,11 @@ def enrich_from_records(
         ).fetchall()
     ]
 
-    matches = _match(candidates, eligible, adapter, date_window_days)
+    result = _match(candidates, eligible, adapter, date_window_days)
+    matches = result.matches
     report.matched = len(matches)
+    report.ambiguous = result.ambiguous
+    report.unmatched = result.unmatched
 
     for cand, rec in matches:
         eid = int(cand["id"])
@@ -189,16 +213,16 @@ def preview_enrichment(
         for i, row in enumerate(rows)
     ]
 
-    matches = _match(candidates, records, adapter, date_window_days)
+    result = _match(candidates, records, adapter, date_window_days)
     previews = [
         EnrichmentPreview(
             vz_before=rows[cand["id"]].verwendungszweck,
             vz_after=rec.description,
         )
-        for cand, rec in matches
+        for cand, rec in result.matches
     ]
     return PreviewReport(
         source=adapter.name,
-        matched=len(matches),
+        matched=len(result.matches),
         previews=previews,
     )
