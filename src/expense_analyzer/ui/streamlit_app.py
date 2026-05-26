@@ -252,7 +252,7 @@ def _render_account_picker() -> None:
         index = 0
 
     label_col, picker_col, add_col, rename_col, remove_col = st.columns(
-        [0.9, 2, 0.5, 0.5, 0.5], gap="small", vertical_alignment="bottom",
+        [0.9, 2, 0.5, 0.5, 0.5], width=440, gap="small", vertical_alignment="bottom",
     )
     with label_col:
         st.write("Expensa Account:")
