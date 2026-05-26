@@ -301,7 +301,12 @@ def _render_import_expander(conn) -> None:
                  "detail. Matched to bank rows by amount + nearby date; the "
                  "real merchant/item is attached and the row re-embedded.",
         )
-        skip_embed = st.checkbox(
+        _btn_col, _chk_col = st.columns([1, 3], vertical_alignment="center")
+        ingest_clicked = _btn_col.button(
+            "Ingest", type="primary", disabled=not (files or enrich_files),
+            key="data_ingest_btn",
+        )
+        skip_embed = _chk_col.checkbox(
             "Skip embedding computation",
             value=False,
             key="data_ingest_skip_embed",
@@ -311,10 +316,6 @@ def _render_import_expander(conn) -> None:
                 "yet. Missing embeddings are filled automatically the first "
                 "time Auto-Label or Predict-all runs."
             ),
-        )
-        ingest_clicked = st.button(
-            "Ingest", type="primary", disabled=not (files or enrich_files),
-            key="data_ingest_btn",
         )
         if ingest_clicked and (files or enrich_files):
             emb = None if skip_embed else get_embedder()
