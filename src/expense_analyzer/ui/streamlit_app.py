@@ -29,6 +29,7 @@ from expense_analyzer.ui import (
     settings,
 )
 from expense_analyzer.ui._shared import (
+    account_is_encrypted,
     add_account_via_ui,
     clear_tab_state,
     get_active_account,
@@ -235,15 +236,18 @@ def _render_account_picker() -> None:
             _add_account_dialog()
         return
 
-    # The selectbox uses display labels (name); we map back via the
-    # _picker_label_to_id dict. Storing the mapping on session_state
-    # lets the on_change handler resolve without re-walking the
-    # registry.
-    labels = [a.name for a in rows]
-    st.session_state["_picker_label_to_id"] = {a.name: a.id for a in rows}
+    # The selectbox uses display labels (name + optional 🔒); we map
+    # back via _picker_label_to_id. Storing on session_state lets the
+    # on_change handler resolve without re-walking the registry.
+    def _account_label(a) -> str:
+        return f"🔒 {a.name}" if account_is_encrypted(a) else a.name
+
+    labels = [_account_label(a) for a in rows]
+    st.session_state["_picker_label_to_id"] = {lbl: a.id for lbl, a in zip(labels, rows)}
     active = get_active_account()
+    active_label = _account_label(active)
     try:
-        index = labels.index(active.name)
+        index = labels.index(active_label)
     except ValueError:
         index = 0
 

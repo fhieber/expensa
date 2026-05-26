@@ -159,6 +159,9 @@ def set_active_account(account_id: str) -> None:
         # still wins for this session.
         pass
     _connect_cached.clear()
+    # Drop any cached password for the target account so the unlock gate
+    # always re-prompts when switching to an encrypted account.
+    clear_password_for(info.id)
 
 
 def get_config() -> Config:
