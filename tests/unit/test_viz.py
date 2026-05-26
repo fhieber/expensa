@@ -34,9 +34,9 @@ def _label_some(conn: sqlite3.Connection) -> None:
     for r in rows:
         if r["is_income"]:
             add_label(conn, int(r["id"]), income, "user")
-        elif r["counterparty_normalized"] in {"rewe markt", "edeka sued", "aldi sued"}:
+        elif r["counterparty_normalized"] in {"markt alpha", "markt beta", "markt gamma"}:
             add_label(conn, int(r["id"]), food, "user")
-        elif r["counterparty_normalized"] == "vermieter schmidt":
+        elif r["counterparty_normalized"] == "vermieter":
             add_label(conn, int(r["id"]), rent, "user")
 
 
@@ -61,7 +61,7 @@ def test_top_counterparties(tmp_db: sqlite3.Connection, fixtures_dir: Path) -> N
     ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
     df = top_counterparties(tmp_db, n=5)
     assert len(df) == 5
-    # Vermieter Schmidt has the largest single transaction (rent), but BahnCard 100
+    # Vermieter GmbH has the largest single transaction (rent), but BahnCard 100
     # is also high. Just sanity-check it's sorted descending.
     assert (df["amount"].diff().dropna() <= 0).all()
 

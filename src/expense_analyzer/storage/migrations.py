@@ -17,11 +17,127 @@ Bumping the schema version:
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Callable
 
-# (target_version, sql) — applied in order to any DB whose current
-# schema_version is *less than* the target. Empty list = no pending
-# migrations.
-_MIGRATIONS: list[tuple[int, str]] = [
+
+def _add_column_if_missing(
+    conn: sqlite3.Connection, table: str, column: str, decl: str
+) -> None:
+    """``ALTER TABLE ... ADD COLUMN`` guarded by a column-existence check,
+    since SQLite has no ``ADD COLUMN IF NOT EXISTS``. Makes the migration
+    safe to retry on a partially-applied DB.  Silently skips if the table
+    itself doesn't exist (can happen in synthetic test schemas)."""
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    if not rows:
+        return
+    existing = {row["name"] for row in rows}
+    if column not in existing:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+
+def _migrate_v3(conn: sqlite3.Connection) -> None:
+    # v2 -> v3: per-category savings flag.
+    _add_column_if_missing(conn, "categories", "is_savings", "INTEGER NOT NULL DEFAULT 0")
+    rows = conn.execute("PRAGMA table_info(categories)").fetchall()
+    if rows:
+        conn.execute("UPDATE categories SET is_savings = 1 WHERE name = 'Sparen'")
+
+
+def _migrate_v4(conn: sqlite3.Connection) -> None:
+    # v3 -> v4: add enrichment tracking + the now-removed enriched_* columns.
+    for column, decl in (
+        ("enrichment_source", "TEXT"),
+        ("enrichment_ref", "TEXT"),
+        ("enriched_counterparty", "TEXT"),
+        ("enriched_description", "TEXT"),
+        ("enriched_at", "TIMESTAMP"),
+    ):
+        _add_column_if_missing(conn, "expenses", column, decl)
+
+
+def _migrate_v5(conn: sqlite3.Connection) -> None:
+    # v4 -> v5: direct VZ rewriting replaces display-time enrichment.
+    #
+    # 1. For rows previously enriched via the old approach (enriched_counterparty
+    #    is set), write the merchant name directly into verwendungszweck and
+    #    re-derive the normalised columns.
+    # 2. For existing PayPal bank rows where the merchant is already in the
+    #    VZ ("Ihr Einkauf bei <merchant>"), apply the same ingest-time
+    #    simplification retroactively.
+    # 3. Drop the three columns that are no longer needed.
+    import re as _re
+
+    from expense_analyzer.ingestion.normalizer import combined_text as _ct
+    from expense_analyzer.ingestion.normalizer import normalize_counterparty as _ncp
+    from expense_analyzer.ingestion.normalizer import normalize_verwendungszweck as _nvz
+
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(expenses)").fetchall()}
+    if not cols:
+        return
+
+    # Step 1: migrate previously-enriched rows.
+    migrated_ids: list[int] = []
+    if "enriched_counterparty" in cols:
+        for row in conn.execute(
+            "SELECT id, enriched_counterparty FROM expenses "
+            "WHERE enrichment_source = 'paypal' "
+            "AND enriched_counterparty IS NOT NULL AND enriched_counterparty != ''"
+        ).fetchall():
+            name = row["enriched_counterparty"]
+            new_vz = name
+            cp_norm = _ncp(name)
+            conn.execute(
+                "UPDATE expenses SET verwendungszweck = ?, "
+                "verwendungszweck_normalized = ?, counterparty_normalized = ?, "
+                "combined_text = ? WHERE id = ?",
+                (new_vz, _nvz(new_vz), cp_norm, _ct(cp_norm, _nvz(new_vz)), row["id"]),
+            )
+            migrated_ids.append(row["id"])
+    # Invalidate embeddings for migrated rows — combined_text changed so
+    # any previously stored vector is now stale.
+    if migrated_ids:
+        ph = ",".join("?" * len(migrated_ids))
+        conn.execute(f"DELETE FROM embeddings WHERE expense_id IN ({ph})", migrated_ids)
+
+    # Step 2: simplify existing PayPal rows with "Ihr Einkauf bei <merchant>" in VZ.
+    _step2_cols = {"verwendungszweck", "zahlungsempfaenger", "zahlungspflichtiger"}
+    if _step2_cols.issubset(cols):
+        _IEB = _re.compile(r"Ihr\s+Einkauf\s+bei\s+(.+)$", _re.IGNORECASE | _re.DOTALL)
+        for row in conn.execute(
+            "SELECT id, verwendungszweck, zahlungsempfaenger, zahlungspflichtiger "
+            "FROM expenses WHERE enrichment_ref IS NULL"
+        ).fetchall():
+            zep = (row["zahlungsempfaenger"] or "").lower()
+            zpf = (row["zahlungspflichtiger"] or "").lower()
+            if "paypal" not in zep and "paypal" not in zpf:
+                continue
+            vz = row["verwendungszweck"] or ""
+            m = _IEB.search(vz)
+            if not m:
+                continue
+            merchant = m.group(1).strip()
+            if not merchant:
+                continue
+            new_vz = merchant
+            cp_norm = _ncp(merchant)
+            conn.execute(
+                "UPDATE expenses SET verwendungszweck = ?, "
+                "verwendungszweck_normalized = ?, counterparty_normalized = ?, "
+                "combined_text = ? WHERE id = ?",
+                (new_vz, _nvz(new_vz), cp_norm, _ct(cp_norm, _nvz(new_vz)), row["id"]),
+            )
+
+    # Step 3: drop columns superseded by direct VZ rewriting.
+    for col in ("enriched_counterparty", "enriched_description", "enriched_at"):
+        if col in cols:
+            conn.execute(f"ALTER TABLE expenses DROP COLUMN {col}")
+
+
+# (target_version, migration) — applied in order to any DB whose current
+# schema_version is *less than* the target. A migration is either a SQL
+# string (run via executescript) or a callable taking the connection.
+# Empty list = no pending migrations.
+_MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (
         2,
         # v1 -> v2: drop the unused cluster_id column + index. SQLite
@@ -33,19 +149,9 @@ _MIGRATIONS: list[tuple[int, str]] = [
         ALTER TABLE expenses DROP COLUMN cluster_id;
         """,
     ),
-    (
-        3,
-        # v2 -> v3: per-category savings flag. ADD COLUMN can't take an
-        # IF NOT EXISTS guard, but it's a single statement that only runs
-        # when schema_version < 3, so it's safe (fresh DBs get the column
-        # from schema.sql and skip this). The UPDATE backfills installs
-        # that already used a "Sparen" category so their dashboards keep
-        # behaving as before the flag existed.
-        """
-        ALTER TABLE categories ADD COLUMN is_savings INTEGER NOT NULL DEFAULT 0;
-        UPDATE categories SET is_savings = 1 WHERE name = 'Sparen';
-        """,
-    ),
+    (3, _migrate_v3),
+    (4, _migrate_v4),
+    (5, _migrate_v5),
 ]
 
 
@@ -89,13 +195,17 @@ def apply_migrations(conn: sqlite3.Connection) -> list[int]:
     """
     applied: list[int] = []
     current = _current_version(conn)
-    for target, sql in _MIGRATIONS:
+    for target, migration in _MIGRATIONS:
         if current >= target:
             continue
-        # `executescript` issues an implicit COMMIT before running. The
-        # IF EXISTS / IF NOT EXISTS guards in each migration body make
-        # re-running safe on a partially-applied DB.
-        conn.executescript(sql)
+        # SQL migrations: `executescript` issues an implicit COMMIT before
+        # running; their IF EXISTS / IF NOT EXISTS guards (or the
+        # column-existence checks in callable migrations) make re-running
+        # safe on a partially-applied DB.
+        if callable(migration):
+            migration(conn)
+        else:
+            conn.executescript(migration)
         _set_version(conn, target)
         applied.append(target)
         current = target

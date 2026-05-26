@@ -38,13 +38,13 @@ def _label_one(conn: sqlite3.Connection, counterparty_norm: str, category_id: in
 def test_vendor_exact_match_majority(tmp_db: sqlite3.Connection, fixtures_dir: Path) -> None:
     ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
     cid = upsert_category(tmp_db, "Lebensmittel")
-    # Label every REWE row as Lebensmittel.
+    # Label every Markt Alpha row as Lebensmittel.
     rows = tmp_db.execute(
-        "SELECT id FROM expenses WHERE counterparty_normalized = 'rewe markt'"
+        "SELECT id FROM expenses WHERE counterparty_normalized = 'markt alpha'"
     ).fetchall()
     for r in rows:
         add_label(tmp_db, int(r["id"]), cid, "user")
-    hit = _vendor_exact_match(tmp_db, "rewe markt", agreement_min=0.8)
+    hit = _vendor_exact_match(tmp_db, "markt alpha", agreement_min=0.8)
     assert hit is not None
     assert hit[0] == cid
     assert hit[1] == 1.0
@@ -57,12 +57,12 @@ def test_vendor_exact_match_below_agreement_threshold(
     a = upsert_category(tmp_db, "Lebensmittel")
     b = upsert_category(tmp_db, "Sonstiges")
     rows = tmp_db.execute(
-        "SELECT id FROM expenses WHERE counterparty_normalized = 'rewe markt'"
+        "SELECT id FROM expenses WHERE counterparty_normalized = 'markt alpha'"
     ).fetchall()
     # Half-half disagreement -> below 0.8 threshold.
     for i, r in enumerate(rows):
         add_label(tmp_db, int(r["id"]), a if i % 2 == 0 else b, "user")
-    assert _vendor_exact_match(tmp_db, "rewe markt", agreement_min=0.8) is None
+    assert _vendor_exact_match(tmp_db, "markt alpha", agreement_min=0.8) is None
 
 
 def test_knn_vote_unanimous() -> None:
@@ -86,9 +86,9 @@ def test_cascade_vendor_exact_match_predicts(
 ) -> None:
     ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
     cid = upsert_category(tmp_db, "Lebensmittel")
-    # Label all REWE rows except the most recent.
+    # Label all Markt Alpha rows except the most recent.
     rows = tmp_db.execute(
-        "SELECT id FROM expenses WHERE counterparty_normalized = 'rewe markt' "
+        "SELECT id FROM expenses WHERE counterparty_normalized = 'markt alpha' "
         "ORDER BY buchungsdatum"
     ).fetchall()
     for r in rows[:-1]:
@@ -108,9 +108,9 @@ def test_cascade_falls_through_to_unknown_with_no_labels(
 ) -> None:
     ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
     upsert_category(tmp_db, "Lebensmittel")  # category exists but no labels
-    cascade = CategorizationCascade(
-        tmp_db, _config_no_zeroshot(tmp_path), HashEmbedder(dim=64)
-    )
+    cfg = _config_no_zeroshot(tmp_path)
+    cfg.category_similarity.enabled = False  # avoid hash-collision false positives
+    cascade = CategorizationCascade(tmp_db, cfg, HashEmbedder(dim=64))
     target = tmp_db.execute("SELECT id FROM expenses LIMIT 1").fetchone()["id"]
     pred = cascade.predict(int(target))
     assert pred.category_id is None
@@ -165,7 +165,7 @@ def test_vendor_industry_boosts_category_similarity(
 
     grocery = _upsert(
         tmp_db, "Lebensmittel",
-        description="REWE Edeka Aldi Lidl Penny Netto Kaufland Supermarkt supermarket Einkauf.",
+        description="Markt Alpha Beta Gamma Haendler Supermarkt supermarket Kauf.",
     )
     other = _upsert(
         tmp_db, "Sonstiges",
@@ -174,11 +174,11 @@ def test_vendor_industry_boosts_category_similarity(
     assert grocery != other
 
     cp = tmp_db.execute(
-        "SELECT counterparty_normalized FROM expenses WHERE counterparty_normalized = 'rewe markt' LIMIT 1"
+        "SELECT counterparty_normalized FROM expenses WHERE counterparty_normalized = 'markt alpha' LIMIT 1"
     ).fetchone()["counterparty_normalized"]
     tmp_db.execute(
         "INSERT INTO vendor_cache(counterparty_normalized, summary, industry) VALUES (?, ?, ?)",
-        (cp, "REWE Markt is a German supermarket chain.", "supermarket"),
+        (cp, "Markt Alpha ist ein Haendler.", "supermarket"),
     )
 
     cfg = _config_no_zeroshot(tmp_path)
@@ -187,16 +187,16 @@ def test_vendor_industry_boosts_category_similarity(
     cascade = CategorizationCascade(tmp_db, cfg, HashEmbedder(dim=128))
     cascade.fit()
 
-    rewe_ids = [
+    alpha_ids = [
         int(r["id"]) for r in tmp_db.execute(
-            "SELECT id FROM expenses WHERE counterparty_normalized = 'rewe markt'"
+            "SELECT id FROM expenses WHERE counterparty_normalized = 'markt alpha'"
         ).fetchall()
     ]
-    preds = cascade.predict_batch(rewe_ids)
-    # All REWE rows must land on Lebensmittel (the category whose
+    preds = cascade.predict_batch(alpha_ids)
+    # All Markt Alpha rows must land on Lebensmittel (the category whose
     # description matches the vendor industry).
     assert all(p.category_id == grocery for p in preds), (
-        f"expected REWE -> Lebensmittel, got "
+        f"expected Markt Alpha -> Lebensmittel, got "
         f"{[(p.expense_id, p.category_id) for p in preds]}"
     )
 
@@ -250,12 +250,12 @@ def test_cascade_fit_and_classifier_predict(
     food = upsert_category(tmp_db, "Lebensmittel")
     rent = upsert_category(tmp_db, "Miete")
     income = upsert_category(tmp_db, "Einkommen")
-    _label_one(tmp_db, "rewe markt", food)
-    _label_one(tmp_db, "edeka sued", food)
-    _label_one(tmp_db, "aldi sued", food)
-    _label_one(tmp_db, "vermieter schmidt", rent)
+    _label_one(tmp_db, "markt alpha", food)
+    _label_one(tmp_db, "markt beta", food)
+    _label_one(tmp_db, "markt gamma", food)
+    _label_one(tmp_db, "vermieter", rent)
     arbeitgeber = tmp_db.execute(
-        "SELECT id FROM expenses WHERE zahlungspflichtiger='Arbeitgeber AG' LIMIT 1"
+        "SELECT id FROM expenses WHERE zahlungspflichtiger='Arbeitgeber GmbH' LIMIT 1"
     ).fetchone()
     add_label(tmp_db, int(arbeitgeber["id"]), income, "user")
 
@@ -304,10 +304,10 @@ def test_predict_batch_is_deterministic_across_input_order(
     ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
     food = upsert_category(tmp_db, "Lebensmittel")
     rent = upsert_category(tmp_db, "Miete")
-    _label_one(tmp_db, "rewe markt", food)
-    _label_one(tmp_db, "edeka sued", food)
-    _label_one(tmp_db, "aldi sued", food)
-    _label_one(tmp_db, "vermieter schmidt", rent)
+    _label_one(tmp_db, "markt alpha", food)
+    _label_one(tmp_db, "markt beta", food)
+    _label_one(tmp_db, "markt gamma", food)
+    _label_one(tmp_db, "vermieter", rent)
     cascade = CategorizationCascade(
         tmp_db, _config_no_zeroshot(tmp_path), HashEmbedder(dim=128)
     )

@@ -71,7 +71,8 @@ _GRID_STATE_KEY = "data_aggrid_grid_state_v3"
 _DATA_RECORDS_SELECT = """
     SELECT
         e.id, e.buchungsdatum,
-        e.counterparty, e.zahlungspflichtiger, e.verwendungszweck,
+        e.counterparty,
+        e.zahlungspflichtiger, e.verwendungszweck,
         e.betrag_cents / 100.0 AS "betrag_€",
         c.name AS category, ll.category_id AS category_id,
         ll.label_source AS label_source, ll.confidence,
@@ -129,7 +130,8 @@ def _build_data_query(
     if search:
         like = f"%{search.lower()}%"
         parts.append(
-            "(LOWER(e.counterparty) LIKE ? OR LOWER(e.verwendungszweck) LIKE ?)"
+            "(LOWER(e.counterparty) LIKE ? "
+            "OR LOWER(e.verwendungszweck) LIKE ?)"
         )
         params.extend([like, like])
     if cats:
@@ -284,19 +286,39 @@ def _render_import_expander(conn) -> None:
         st.caption(
             "Drop one or more German bank-export CSVs (`;` separator, comma "
             "decimal). On Ingest each new row's text/IBAN/numeric features "
-            "and sentence-transformer embedding are computed and stored; the "
-            "table below then pins to those new rows so you can review and "
-            "label them with the Auto-Label flow."
+            "are computed and stored; the table below then pins to those new "
+            "rows so you can review and label them with the Auto-Label flow."
         )
         files = st.file_uploader(
             "CSV file(s)", accept_multiple_files=True, type=["csv"],
             key="data_import_files",
         )
-        ingest_clicked = st.button(
-            "Ingest", type="primary", disabled=not files, key="data_ingest_btn",
+        enrich_files = st.file_uploader(
+            "Enrichment CSV(s) — optional (e.g. PayPal activity export)",
+            accept_multiple_files=True, type=["csv"],
+            key="data_enrich_files",
+            help="A secondary CSV describing the same transactions with more "
+                 "detail. Matched to bank rows by amount + nearby date; the "
+                 "real merchant/item is attached and the row re-embedded.",
         )
-        if ingest_clicked and files:
-            emb = get_embedder()
+        _btn_col, _chk_col = st.columns([1, 3], vertical_alignment="center")
+        ingest_clicked = _btn_col.button(
+            "Ingest", type="primary", disabled=not (files or enrich_files),
+            key="data_ingest_btn",
+        )
+        skip_embed = _chk_col.checkbox(
+            "Skip embedding computation",
+            value=False,
+            key="data_ingest_skip_embed",
+            help=(
+                "Skip the sentence-transformer embedding step. Useful when "
+                "importing a large backlog or when the model isn't downloaded "
+                "yet. Missing embeddings are filled automatically the first "
+                "time Auto-Label or Predict-all runs."
+            ),
+        )
+        if ingest_clicked and (files or enrich_files):
+            emb = None if skip_embed else get_embedder()
             new_ids: list[int] = []
             with st.status("Importing…", expanded=True) as status:
                 progress = st.progress(0.0, text="starting…")
@@ -326,6 +348,7 @@ def _render_import_expander(conn) -> None:
                         f"{f.name}: parsed={r.parsed} · new={r.inserted} · "
                         f"duplicate={r.duplicates} · embedded={r.embedded}"
                     )
+                _run_ui_enrichment(conn, enrich_files, emb, status)
                 progress.empty()
                 status.update(
                     label=f"Imported {len(new_ids)} new row(s).",
@@ -334,8 +357,47 @@ def _render_import_expander(conn) -> None:
             if new_ids:
                 st.session_state["data_pinned_ids"] = new_ids
                 st.rerun()
-            else:
+            elif files:
                 st.info("Nothing new — all records were duplicates.")
+
+
+def _run_ui_enrichment(conn, enrich_files, emb, status) -> None:
+    """Match each uploaded secondary CSV against existing expenses and
+    enrich. Source is auto-detected per file."""
+    if not enrich_files:
+        return
+    from expense_analyzer.enrichment.secondary import enrich_from_records
+    from expense_analyzer.ingestion.sources import detect_adapter
+
+    cfg = get_config()
+    for f in enrich_files:
+        with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tmp:
+            tmp.write(f.read())
+            p = Path(tmp.name)
+        try:
+            adapter = detect_adapter(p)
+            records = adapter.parse(p)
+            rep = enrich_from_records(
+                conn, records, adapter, embedder=emb,
+                date_window_days=cfg.enrichment.date_window_days,
+            )
+        except Exception as e:  # noqa: BLE001 - surface parse/detect errors in UI
+            status.write(f"{f.name}: enrichment skipped ({e})")
+            continue
+        parts = [
+            f"source: {rep.source}",
+            f"parsed: {rep.parsed}",
+            f"matched: {rep.matched}",
+        ]
+        if rep.already_enriched:
+            parts.append(f"already enriched: {rep.already_enriched}")
+        if rep.ambiguous:
+            parts.append(f"ambiguous: {rep.ambiguous}")
+        if rep.unmatched:
+            parts.append(f"no match: {rep.unmatched}")
+        if rep.reembedded:
+            parts.append(f"re-embedded: {rep.reembedded}")
+        status.write(f"{f.name}: " + " · ".join(parts))
 
 
 def _render_pinned_banner() -> list[int]:
@@ -991,7 +1053,7 @@ def _render_top_action_bar_and_grid_and_actions(
         st.session_state[_GRID_STATE_KEY] = _gs
 
     edited_df = response.get("data")
-    if edited_df is None:
+    if not isinstance(edited_df, pd.DataFrame):
         edited_df = df
     selected_rows = response.get("selected_rows")
     if isinstance(selected_rows, pd.DataFrame):
@@ -1013,12 +1075,12 @@ def _render_top_action_bar_and_grid_and_actions(
 
     n_pending = len(pending_updates)
     n_selected = len(sel_ids)
-    n_rows = len(edited_df) if edited_df is not None else 0
+    n_rows = len(edited_df) if isinstance(edited_df, pd.DataFrame) else 0
 
     # Signed totals over the SQL-filter scope (= every row AgGrid
     # received). Column-filtering at the grid level is invisible from
     # here; see comment in `_render_caption`.
-    if edited_df is not None and not edited_df.empty:
+    if isinstance(edited_df, pd.DataFrame) and not edited_df.empty:
         total_amount = float(edited_df["betrag_€"].sum())
         sel_set_for_sum = {int(x) for x in sel_ids}
         if sel_set_for_sum:

@@ -39,7 +39,9 @@ from expense_analyzer.viz import (
 # SQLite inlines it at plan time.
 _DASHBOARD_RECORDS_SELECT = """
     SELECT
-        e.id, e.buchungsdatum, e.counterparty, e.verwendungszweck,
+        e.id, e.buchungsdatum,
+        e.counterparty,
+        e.verwendungszweck,
         e.betrag_cents / 100.0 AS "betrag_€",
         COALESCE(c.name, '(unkategorisiert)') AS category,
         e.iban

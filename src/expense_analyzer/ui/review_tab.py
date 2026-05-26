@@ -180,7 +180,8 @@ def _load_expense_rows(conn: sqlite3.Connection, ids: list[int]) -> dict[int, di
     ph = ",".join("?" * len(ids))
     rows = conn.execute(
         f"""
-        SELECT e.id, e.buchungsdatum, e.counterparty,
+        SELECT e.id, e.buchungsdatum,
+               e.counterparty,
                e.zahlungspflichtiger, e.verwendungszweck,
                e.betrag_cents,
                c.name  AS model_cat_name,
@@ -194,7 +195,11 @@ def _load_expense_rows(conn: sqlite3.Connection, ids: list[int]) -> dict[int, di
         """,
         ids,
     ).fetchall()
-    return {int(r["id"]): dict(r) for r in rows}
+    out: dict[int, dict] = {}
+    for r in rows:
+        d = dict(r)
+        out[int(d["id"])] = d
+    return out
 
 
 def _run_predictions(

@@ -29,9 +29,9 @@ def _seed_labels_and_embeddings(
         "SELECT id, counterparty_normalized, combined_text FROM expenses"
     ).fetchall()
     for r in rows:
-        if r["counterparty_normalized"] in {"rewe markt", "edeka sued", "aldi sued"}:
+        if r["counterparty_normalized"] in {"markt alpha", "markt beta", "markt gamma"}:
             add_label(conn, int(r["id"]), food, "user")
-        elif r["counterparty_normalized"] == "vermieter schmidt":
+        elif r["counterparty_normalized"] == "vermieter":
             add_label(conn, int(r["id"]), rent, "user")
     store_embeddings(
         conn, embedder, [(r["id"], r["combined_text"]) for r in rows]
@@ -81,7 +81,7 @@ def test_project_drops_singleton_classes(
     ).fetchall()
     seeded_sport = False
     for r in rows:
-        if r["counterparty_normalized"] in {"rewe markt", "edeka sued", "aldi sued"}:
+        if r["counterparty_normalized"] in {"markt alpha", "markt beta", "markt gamma"}:
             add_label(tmp_db, int(r["id"]), food, "user")
         elif not seeded_sport:
             add_label(tmp_db, int(r["id"]), sport, "user")

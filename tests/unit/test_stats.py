@@ -33,13 +33,13 @@ def test_category_stats_counts_labeled_expenses(
     food = upsert_category(tmp_db, "Lebensmittel", color="#0f0")
     rent = upsert_category(tmp_db, "Miete", color="#5e35b1")
 
-    for cp in ("rewe markt", "edeka sued", "aldi sued"):
+    for cp in ("markt alpha", "markt beta", "markt gamma"):
         for r in tmp_db.execute(
             "SELECT id FROM expenses WHERE counterparty_normalized = ?", (cp,)
         ).fetchall():
             add_label(tmp_db, int(r["id"]), food, "user")
     for r in tmp_db.execute(
-        "SELECT id FROM expenses WHERE counterparty_normalized = 'vermieter schmidt'"
+        "SELECT id FROM expenses WHERE counterparty_normalized = 'vermieter'"
     ).fetchall():
         add_label(tmp_db, int(r["id"]), rent, "user")
 
@@ -74,7 +74,7 @@ def test_uncategorized_stat_counts_unlabeled(
     ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
     food = upsert_category(tmp_db, "Lebensmittel")
     rewe = tmp_db.execute(
-        "SELECT id FROM expenses WHERE counterparty_normalized = 'rewe markt' ORDER BY id LIMIT 1"
+        "SELECT id FROM expenses WHERE counterparty_normalized = 'markt alpha' ORDER BY id LIMIT 1"
     ).fetchone()
     add_label(tmp_db, int(rewe["id"]), food, "user")
 
@@ -107,4 +107,4 @@ def test_database_overview_reports_structure(
     assert ov.n_tables == len(ov.tables)
     assert ov.n_rows_total >= 50
     assert ov.n_columns_total == sum(t.n_columns for t in ov.tables)
-    assert ov.schema_version == 3
+    assert ov.schema_version == 5

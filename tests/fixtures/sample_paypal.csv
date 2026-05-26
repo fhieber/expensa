@@ -1,0 +1,7 @@
+"Datum","Uhrzeit","Zeitzone","Beschreibung","Währung","Brutto","Entgelt","Netto","Guthaben","Transaktionscode","Absender E-Mail-Adresse","Name","Name der Bank","Bankkonto","Versand- und Bearbeitungsgebühr","Umsatzsteuer","Rechnungsnummer","Zugehöriger Transaktionscode"
+"03.03.2026","12:01:00","CET","Kauf Ref 2026-001","EUR","-19,80","0,00","-19,80","100,00","TXN-ALPHA-1","","Haendler Alpha GmbH","Deutsche Bank","DE99500700240012345600","0,00","0,00","",""
+"09.03.2026","09:30:00","CET","Kauf Ref 2026-002","EUR","-45,00","0,00","-45,00","55,00","TXN-BETA-1","","Haendler Beta GmbH","Deutsche Bank","DE99500700240012345600","0,00","0,00","",""
+"11.03.2026","18:00:00","CET","Kauf Ref 2026-003","EUR","-50,00","0,00","-50,00","5,00","TXN-GAMMA","vendor-a@example.com","Haendler Gamma GmbH","Deutsche Bank","DE99500700240012345600","0,00","0,00","",""
+"13.03.2026","18:00:00","CET","Kauf Ref 2026-004","EUR","-50,00","0,00","-50,00","-45,00","TXN-DELTA","vendor-b@example.com","Haendler Delta GmbH","Deutsche Bank","DE99500700240012345600","0,00","0,00","",""
+"25.03.2026","10:00:00","CET","Kauf Ref 2026-005","EUR","-5,00","0,00","-5,00","-80,00","TXN-FAR","","Haendler Epsilon GmbH","Deutsche Bank","DE99500700240012345600","0,00","0,00","",""
+"28.03.2026","10:00:00","CET","Kauf Ref 2026-006","EUR","-7,00","0,00","-7,00","-87,00","","","Haendler Zeta GmbH","Deutsche Bank","DE99500700240012345600","0,00","0,00","",""

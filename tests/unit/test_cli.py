@@ -19,6 +19,11 @@ def _runner_env(tmp_path: Path) -> dict:
     return {"EXPENSE_ANALYZER_HOME": str(tmp_path)}
 
 
+def _db(tmp_path: Path, slug: str = "personal") -> Path:
+    """DB path for the account created by `init Personal` (or any named slug)."""
+    return tmp_path / "accounts" / slug / "db.sqlite"
+
+
 def test_help_lists_subcommands() -> None:
     r = CliRunner().invoke(cli, ["--help"])
     assert r.exit_code == 0
@@ -28,16 +33,16 @@ def test_help_lists_subcommands() -> None:
 
 def test_init_creates_db_and_categories(tmp_path: Path) -> None:
     runner = CliRunner()
-    r = runner.invoke(cli, ["init"], env=_runner_env(tmp_path))
+    r = runner.invoke(cli, ["init", "Personal"], env=_runner_env(tmp_path))
     assert r.exit_code == 0, r.output
-    assert (tmp_path / "db.sqlite").exists()
+    assert _db(tmp_path).exists()
     r2 = runner.invoke(cli, ["categories", "list"], env=_runner_env(tmp_path))
     assert "Lebensmittel" in r2.output
 
 
 def test_ingest_reports_counts(tmp_path: Path, fixtures_dir: Path) -> None:
     runner = CliRunner()
-    runner.invoke(cli, ["init"], env=_runner_env(tmp_path))
+    runner.invoke(cli, ["init", "Personal"], env=_runner_env(tmp_path))
     r = runner.invoke(
         cli, ["ingest", "--no-embed", str(fixtures_dir / "sample_de.csv")], env=_runner_env(tmp_path)
     )
@@ -52,7 +57,7 @@ def test_ingest_reports_counts(tmp_path: Path, fixtures_dir: Path) -> None:
 
 def test_status_after_ingest(tmp_path: Path, fixtures_dir: Path) -> None:
     runner = CliRunner()
-    runner.invoke(cli, ["init"], env=_runner_env(tmp_path))
+    runner.invoke(cli, ["init", "Personal"], env=_runner_env(tmp_path))
     runner.invoke(
         cli, ["ingest", "--no-embed", str(fixtures_dir / "sample_de.csv")], env=_runner_env(tmp_path)
     )
@@ -63,7 +68,7 @@ def test_status_after_ingest(tmp_path: Path, fixtures_dir: Path) -> None:
 
 def test_viz_writes_html(tmp_path: Path, fixtures_dir: Path) -> None:
     runner = CliRunner()
-    runner.invoke(cli, ["init"], env=_runner_env(tmp_path))
+    runner.invoke(cli, ["init", "Personal"], env=_runner_env(tmp_path))
     runner.invoke(
         cli, ["ingest", "--no-embed", str(fixtures_dir / "sample_de.csv")], env=_runner_env(tmp_path)
     )
@@ -75,7 +80,7 @@ def test_viz_writes_html(tmp_path: Path, fixtures_dir: Path) -> None:
 
 def test_export_csv(tmp_path: Path, fixtures_dir: Path) -> None:
     runner = CliRunner()
-    runner.invoke(cli, ["init"], env=_runner_env(tmp_path))
+    runner.invoke(cli, ["init", "Personal"], env=_runner_env(tmp_path))
     runner.invoke(
         cli, ["ingest", "--no-embed", str(fixtures_dir / "sample_de.csv")], env=_runner_env(tmp_path)
     )
@@ -90,7 +95,7 @@ def test_export_csv(tmp_path: Path, fixtures_dir: Path) -> None:
 def test_train_with_mocked_embedder(tmp_path: Path, fixtures_dir: Path) -> None:
     """Train should run with the HashEmbedder injected via patch."""
     runner = CliRunner()
-    runner.invoke(cli, ["init"], env=_runner_env(tmp_path))
+    runner.invoke(cli, ["init", "Personal"], env=_runner_env(tmp_path))
     runner.invoke(
         cli, ["ingest", "--no-embed", str(fixtures_dir / "sample_de.csv")], env=_runner_env(tmp_path)
     )
@@ -100,7 +105,7 @@ def test_train_with_mocked_embedder(tmp_path: Path, fixtures_dir: Path) -> None:
     # Easier: poke the DB directly.
     import sqlite3
 
-    conn = sqlite3.connect(str(tmp_path / "db.sqlite"))
+    conn = sqlite3.connect(str(_db(tmp_path)))
     conn.execute("INSERT INTO labels(expense_id, category_id, source) VALUES (1, 1, 'user')")
     conn.execute("INSERT INTO labels(expense_id, category_id, source) VALUES (2, 2, 'user')")
     conn.commit()
@@ -112,17 +117,42 @@ def test_train_with_mocked_embedder(tmp_path: Path, fixtures_dir: Path) -> None:
     assert "trained" in r.output
 
 
+def test_ingest_dry_run_previews_without_writing(tmp_path: Path, fixtures_dir: Path) -> None:
+    runner = CliRunner()
+    runner.invoke(cli, ["init", "Personal"], env=_runner_env(tmp_path))
+    r = runner.invoke(
+        cli,
+        ["ingest", "--dry-run",
+         "--enrich", str(fixtures_dir / "sample_paypal.csv"),
+         str(fixtures_dir / "sample_de_paypal.csv")],
+        env=_runner_env(tmp_path),
+    )
+    assert r.exit_code == 0, r.output
+    # Shows the before/after for a concrete matched record.
+    assert "without enrichment" in r.output
+    assert "with enrichment" in r.output
+    assert "Haendler Alpha GmbH" in r.output
+    assert "matched=2" in r.output
+    # Nothing was written to the DB.
+    import sqlite3
+
+    conn = sqlite3.connect(str(_db(tmp_path)))
+    n = conn.execute("SELECT COUNT(*) FROM expenses").fetchone()[0]
+    conn.close()
+    assert n == 0
+
+
 def test_eval_with_mocked_embedder(tmp_path: Path, fixtures_dir: Path) -> None:
     """`expense eval` runs CV on user labels with the HashEmbedder."""
     runner = CliRunner()
-    runner.invoke(cli, ["init"], env=_runner_env(tmp_path))
+    runner.invoke(cli, ["init", "Personal"], env=_runner_env(tmp_path))
     runner.invoke(
         cli, ["ingest", "--no-embed", str(fixtures_dir / "sample_de.csv")],
         env=_runner_env(tmp_path),
     )
     import sqlite3
 
-    conn = sqlite3.connect(str(tmp_path / "db.sqlite"))
+    conn = sqlite3.connect(str(_db(tmp_path)))
     # Two categories, three labels each -> 2-fold stratifiable.
     for eid in (1, 2, 3):
         conn.execute(
@@ -152,7 +182,7 @@ def test_vendor_list_empty_cache_message(tmp_path: Path) -> None:
     """`expense vendor list` on a fresh DB should say the cache is empty,
     not crash, and not require vendor_lookup.enabled (read-only command)."""
     runner = CliRunner()
-    runner.invoke(cli, ["init"], env=_runner_env(tmp_path))
+    runner.invoke(cli, ["init", "Personal"], env=_runner_env(tmp_path))
     r = runner.invoke(cli, ["vendor", "list"], env=_runner_env(tmp_path))
     assert r.exit_code == 0, r.output
     assert "empty" in r.output.lower()
@@ -166,19 +196,19 @@ def test_vendor_list_shows_cached_rows_with_german_industry(
     import sqlite3
 
     runner = CliRunner()
-    runner.invoke(cli, ["init"], env=_runner_env(tmp_path))
-    conn = sqlite3.connect(tmp_path / "db.sqlite")
+    runner.invoke(cli, ["init", "Personal"], env=_runner_env(tmp_path))
+    conn = sqlite3.connect(_db(tmp_path))
     conn.row_factory = sqlite3.Row
     conn.execute(
         "INSERT INTO vendor_cache(counterparty_normalized, summary, industry) "
         "VALUES (?, ?, ?)",
-        ("rewe markt", "REWE ist eine deutsche Supermarktkette.", "supermarket"),
+        ("markt alpha", "Markt Alpha ist ein Lebensmittelhaendler.", "supermarket"),
     )
     conn.commit()
     conn.close()
     r = runner.invoke(cli, ["vendor", "list"], env=_runner_env(tmp_path))
     assert r.exit_code == 0, r.output
-    assert "rewe markt" in r.output
+    assert "markt alpha" in r.output
     # The English legacy label is translated to German on display.
     assert "Supermarkt" in r.output
     assert "supermarket" not in r.output.lower().split("counterparty")[1]
@@ -189,20 +219,20 @@ def test_vendor_show_full_snippet(tmp_path: Path) -> None:
     import sqlite3
 
     runner = CliRunner()
-    runner.invoke(cli, ["init"], env=_runner_env(tmp_path))
-    conn = sqlite3.connect(tmp_path / "db.sqlite")
+    runner.invoke(cli, ["init", "Personal"], env=_runner_env(tmp_path))
+    conn = sqlite3.connect(_db(tmp_path))
     conn.execute(
         "INSERT INTO vendor_cache(counterparty_normalized, summary, industry) "
         "VALUES (?, ?, ?)",
         (
-            "edeka sued",
+            "markt beta",
             "Edeka Zentrale AG & Co. KG ist eine Verbundgruppe selbstaendiger Kaufleute.",
             "Supermarkt",
         ),
     )
     conn.commit()
     conn.close()
-    r = runner.invoke(cli, ["vendor", "show", "edeka sued"], env=_runner_env(tmp_path))
+    r = runner.invoke(cli, ["vendor", "show", "markt beta"], env=_runner_env(tmp_path))
     assert r.exit_code == 0, r.output
     assert "Edeka Zentrale" in r.output
     assert "Verbundgruppe" in r.output  # full snippet, not truncated
@@ -211,7 +241,7 @@ def test_vendor_show_full_snippet(tmp_path: Path) -> None:
 
 def test_vendor_show_missing_returns_error(tmp_path: Path) -> None:
     runner = CliRunner()
-    runner.invoke(cli, ["init"], env=_runner_env(tmp_path))
+    runner.invoke(cli, ["init", "Personal"], env=_runner_env(tmp_path))
     r = runner.invoke(cli, ["vendor", "show", "unknown vendor"], env=_runner_env(tmp_path))
     assert r.exit_code != 0
     assert "no cache entry" in r.output.lower()
@@ -223,9 +253,9 @@ def test_vendor_clear_single_and_all(tmp_path: Path) -> None:
     import sqlite3
 
     runner = CliRunner()
-    runner.invoke(cli, ["init"], env=_runner_env(tmp_path))
-    conn = sqlite3.connect(tmp_path / "db.sqlite")
-    for cp in ("rewe markt", "edeka sued", "aldi sued"):
+    runner.invoke(cli, ["init", "Personal"], env=_runner_env(tmp_path))
+    conn = sqlite3.connect(_db(tmp_path))
+    for cp in ("markt alpha", "markt beta", "markt gamma"):
         conn.execute(
             "INSERT INTO vendor_cache(counterparty_normalized, summary, industry) "
             "VALUES (?, ?, ?)",
@@ -235,7 +265,7 @@ def test_vendor_clear_single_and_all(tmp_path: Path) -> None:
     conn.close()
     r = runner.invoke(
         cli,
-        ["vendor", "clear", "--counterparty", "rewe markt", "--yes"],
+        ["vendor", "clear", "--counterparty", "markt alpha", "--yes"],
         env=_runner_env(tmp_path),
     )
     assert r.exit_code == 0, r.output
@@ -247,23 +277,65 @@ def test_vendor_clear_single_and_all(tmp_path: Path) -> None:
     assert "empty" in r3.output.lower()
 
 
+def test_enrich_command_reports_matches(tmp_path: Path, fixtures_dir: Path) -> None:
+    runner = CliRunner()
+    runner.invoke(cli, ["init", "Personal"], env=_runner_env(tmp_path))
+    runner.invoke(
+        cli, ["ingest", "--no-embed", str(fixtures_dir / "sample_de_paypal.csv")],
+        env=_runner_env(tmp_path),
+    )
+    r = runner.invoke(
+        cli,
+        ["enrich", "--no-embed", "--source", "paypal",
+         str(fixtures_dir / "sample_paypal.csv")],
+        env=_runner_env(tmp_path),
+    )
+    assert r.exit_code == 0, r.output
+    assert "source=paypal" in r.output
+    assert "matched=   2" in r.output
+
+
+def test_ingest_with_enrich_flag(tmp_path: Path, fixtures_dir: Path) -> None:
+    runner = CliRunner()
+    runner.invoke(cli, ["init", "Personal"], env=_runner_env(tmp_path))
+    r = runner.invoke(
+        cli,
+        ["ingest", "--no-embed",
+         "--enrich", str(fixtures_dir / "sample_paypal.csv"),
+         str(fixtures_dir / "sample_de_paypal.csv")],
+        env=_runner_env(tmp_path),
+    )
+    assert r.exit_code == 0, r.output
+    assert "matched=   2" in r.output
+    # The Haendler Alpha line is enriched in the same run — VZ written directly.
+    import sqlite3
+
+    conn = sqlite3.connect(str(_db(tmp_path)))
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT verwendungszweck FROM expenses WHERE betrag_cents = -1980"
+    ).fetchone()
+    conn.close()
+    assert row["verwendungszweck"] == "Haendler Alpha GmbH"
+
+
 def test_vendor_lookup_disabled_message(tmp_path: Path) -> None:
     runner = CliRunner()
-    runner.invoke(cli, ["init"], env=_runner_env(tmp_path))
+    runner.invoke(cli, ["init", "Personal"], env=_runner_env(tmp_path))
     # Write a user config that explicitly disables vendor lookup so the test
     # doesn't depend on the bundled default.
     (tmp_path / "config.yaml").write_text(
         "vendor_lookup:\n  enabled: false\n",
         encoding="utf-8",
     )
-    r = runner.invoke(cli, ["vendor-lookup", "REWE"], env=_runner_env(tmp_path))
+    r = runner.invoke(cli, ["vendor-lookup", "Markt Alpha"], env=_runner_env(tmp_path))
     assert r.exit_code != 0
     assert "enabled is False" in r.output
 
 
 def test_categories_remove_unused(tmp_path: Path) -> None:
     runner = CliRunner()
-    runner.invoke(cli, ["init"], env=_runner_env(tmp_path))
+    runner.invoke(cli, ["init", "Personal"], env=_runner_env(tmp_path))
     runner.invoke(cli, ["categories", "add", "ToRemove"], env=_runner_env(tmp_path))
     r = runner.invoke(
         cli, ["categories", "remove", "ToRemove", "--yes"], env=_runner_env(tmp_path)
@@ -274,7 +346,7 @@ def test_categories_remove_unused(tmp_path: Path) -> None:
 
 def test_categories_remove_missing_returns_error(tmp_path: Path) -> None:
     runner = CliRunner()
-    runner.invoke(cli, ["init"], env=_runner_env(tmp_path))
+    runner.invoke(cli, ["init", "Personal"], env=_runner_env(tmp_path))
     r = runner.invoke(
         cli, ["categories", "remove", "Ghost", "--yes"], env=_runner_env(tmp_path)
     )
@@ -286,14 +358,14 @@ def test_categories_remove_refuses_when_labels_exist(
     tmp_path: Path, fixtures_dir: Path
 ) -> None:
     runner = CliRunner()
-    runner.invoke(cli, ["init"], env=_runner_env(tmp_path))
+    runner.invoke(cli, ["init", "Personal"], env=_runner_env(tmp_path))
     runner.invoke(
         cli, ["ingest", "--no-embed", str(fixtures_dir / "sample_de.csv")], env=_runner_env(tmp_path)
     )
     # Manually attach a label to category #1.
     import sqlite3
 
-    conn = sqlite3.connect(str(tmp_path / "db.sqlite"))
+    conn = sqlite3.connect(str(_db(tmp_path)))
     conn.execute("INSERT INTO labels(expense_id, category_id, source) VALUES (1, 1, 'user')")
     conn.commit()
     name = conn.execute("SELECT name FROM categories WHERE id=1").fetchone()[0]
@@ -316,7 +388,7 @@ def test_categories_remove_refuses_when_labels_exist(
 
 def test_reset_clears_data_keeps_categories(tmp_path: Path, fixtures_dir: Path) -> None:
     runner = CliRunner()
-    runner.invoke(cli, ["init"], env=_runner_env(tmp_path))
+    runner.invoke(cli, ["init", "Personal"], env=_runner_env(tmp_path))
     runner.invoke(
         cli, ["ingest", "--no-embed", str(fixtures_dir / "sample_de.csv")], env=_runner_env(tmp_path)
     )
@@ -329,7 +401,7 @@ def test_reset_clears_data_keeps_categories(tmp_path: Path, fixtures_dir: Path) 
 
 def test_reset_all_wipes_categories_too(tmp_path: Path, fixtures_dir: Path) -> None:
     runner = CliRunner()
-    runner.invoke(cli, ["init"], env=_runner_env(tmp_path))
+    runner.invoke(cli, ["init", "Personal"], env=_runner_env(tmp_path))
     runner.invoke(
         cli, ["ingest", "--no-embed", str(fixtures_dir / "sample_de.csv")], env=_runner_env(tmp_path)
     )
@@ -342,7 +414,7 @@ def test_reset_all_wipes_categories_too(tmp_path: Path, fixtures_dir: Path) -> N
 
 def test_reset_on_empty_db_says_so(tmp_path: Path) -> None:
     runner = CliRunner()
-    runner.invoke(cli, ["init"], env=_runner_env(tmp_path))
+    runner.invoke(cli, ["init", "Personal"], env=_runner_env(tmp_path))
     # init installed 17 categories — wipe with --all so nothing's left.
     runner.invoke(cli, ["reset", "--all", "--yes"], env=_runner_env(tmp_path))
     r = runner.invoke(cli, ["reset", "--all", "--yes"], env=_runner_env(tmp_path))
@@ -563,17 +635,17 @@ def test_account_encrypt_keep_plaintext(tmp_path: Path) -> None:
     from expense_analyzer.storage import crypto
 
     runner = CliRunner()
-    runner.invoke(cli, ["init"], env=_runner_env(tmp_path))
+    runner.invoke(cli, ["init", "Personal"], env=_runner_env(tmp_path))
     r = runner.invoke(
         cli, ["account", "encrypt", "--keep-plaintext"],
         input="pw\npw\n", env=_runner_env(tmp_path),
     )
     assert r.exit_code == 0, r.output
     assert "kept" in r.output
-    db = tmp_path / "db.sqlite"
+    db = _db(tmp_path)
     assert crypto.looks_encrypted(db) is True
     # The plaintext safety copy survives.
-    assert list(tmp_path.glob("db.pre-encrypt.*.sqlite"))
+    assert list(db.parent.glob("db.pre-encrypt.*.sqlite"))
 
 
 @pytest.mark.skipif(_NO_SQLCIPHER, reason="SQLCipher driver not installed")
@@ -581,17 +653,17 @@ def test_account_encrypt_delete_plaintext(tmp_path: Path) -> None:
     from expense_analyzer.storage import crypto
 
     runner = CliRunner()
-    runner.invoke(cli, ["init"], env=_runner_env(tmp_path))
+    runner.invoke(cli, ["init", "Personal"], env=_runner_env(tmp_path))
     r = runner.invoke(
         cli, ["account", "encrypt", "--delete-plaintext"],
         input="pw\npw\n", env=_runner_env(tmp_path),
     )
     assert r.exit_code == 0, r.output
     assert "deleted the plaintext safety copy" in r.output
-    db = tmp_path / "db.sqlite"
+    db = _db(tmp_path)
     assert crypto.looks_encrypted(db) is True
     # No plaintext leftover remains.
-    assert list(tmp_path.glob("db.pre-encrypt.*.sqlite")) == []
+    assert list(db.parent.glob("db.pre-encrypt.*.sqlite")) == []
 
 
 @pytest.mark.skipif(_NO_SQLCIPHER, reason="SQLCipher driver not installed")
@@ -599,12 +671,12 @@ def test_account_encrypt_then_decrypt_round_trip(tmp_path: Path) -> None:
     from expense_analyzer.storage import crypto
 
     runner = CliRunner()
-    runner.invoke(cli, ["init"], env=_runner_env(tmp_path))
+    runner.invoke(cli, ["init", "Personal"], env=_runner_env(tmp_path))
     runner.invoke(
         cli, ["account", "encrypt", "--delete-plaintext"],
         input="secret\nsecret\n", env=_runner_env(tmp_path),
     )
-    db = tmp_path / "db.sqlite"
+    db = _db(tmp_path)
     assert crypto.looks_encrypted(db)
     # Read-only command needs the password via env var.
     env = _runner_env(tmp_path) | {"EXPENSE_ANALYZER_DB_PASSWORD": "secret"}
@@ -614,3 +686,51 @@ def test_account_encrypt_then_decrypt_round_trip(tmp_path: Path) -> None:
     rd = runner.invoke(cli, ["account", "decrypt"], env=env)
     assert rd.exit_code == 0, rd.output
     assert crypto.looks_encrypted(db) is False
+
+
+def test_clean_whitespace_cli_reports_changes(
+    tmp_path: Path, fixtures_dir: Path
+) -> None:
+    """End-to-end: ingest, plant noise via SQL, run `expense
+    clean-whitespace`, assert the row got cleaned."""
+    import sqlite3
+
+    runner = CliRunner()
+    runner.invoke(cli, ["init", "Personal"], env=_runner_env(tmp_path))
+    runner.invoke(
+        cli, ["ingest", "--no-embed", str(fixtures_dir / "sample_de.csv")],
+        env=_runner_env(tmp_path),
+    )
+    conn = sqlite3.connect(_db(tmp_path))
+    conn.execute(
+        "UPDATE expenses SET counterparty = ? WHERE id = 1",
+        ("PayPal Europe\t\t22-24   Boulevard Royal",),
+    )
+    conn.commit()
+    conn.close()
+
+    # Dry run reports what would change but writes nothing.
+    r_dry = runner.invoke(
+        cli, ["clean-whitespace", "--dry-run"], env=_runner_env(tmp_path),
+    )
+    assert r_dry.exit_code == 0, r_dry.output
+    assert "would update 1 row" in r_dry.output
+    assert "dry run" in r_dry.output
+
+    # Real run applies and persists.
+    r = runner.invoke(cli, ["clean-whitespace"], env=_runner_env(tmp_path))
+    assert r.exit_code == 0, r.output
+    assert "updated 1 row" in r.output
+
+    conn = sqlite3.connect(_db(tmp_path))
+    conn.row_factory = sqlite3.Row
+    after = conn.execute(
+        "SELECT counterparty FROM expenses WHERE id = 1"
+    ).fetchone()
+    conn.close()
+    assert after["counterparty"] == "PayPal Europe 22-24 Boulevard Royal"
+
+    # Re-running on the now-clean DB reports zero updates.
+    r_again = runner.invoke(cli, ["clean-whitespace"], env=_runner_env(tmp_path))
+    assert r_again.exit_code == 0, r_again.output
+    assert "updated 0 row" in r_again.output

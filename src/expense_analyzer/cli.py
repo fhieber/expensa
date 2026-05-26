@@ -167,12 +167,44 @@ def cli(
 # --- init --------------------------------------------------------------------
 
 @cli.command()
+@click.argument("name", required=False, default=None)
 @click.option("--with-defaults/--no-defaults", default=True,
               help="Install the bundled German default categories.")
 @click.pass_context
-def init(ctx: click.Context, with_defaults: bool) -> None:
-    """Create the data directory, initialize the DB, install categories."""
-    cfg: Config = ctx.obj[_CTX_KEY]["config"]
+def init(ctx: click.Context, name: str | None, with_defaults: bool) -> None:
+    """Create the data directory, initialize the DB, install categories.
+
+    On a fresh install (no accounts registered yet) NAME is required.
+    If omitted, the command prompts interactively.
+    """
+    obj = ctx.obj[_CTX_KEY]
+    registry: AccountRegistry = obj["registry"]
+
+    if not registry.all():
+        # Fresh install: we need a real account name.
+        if not name:
+            name = click.prompt("Account name")
+        name = name.strip()
+        if not name:
+            raise click.ClickException("Account name cannot be empty.")
+        from expense_analyzer.accounts import init_account_db
+        try:
+            info = registry.add(name)
+        except ValueError as e:
+            raise click.ClickException(str(e)) from e
+        registry.save()
+        registry.set_active_id(info.id)
+        conn = init_account_db(info, with_defaults=with_defaults)
+        conn.close()
+        click.echo(f"created account: {info.id}  ({info.name})")
+        click.echo(f"  data dir: {info.data_dir}")
+        click.echo(f"  database: {info.db_path}")
+        if with_defaults:
+            click.echo("  seeded default German categories.")
+        return
+
+    # Existing install: apply migrations and report.
+    cfg: Config = obj["config"]
     cfg.data_dir.mkdir(parents=True, exist_ok=True)
     conn = _connect(cfg)
     try:
@@ -180,7 +212,8 @@ def init(ctx: click.Context, with_defaults: bool) -> None:
             from expense_analyzer.storage.categories import import_categories_from_yaml
 
             n = import_categories_from_yaml(conn, packaged_default_categories())
-            click.echo(f"installed {n} default categories")
+            if n:
+                click.echo(f"installed {n} default categories")
         click.echo(f"data dir: {cfg.data_dir}")
         click.echo(f"database: {cfg.db_path}")
     finally:
@@ -647,23 +680,89 @@ def reset(ctx: click.Context, wipe_all: bool, yes: bool) -> None:
         conn.close()
 
 
+@cli.command("clean-whitespace")
+@click.option("--dry-run", is_flag=True,
+              help="Show what would change without writing.")
+@click.pass_context
+def clean_whitespace(ctx: click.Context, dry_run: bool) -> None:
+    """Collapse tab / multi-space runs in already-ingested text columns.
+
+    Backfill helper: ingestion now strips these whitespace runs at
+    parse time, but rows imported under the old code-path still
+    carry the noise. Touches counterparty, verwendungszweck,
+    zahlungspflichtiger, status, umsatztyp, glaeubiger_id,
+    mandatsreferenz, kundenreferenz. Categories, labels, notes and embeddings
+    are untouched.
+
+    Idempotent -- safe to re-run; a clean DB reports zero updates.
+    """
+    cfg: Config = ctx.obj[_CTX_KEY]["config"]
+    conn = _connect(cfg)
+    try:
+        from expense_analyzer.storage.admin import collapse_text_whitespace
+
+        if dry_run:
+            # Open a SAVEPOINT, apply, report, roll back. Cleanest way
+            # to show "what would change" without duplicating the diff
+            # logic outside collapse_text_whitespace.
+            conn.execute("SAVEPOINT clean_ws_dry_run")
+            try:
+                report = collapse_text_whitespace(conn)
+            finally:
+                conn.execute("ROLLBACK TO SAVEPOINT clean_ws_dry_run")
+                conn.execute("RELEASE SAVEPOINT clean_ws_dry_run")
+            verb = "would update"
+        else:
+            report = collapse_text_whitespace(conn)
+            conn.commit()
+            verb = "updated"
+        click.echo(
+            f"scanned {report.rows_scanned} expense row(s); "
+            f"{verb} {report.rows_updated} row(s) "
+            f"({report.fields_changed} field-level changes)."
+        )
+        if dry_run and report.rows_updated:
+            click.echo("(dry run -- nothing written. Re-run without --dry-run to apply.)")
+    finally:
+        conn.close()
+
+
 # --- ingest ------------------------------------------------------------------
 
 @cli.command()
 @click.argument("csvs", nargs=-1, type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("--no-embed", is_flag=True,
               help="Skip computing embeddings for new rows. They'll be computed lazily later.")
+@click.option("--enrich", "enrich_csvs", multiple=True,
+              type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              help="Secondary-source CSV(s) (e.g. a PayPal activity export) to "
+                   "match against the ingested rows and enrich. Source auto-detected.")
+@click.option("--dry-run", is_flag=True,
+              help="Don't touch the DB. With --enrich, show on concrete records "
+                   "how the secondary source would enrich them (before vs after).")
 @click.pass_context
-def ingest(ctx: click.Context, csvs: tuple[Path, ...], no_embed: bool) -> None:
+def ingest(
+    ctx: click.Context,
+    csvs: tuple[Path, ...],
+    no_embed: bool,
+    enrich_csvs: tuple[Path, ...],
+    dry_run: bool,
+) -> None:
     """Ingest one or more German bank-export CSVs (dedup-aware).
 
     By default also computes sentence-transformer embeddings for every newly
-    inserted row, so downstream label/predict commands are fast.
+    inserted row, so downstream label/predict commands are fast. Pass
+    ``--enrich`` with a secondary CSV (e.g. PayPal) to enrich matched rows in
+    the same run, or add ``--dry-run`` to preview the enrichment without
+    writing anything.
     """
     if not csvs:
         click.echo("no files given", err=True)
         ctx.exit(2)
     cfg: Config = ctx.obj[_CTX_KEY]["config"]
+    if dry_run:
+        _preview_enrich(cfg, csvs, enrich_csvs)
+        return
     conn = _connect(cfg)
     try:
         from expense_analyzer.ingestion import ingest_csv
@@ -680,6 +779,116 @@ def ingest(ctx: click.Context, csvs: tuple[Path, ...], no_embed: bool) -> None:
                 f"{r.file:<40} parsed={r.parsed:>4}  new={r.inserted:>4}  "
                 f"duplicate={r.duplicates:>4}  embedded={r.embedded:>4}"
             )
+
+        for path in enrich_csvs:
+            _run_enrich(conn, cfg, path, source="auto", embedder=emb)
+    finally:
+        conn.close()
+
+
+def _adapter_and_records(path: Path, source: str):
+    """Resolve a secondary-source adapter for ``path`` and parse it, turning
+    detection/parse failures into a clean CLI error rather than a traceback."""
+    from expense_analyzer.ingestion._parsing import CsvParseError
+    from expense_analyzer.ingestion.sources import detect_adapter, get_adapter
+
+    try:
+        adapter = get_adapter(source) if source != "auto" else detect_adapter(path)
+        return adapter, adapter.parse(path)
+    except CsvParseError as e:
+        raise click.ClickException(f"{path.name}: {e}") from e
+
+
+def _run_enrich(conn, cfg: Config, path: Path, source: str, embedder) -> None:
+    """Resolve an adapter for ``path``, parse it, run the enrichment engine
+    and echo a one-line report. Shared by ``ingest --enrich`` and ``enrich``."""
+    from expense_analyzer.enrichment.secondary import enrich_from_records
+
+    adapter, records = _adapter_and_records(path, source)
+    rep = enrich_from_records(
+        conn, records, adapter, embedder=embedder,
+        date_window_days=cfg.enrichment.date_window_days,
+    )
+    parts = [
+        f"source={rep.source}",
+        f"parsed={rep.parsed:>4}",
+        f"matched={rep.matched:>4}",
+    ]
+    if rep.already_enriched:
+        parts.append(f"already_enriched={rep.already_enriched:>4}")
+    if rep.ambiguous:
+        parts.append(f"ambiguous={rep.ambiguous:>4}")
+    if rep.unmatched:
+        parts.append(f"unmatched={rep.unmatched:>4}")
+    if rep.reembedded:
+        parts.append(f"reembedded={rep.reembedded:>4}")
+    click.echo(f"{path.name:<40} " + "  ".join(parts))
+
+
+def _preview_enrich(
+    cfg: Config, csvs: tuple[Path, ...], enrich_csvs: tuple[Path, ...]
+) -> None:
+    """``ingest --dry-run`` showcase: parse the bank CSV(s) and the secondary
+    CSV(s) in memory, match them, and print each enriched record before vs
+    after. Writes nothing."""
+    from expense_analyzer.enrichment.secondary import preview_enrichment
+    from expense_analyzer.ingestion.csv_loader import parse_csv
+
+    if not enrich_csvs:
+        click.echo(
+            "--dry-run showcases secondary-source enrichment; "
+            "pass --enrich <csv> (e.g. a PayPal export) to see it."
+        )
+        return
+
+    rows = [row for path in csvs for row in parse_csv(path)]
+    click.echo(f"parsed {len(rows)} bank row(s) from {len(csvs)} file(s) (not stored)\n")
+
+    for path in enrich_csvs:
+        adapter, records = _adapter_and_records(path, "auto")
+        rep = preview_enrichment(
+            rows, records, adapter,
+            date_window_days=cfg.enrichment.date_window_days,
+        )
+        click.echo(
+            f"=== {path.name} (source={rep.source}) — matched={rep.matched} ==="
+        )
+        if not rep.previews:
+            click.echo("  (no records matched a bank row)\n")
+            continue
+        for pv in rep.previews:
+            click.echo(f"\n● without enrichment    : {pv.vz_before or '—'}")
+            click.echo(f"  with enrichment       : {pv.vz_after}")
+        click.echo("")
+
+
+@cli.command()
+@click.argument("csvs", nargs=-1, type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--source", default="auto",
+              help="Secondary-source adapter name (e.g. 'paypal') or 'auto' to detect.")
+@click.option("--no-embed", is_flag=True,
+              help="Skip re-embedding enriched rows. Their combined_text is still updated.")
+@click.pass_context
+def enrich(ctx: click.Context, csvs: tuple[Path, ...], source: str, no_embed: bool) -> None:
+    """Enrich already-ingested expenses from a secondary CSV.
+
+    A secondary source (e.g. a PayPal "Aktivitäten" export) is matched to the
+    bank transactions already in the DB by amount + nearby date; the matched
+    expense gets the real merchant/item and is re-embedded so categorization
+    improves. Re-running is idempotent.
+    """
+    if not csvs:
+        click.echo("no files given", err=True)
+        ctx.exit(2)
+    cfg: Config = ctx.obj[_CTX_KEY]["config"]
+    conn = _connect(cfg)
+    try:
+        emb = None
+        if not no_embed:
+            click.echo(f"loading embedding model `{cfg.embedding_model}`...")
+            emb = _embedder(cfg)
+        for path in csvs:
+            _run_enrich(conn, cfg, path, source=source, embedder=emb)
     finally:
         conn.close()
 

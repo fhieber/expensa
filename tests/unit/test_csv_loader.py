@@ -26,7 +26,7 @@ def test_first_row_typed_correctly(fixtures_dir: Path) -> None:
     rows = parse_csv(fixtures_dir / "sample_de.csv")
     r0 = rows[0]
     assert r0.buchungsdatum == date(2026, 1, 1)
-    assert r0.zahlungsempfaenger == "Vermieter Schmidt"
+    assert r0.zahlungsempfaenger == "Vermieter GmbH"
     assert r0.betrag == Decimal("-950.00")
     assert r0.iban == "DE89370400440532013000"
     assert r0.umsatztyp == "Dauerauftrag"
@@ -34,7 +34,7 @@ def test_first_row_typed_correctly(fixtures_dir: Path) -> None:
 
 def test_betrag_cents_int(fixtures_dir: Path) -> None:
     rows = parse_csv(fixtures_dir / "sample_de.csv")
-    salary = next(r for r in rows if r.zahlungspflichtiger == "Arbeitgeber AG")
+    salary = next(r for r in rows if r.zahlungspflichtiger == "Arbeitgeber GmbH")
     assert salary.betrag_cents == 320050
 
 
@@ -102,7 +102,7 @@ def test_parse_csv_with_two_digit_year_dates(fixtures_dir: Path) -> None:
     rows = parse_csv(fixtures_dir / "sample_de_short_dates.csv")
     assert len(rows) == 3
     assert rows[0].buchungsdatum == date(2026, 5, 8)
-    assert rows[0].zahlungsempfaenger == "REWE Markt GmbH"
+    assert rows[0].zahlungsempfaenger == "Markt Alpha GmbH"
     assert rows[2].buchungsdatum == date(2026, 6, 1)
 
 
@@ -120,3 +120,34 @@ def test_cp1252_encoding_handled(tmp_path: Path) -> None:
     rows = parse_csv(p)
     assert len(rows) == 1
     assert rows[0].zahlungsempfaenger == "Müller GmbH"
+
+
+def test_internal_whitespace_collapsed_in_text_fields(tmp_path: Path) -> None:
+    """Real bank exports often have multi-character whitespace runs
+    (originally newlines in the source, flattened to spaces by the
+    export tool) inside the counterparty/Verwendungszweck cells. The
+    raw column is what the UI displays, so we collapse those runs to
+    a single space at ingest -- otherwise
+    "PayPal Europe              22-24 Boulevard Royal, 2449 Luxembourg"
+    leaks through untouched and ruins the table layout."""
+    content = (
+        '"Buchungsdatum";"Wertstellung";"Status";"Zahlungspflichtige*r";'
+        '"Zahlungsempfänger*in";"Verwendungszweck";"Umsatztyp";"IBAN";'
+        '"Betrag (€)";"Gläubiger-ID";"Mandatsreferenz";"Kundenreferenz"\n'
+        '"01.01.2026";"01.01.2026";"Gebucht";"";'
+        # Multi-space gap + a tab inside the counterparty (the same shape
+        # the user's PayPal Lastschrift rows arrive in after the bank
+        # export flattens newlines to whitespace).
+        '"PayPal Europe S.a.r.l.   et Cie\t22-24 Boulevard\tRoyal";'
+        # Multiple spaces inside the purpose text too.
+        '"1234/PP.5678.PP/.    Ihr Einkauf  bei";'
+        '"Lastschrift";"LU96ZZZ0000000058";"-14,00";"";"";""\n'
+    )
+    p = tmp_path / "ws.csv"
+    p.write_bytes(content.encode("utf-8-sig"))
+    rows = parse_csv(p)
+    assert len(rows) == 1
+    cp = rows[0].zahlungsempfaenger
+    # Internal whitespace runs (incl. tabs) collapsed to one space.
+    assert cp == "PayPal Europe S.a.r.l. et Cie 22-24 Boulevard Royal"
+    assert rows[0].verwendungszweck == "1234/PP.5678.PP/. Ihr Einkauf bei"

@@ -11,7 +11,7 @@ from expense_analyzer.ingestion.normalizer import (
 
 def test_normalize_counterparty_lowercases_and_folds() -> None:
     assert normalize_counterparty("Müller GmbH") == "mueller"
-    assert normalize_counterparty("REWE Markt GmbH") == "rewe markt"
+    assert normalize_counterparty("Markt Alpha GmbH") == "markt alpha"
 
 
 def test_normalize_counterparty_strips_legal_suffixes() -> None:
@@ -25,14 +25,14 @@ def test_normalize_counterparty_strips_legal_suffixes() -> None:
 
 
 def test_normalize_counterparty_idempotent() -> None:
-    s = "REWE Markt GmbH"
+    s = "Markt Alpha GmbH"
     once = normalize_counterparty(s)
     twice = normalize_counterparty(once)
     assert once == twice
 
 
 def test_normalize_counterparty_strips_long_digits() -> None:
-    assert normalize_counterparty("Amazon EU Bestellung 12345678") == "amazon eu bestellung"
+    assert normalize_counterparty("Onlinehandel EU Bestellung 12345678") == "onlinehandel eu bestellung"
 
 
 def test_normalize_verwendungszweck_strips_iban_and_long_digits() -> None:
@@ -43,18 +43,18 @@ def test_normalize_verwendungszweck_strips_iban_and_long_digits() -> None:
 
 
 def test_normalize_verwendungszweck_strips_sepa_label() -> None:
-    out = normalize_verwendungszweck("SEPA-LASTSCHRIFT Spotify Premium Familie")
+    out = normalize_verwendungszweck("SEPA-LASTSCHRIFT Abo-Dienst Abo")
     assert "sepa" not in out.lower()
-    assert "spotify" in out
+    assert "abo" in out
 
 
 def test_normalize_verwendungszweck_strips_urls() -> None:
-    out = normalize_verwendungszweck("Bestellung https://amazon.de/order/123")
+    out = normalize_verwendungszweck("Bestellung https://example.com/order/123")
     assert "https" not in out
 
 
 def test_combined_text_handles_empties() -> None:
     assert combined_text("", "") == ""
-    assert combined_text("rewe", "") == "rewe"
-    assert combined_text("", "einkauf") == "einkauf"
-    assert combined_text("rewe", "einkauf") == "rewe | einkauf"
+    assert combined_text("vendor", "") == "vendor"
+    assert combined_text("", "kauf") == "kauf"
+    assert combined_text("vendor", "kauf") == "vendor | kauf"

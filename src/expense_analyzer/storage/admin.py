@@ -119,6 +119,76 @@ def delete_user_labels(conn: sqlite3.Connection) -> int:
     return cur.rowcount or 0
 
 
+# Text columns on ``expenses`` that may carry tab/multi-space runs from
+# bank exports. Ordered to keep the SQL update list readable; not
+# semantically meaningful.
+_WHITESPACE_BACKFILL_COLUMNS: tuple[str, ...] = (
+    "counterparty",
+    "verwendungszweck",
+    "zahlungspflichtiger",
+    "zahlungsempfaenger",
+    "status",
+    "umsatztyp",
+    "glaeubiger_id",
+    "mandatsreferenz",
+    "kundenreferenz",
+)
+
+
+@dataclass
+class WhitespaceBackfillReport:
+    rows_scanned: int
+    rows_updated: int
+    fields_changed: int  # total cell-level changes (one row can contribute many)
+
+
+def collapse_text_whitespace(conn: sqlite3.Connection) -> WhitespaceBackfillReport:
+    """Rewrite every text column on ``expenses`` to collapse internal
+    whitespace runs (tabs / multi-space) to a single space.
+
+    Idempotent -- re-running on an already-clean DB updates nothing.
+    Useful as a one-shot backfill after the equivalent fix landed at
+    ingest time, so existing rows imported under the old code-path
+    get the same treatment without losing labels, categories or
+    embeddings (none of which depend on the raw text fields directly).
+    """
+    # Lazy import to keep this module free of an ingestion dep when
+    # only the cleanup is needed (e.g. inside a fresh REPL).
+    from expense_analyzer.ingestion.csv_loader import _clean_text
+
+    cols = _WHITESPACE_BACKFILL_COLUMNS
+    select_cols = ", ".join(cols)
+    rows = conn.execute(
+        f"SELECT id, {select_cols} FROM expenses"
+    ).fetchall()
+
+    rows_updated = 0
+    fields_changed = 0
+    for row in rows:
+        updates: dict[str, str] = {}
+        for col in cols:
+            raw = row[col]
+            if raw is None:
+                continue
+            cleaned = _clean_text(raw)
+            if cleaned != raw:
+                updates[col] = cleaned
+        if not updates:
+            continue
+        set_clause = ", ".join(f"{c} = ?" for c in updates)
+        conn.execute(
+            f"UPDATE expenses SET {set_clause} WHERE id = ?",
+            (*updates.values(), int(row["id"])),
+        )
+        rows_updated += 1
+        fields_changed += len(updates)
+    return WhitespaceBackfillReport(
+        rows_scanned=len(rows),
+        rows_updated=rows_updated,
+        fields_changed=fields_changed,
+    )
+
+
 def clear_labels_for_expense(conn: sqlite3.Connection, expense_id: int) -> int:
     """Delete EVERY label row (user + model) for a single expense.
 

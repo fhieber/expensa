@@ -90,6 +90,16 @@ class VendorLookupConfig(BaseModel):
     cache_ttl_days: int = 90
 
 
+class EnrichmentConfig(BaseModel):
+    """Secondary-source enrichment (e.g. a PayPal activity CSV matched to
+    bank Lastschrift lines). ``date_window_days`` is how far apart the
+    secondary record's date and the bank booking date may be and still be
+    considered the same transaction (a debit settles a few days after the
+    purchase)."""
+
+    date_window_days: int = 4
+
+
 class StreamlitConfig(BaseModel):
     host: str = "127.0.0.1"
     port: int = 8501
@@ -129,6 +139,7 @@ class GlobalConfig(BaseModel):
     category_similarity: CategorySimilarityConfig = Field(default_factory=CategorySimilarityConfig)
     active_learning: ActiveLearningConfig = Field(default_factory=ActiveLearningConfig)
     vendor_lookup: VendorLookupConfig = Field(default_factory=VendorLookupConfig)
+    enrichment: EnrichmentConfig = Field(default_factory=EnrichmentConfig)
     streamlit: StreamlitConfig = Field(default_factory=StreamlitConfig)
 
 

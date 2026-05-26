@@ -108,10 +108,10 @@ def test_vendor_label_distribution(tmp_db: sqlite3.Connection) -> None:
     for h, cat in [("e1", a), ("e2", a), ("e3", a), ("e4", b)]:
         tmp_db.execute(
             "INSERT INTO expenses(buchungsdatum, betrag_cents, dedup_hash, is_income, is_round, "
-            "counterparty_normalized) VALUES ('2026-01-01', -1, ?, 0, 0, 'rewe markt')",
+            "counterparty_normalized) VALUES ('2026-01-01', -1, ?, 0, 0, 'markt alpha')",
             (h,),
         )
         eid = tmp_db.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
         add_label(tmp_db, eid, cat, "user")
-    dist = vendor_label_distribution(tmp_db, "rewe markt")
+    dist = vendor_label_distribution(tmp_db, "markt alpha")
     assert dist == {a: 3, b: 1}

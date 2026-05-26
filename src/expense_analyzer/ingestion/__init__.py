@@ -9,6 +9,7 @@ everything is precomputed.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -28,6 +29,31 @@ from expense_analyzer.ingestion.normalizer import (
     normalize_counterparty,
     normalize_verwendungszweck,
 )
+
+# Detect PayPal bank records by counterparty field.
+_PAYPAL_RE = re.compile(r"paypal", re.IGNORECASE)
+# Extract the merchant from "Ihr Einkauf bei <merchant>" in the Verwendungszweck.
+_IHR_EINKAUF_BEI = re.compile(r"Ihr\s+Einkauf\s+bei\s+(.+)$", re.IGNORECASE | re.DOTALL)
+
+
+def _simplify_paypal_vz(zahlungsempfaenger: str, zahlungspflichtiger: str, vz: str) -> str:
+    """Return a simplified Verwendungszweck for PayPal bank records when the
+    merchant is already present in the VZ (e.g. 'Ihr Einkauf bei El Purica ...').
+
+    Returns the original ``vz`` unchanged when:
+    * the record is not a PayPal row, or
+    * the VZ has no parseable 'Ihr Einkauf bei <merchant>' pattern, or
+    * the extracted merchant is empty (unknown — needs PayPal CSV enrichment).
+    """
+    if not _PAYPAL_RE.search(zahlungsempfaenger or "") and not _PAYPAL_RE.search(zahlungspflichtiger or ""):
+        return vz
+    m = _IHR_EINKAUF_BEI.search(vz)
+    if not m:
+        return vz
+    merchant = m.group(1).strip()
+    if not merchant:
+        return vz
+    return merchant
 
 
 @dataclass
@@ -71,7 +97,11 @@ INSERT OR IGNORE INTO expenses (
 def _row_to_params(row: ParsedRow, own_ibans: set[str]) -> dict:
     counterparty = row.zahlungsempfaenger or row.zahlungspflichtiger
     cp_norm = normalize_counterparty(counterparty)
-    vz_norm = normalize_verwendungszweck(row.verwendungszweck)
+    # Simplify PayPal VZ at ingest time when merchant is already present.
+    # The dedup_hash is computed from row.verwendungszweck (original CSV value),
+    # so modifying the stored VZ here does not break deduplication.
+    vz = _simplify_paypal_vz(row.zahlungsempfaenger, row.zahlungspflichtiger, row.verwendungszweck)
+    vz_norm = normalize_verwendungszweck(vz)
     iban_info = classify_iban(row.iban, own_ibans=own_ibans)
     return {
         "buchungsdatum": row.buchungsdatum,
@@ -79,7 +109,7 @@ def _row_to_params(row: ParsedRow, own_ibans: set[str]) -> dict:
         "status": row.status,
         "zahlungspflichtiger": row.zahlungspflichtiger,
         "zahlungsempfaenger": row.zahlungsempfaenger,
-        "verwendungszweck": row.verwendungszweck,
+        "verwendungszweck": vz,
         "umsatztyp": row.umsatztyp,
         "iban": row.iban,
         "betrag_cents": row.betrag_cents,
