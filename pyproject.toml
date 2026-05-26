@@ -7,7 +7,7 @@ name = "expense-analyzer-de"
 version = "0.1.0"
 description = "Local German expense analysis: ingest CSVs, dedup and categorize on-device with Hugging Face models. No cloud LLMs."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.13"
 license = { file = "LICENSE" }
 authors = [{ name = "Felix Hieber" }]
 keywords = ["expenses", "german", "banking", "categorization", "embeddings", "huggingface"]
