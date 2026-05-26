@@ -3,7 +3,7 @@
 Matches EnrichmentRecords against bank expenses by absolute amount +
 nearest date within ±N days.  On a match, rewrites the expense's
 ``verwendungszweck`` directly to the string carried by
-``EnrichmentRecord.description`` (e.g. "PayPal . Etsy Inc"), then
+``EnrichmentRecord.description`` (e.g. "Etsy Inc"), then
 re-normalises and optionally re-embeds the row.
 
 Idempotency: matched records carry their PayPal Transaktionscode in
@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass, field
-from datetime import date
 
 from expense_analyzer.features.embeddings import Embedder, store_embeddings
 from expense_analyzer.ingestion.normalizer import (
@@ -200,8 +199,6 @@ def preview_enrichment(
 
     Returns a before/after view for each match without writing to the DB.
     """
-    from expense_analyzer.ingestion.csv_loader import ParsedRow
-
     candidates = [
         {
             "id": i,

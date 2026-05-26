@@ -28,7 +28,7 @@ def test_match_counts(tmp_db: sqlite3.Connection, fixtures_dir: Path) -> None:
 
 
 def test_vz_rewritten_directly(tmp_db: sqlite3.Connection, fixtures_dir: Path) -> None:
-    """Enrichment writes "PayPal . <name>" directly into verwendungszweck."""
+    """Enrichment writes the merchant name directly into verwendungszweck."""
     _ingest(tmp_db, fixtures_dir)
     adapter = PaypalAdapter()
     records = adapter.parse(fixtures_dir / "sample_paypal.csv")
@@ -39,11 +39,9 @@ def test_vz_rewritten_directly(tmp_db: sqlite3.Connection, fixtures_dir: Path) -
         "counterparty_normalized, combined_text "
         "FROM expenses WHERE betrag_cents = -1980"
     ).fetchone()
-    # VZ written directly — no display-time rewriting needed.
-    assert row["verwendungszweck"] == "PayPal . Haendler Alpha GmbH"
+    assert row["verwendungszweck"] == "Haendler Alpha GmbH"
     assert row["enrichment_source"] == "paypal"
     assert row["enrichment_ref"] == "TXN-ALPHA-1"
-    # counterparty_normalized updated to merchant for ML signal.
     assert "haendler alpha" in (row["counterparty_normalized"] or "").lower()
     assert "haendler alpha" in (row["combined_text"] or "").lower()
 
@@ -60,20 +58,19 @@ def test_vz_with_email(tmp_db: sqlite3.Connection, fixtures_dir: Path) -> None:
     row = tmp_db.execute(
         "SELECT verwendungszweck FROM expenses WHERE betrag_cents = -4500"
     ).fetchone()
-    # Haendler Beta GmbH has no email in the fixture → no parenthetical.
-    assert row["verwendungszweck"] == "PayPal . Haendler Beta GmbH"
+    assert row["verwendungszweck"] == "Haendler Beta GmbH"
 
 
 def test_ingest_simplifies_known_merchant_vz(
     tmp_db: sqlite3.Connection, fixtures_dir: Path
 ) -> None:
     """At ingest time, PayPal rows with 'Ihr Einkauf bei <merchant>' are
-    simplified to 'PayPal . <merchant>' — no PayPal CSV needed."""
+    simplified to just the merchant name — no PayPal CSV needed."""
     _ingest(tmp_db, fixtures_dir)
     row = tmp_db.execute(
         "SELECT verwendungszweck FROM expenses WHERE betrag_cents = -8760"
     ).fetchone()
-    assert row["verwendungszweck"] == "PayPal . Onlinehaendler GmbH"
+    assert row["verwendungszweck"] == "Onlinehaendler GmbH"
 
 
 def test_ingest_strips_multiple_whitespace(

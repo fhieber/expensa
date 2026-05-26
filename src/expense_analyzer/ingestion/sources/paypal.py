@@ -10,8 +10,7 @@ or Netto amount, are skipped.
 
 The ``description`` field on each EnrichmentRecord carries the
 pre-formatted Verwendungszweck string that the enrichment engine writes
-directly into the database (e.g. "PayPal . Etsy Inc" or
-"PayPal . John Doe (john@example.com)").
+directly into the database (e.g. "Etsy Inc" or "John Doe (john@example.com)").
 """
 
 from __future__ import annotations
@@ -72,12 +71,13 @@ def _read_table(path: Path) -> list[dict[str, str]]:
 def make_paypal_vz(name: str, email: str) -> str:
     """Format the Verwendungszweck for an enriched PayPal record.
 
-    Returns ``"PayPal . {name} ({email})"`` when email is non-empty,
-    otherwise ``"PayPal . {name}"``.
+    Returns ``"{name} ({email})"`` when email is non-empty, otherwise
+    just ``"{name}"``. The counterparty and enrichment_source columns
+    already identify the row as PayPal; no prefix needed here.
     """
     name = name.strip()
     email = email.strip()
-    return f"PayPal . {name} ({email})" if email else f"PayPal . {name}"
+    return f"{name} ({email})" if email else name
 
 
 class PaypalAdapter:

@@ -59,7 +59,7 @@ def _migrate_v5(conn: sqlite3.Connection) -> None:
     # v4 -> v5: direct VZ rewriting replaces display-time enrichment.
     #
     # 1. For rows previously enriched via the old approach (enriched_counterparty
-    #    is set), write "PayPal . {merchant}" directly into verwendungszweck and
+    #    is set), write the merchant name directly into verwendungszweck and
     #    re-derive the normalised columns.
     # 2. For existing PayPal bank rows where the merchant is already in the
     #    VZ ("Ihr Einkauf bei <merchant>"), apply the same ingest-time
@@ -67,11 +67,9 @@ def _migrate_v5(conn: sqlite3.Connection) -> None:
     # 3. Drop the three columns that are no longer needed.
     import re as _re
 
-    from expense_analyzer.ingestion.normalizer import (
-        combined_text as _ct,
-        normalize_counterparty as _ncp,
-        normalize_verwendungszweck as _nvz,
-    )
+    from expense_analyzer.ingestion.normalizer import combined_text as _ct
+    from expense_analyzer.ingestion.normalizer import normalize_counterparty as _ncp
+    from expense_analyzer.ingestion.normalizer import normalize_verwendungszweck as _nvz
 
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(expenses)").fetchall()}
     if not cols:
@@ -86,7 +84,7 @@ def _migrate_v5(conn: sqlite3.Connection) -> None:
             "AND enriched_counterparty IS NOT NULL AND enriched_counterparty != ''"
         ).fetchall():
             name = row["enriched_counterparty"]
-            new_vz = f"PayPal . {name}"
+            new_vz = name
             cp_norm = _ncp(name)
             conn.execute(
                 "UPDATE expenses SET verwendungszweck = ?, "
@@ -120,7 +118,7 @@ def _migrate_v5(conn: sqlite3.Connection) -> None:
             merchant = m.group(1).strip()
             if not merchant:
                 continue
-            new_vz = f"PayPal . {merchant}"
+            new_vz = merchant
             cp_norm = _ncp(merchant)
             conn.execute(
                 "UPDATE expenses SET verwendungszweck = ?, "

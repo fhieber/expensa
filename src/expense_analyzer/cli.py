@@ -179,7 +179,6 @@ def init(ctx: click.Context, name: str | None, with_defaults: bool) -> None:
     """
     obj = ctx.obj[_CTX_KEY]
     registry: AccountRegistry = obj["registry"]
-    global_home: Path = obj["global_home"]
 
     if not registry.all():
         # Fresh install: we need a real account name.

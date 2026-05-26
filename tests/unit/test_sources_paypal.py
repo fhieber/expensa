@@ -52,29 +52,29 @@ def test_parse_maps_date_netto_name(fixtures_dir: Path) -> None:
 
 
 def test_parse_formats_description_without_email(fixtures_dir: Path) -> None:
-    """When Absender E-Mail-Adresse is empty, description is 'PayPal . <name>'."""
+    """When Absender E-Mail-Adresse is empty, description is just the name."""
     records = PaypalAdapter().parse(fixtures_dir / "sample_paypal.csv")
     beta = next(r for r in records if r.source_ref == "TXN-BETA-1")
-    assert beta.description == "PayPal . Haendler Beta GmbH"
+    assert beta.description == "Haendler Beta GmbH"
 
 
 def test_parse_formats_description_with_email(fixtures_dir: Path) -> None:
-    """When email is present, description is 'PayPal . <name> (<email>)'."""
+    """When email is present, description is '<name> (<email>)'."""
     records = PaypalAdapter().parse(fixtures_dir / "sample_paypal.csv")
     gamma = next(r for r in records if r.source_ref == "TXN-GAMMA")
-    assert gamma.description == "PayPal . Haendler Gamma GmbH (vendor-a@example.com)"
+    assert gamma.description == "Haendler Gamma GmbH (vendor-a@example.com)"
 
 
 def test_make_paypal_vz_with_email() -> None:
-    assert make_paypal_vz("Haendler Alpha GmbH", "buyer@example.com") == "PayPal . Haendler Alpha GmbH (buyer@example.com)"
+    assert make_paypal_vz("Haendler Alpha GmbH", "buyer@example.com") == "Haendler Alpha GmbH (buyer@example.com)"
 
 
 def test_make_paypal_vz_without_email() -> None:
-    assert make_paypal_vz("Haendler Beta GmbH", "") == "PayPal . Haendler Beta GmbH"
+    assert make_paypal_vz("Haendler Beta GmbH", "") == "Haendler Beta GmbH"
 
 
 def test_make_paypal_vz_strips_whitespace() -> None:
-    assert make_paypal_vz("  Shop  ", "  test@x.com  ") == "PayPal . Shop (test@x.com)"
+    assert make_paypal_vz("  Shop  ", "  test@x.com  ") == "Shop (test@x.com)"
 
 
 def test_candidate_filter_matches_paypal_bank_rows() -> None:

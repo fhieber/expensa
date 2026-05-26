@@ -53,7 +53,7 @@ def _simplify_paypal_vz(zahlungsempfaenger: str, zahlungspflichtiger: str, vz: s
     merchant = m.group(1).strip()
     if not merchant:
         return vz
-    return f"PayPal . {merchant}"
+    return merchant
 
 
 @dataclass

@@ -316,7 +316,7 @@ def test_ingest_with_enrich_flag(tmp_path: Path, fixtures_dir: Path) -> None:
         "SELECT verwendungszweck FROM expenses WHERE betrag_cents = -1980"
     ).fetchone()
     conn.close()
-    assert row["verwendungszweck"] == "PayPal . Haendler Alpha GmbH"
+    assert row["verwendungszweck"] == "Haendler Alpha GmbH"
 
 
 def test_vendor_lookup_disabled_message(tmp_path: Path) -> None:
