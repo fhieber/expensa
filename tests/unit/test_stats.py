@@ -10,6 +10,7 @@ from expense_analyzer.storage.categories import add_label, upsert_category
 from expense_analyzer.storage.stats import (
     CategoryStat,
     category_stats,
+    database_overview,
     uncategorized_stat,
 )
 
@@ -81,3 +82,29 @@ def test_uncategorized_stat_counts_unlabeled(
     assert isinstance(u, CategoryStat)
     assert u.id == -1
     assert u.n_expenses == 49  # 50 ingested minus the 1 labeled
+
+
+def test_database_overview_reports_structure(
+    tmp_db: sqlite3.Connection, fixtures_dir: Path
+) -> None:
+    ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
+    upsert_category(tmp_db, "Lebensmittel")
+
+    ov = database_overview(tmp_db)
+    names = {t.name for t in ov.tables}
+    # Core tables are present; the latest_label view is NOT counted as a table.
+    assert {"expenses", "categories", "labels"} <= names
+    assert "latest_label" not in names
+    assert "latest_label" in ov.views
+
+    expenses = next(t for t in ov.tables if t.name == "expenses")
+    assert expenses.n_rows == 50
+    col_names = {c.name for c in expenses.columns}
+    assert {"id", "betrag_cents", "dedup_hash"} <= col_names
+    # `id` is the primary key.
+    assert next(c for c in expenses.columns if c.name == "id").pk is True
+
+    assert ov.n_tables == len(ov.tables)
+    assert ov.n_rows_total >= 50
+    assert ov.n_columns_total == sum(t.n_columns for t in ov.tables)
+    assert ov.schema_version == 3

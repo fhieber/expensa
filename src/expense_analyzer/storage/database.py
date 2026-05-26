@@ -36,8 +36,14 @@ def _read_schema() -> str:
     return resources.files(pkg).joinpath(name).read_text(encoding="utf-8")
 
 
-def connect(db_path: Path) -> sqlite3.Connection:
+def connect(db_path: Path, password: str | None = None) -> sqlite3.Connection:
     """Open a connection with sane defaults: foreign keys, row factory, WAL.
+
+    When ``password`` is given, or the file on disk is already a SQLCipher
+    database, the connection is opened through the optional SQLCipher driver
+    (see :mod:`expense_analyzer.storage.crypto`) with the same configuration.
+    Plaintext databases keep using the stdlib ``sqlite3`` driver, so the
+    encryption dependency stays optional.
 
     `check_same_thread=False` is intentional: Streamlit reruns the script on
     different worker threads, and the CLI ships a single-user, single-process
@@ -46,6 +52,13 @@ def connect(db_path: Path) -> sqlite3.Connection:
     across threads is safe here.
     """
     db_path.parent.mkdir(parents=True, exist_ok=True)
+    # Local import keeps the optional SQLCipher dependency off the hot path
+    # for plaintext databases (the common case).
+    from expense_analyzer.storage import crypto
+
+    if password is not None or crypto.looks_encrypted(db_path):
+        return crypto.open_connection(db_path, password)
+
     conn = sqlite3.connect(
         str(db_path),
         detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
@@ -86,8 +99,12 @@ def transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
         conn.execute("COMMIT")
 
 
-def get_or_create_database(db_path: Path) -> sqlite3.Connection:
-    """Open the DB, applying the schema if the file is new."""
-    conn = connect(db_path)
+def get_or_create_database(
+    db_path: Path, password: str | None = None
+) -> sqlite3.Connection:
+    """Open the DB, applying the schema if the file is new.
+
+    Pass ``password`` for an encrypted account (see :func:`connect`)."""
+    conn = connect(db_path, password)
     init_schema(conn)
     return conn

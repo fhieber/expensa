@@ -92,9 +92,21 @@ def _resolve_account(
 # --- Helpers -----------------------------------------------------------------
 
 def _connect(cfg: Config) -> sqlite3.Connection:
+    from expense_analyzer.storage import crypto
     from expense_analyzer.storage.database import get_or_create_database
 
-    return get_or_create_database(cfg.db_path)
+    password: str | None = None
+    if crypto.looks_encrypted(cfg.db_path):
+        password = os.environ.get("EXPENSE_ANALYZER_DB_PASSWORD")
+        if not password:
+            if sys.stdin.isatty():
+                password = click.prompt("Database password", hide_input=True)
+            else:
+                raise click.ClickException(
+                    "database is encrypted: set EXPENSE_ANALYZER_DB_PASSWORD "
+                    "or run the command interactively to be prompted."
+                )
+    return get_or_create_database(cfg.db_path, password)
 
 
 def _embedder(cfg: Config, verbose: bool = True):
@@ -394,6 +406,133 @@ def account_use(ctx: click.Context, name: str) -> None:
         raise click.ClickException(f"no such account: {name!r}")
     registry.set_active_id(info.id)
     click.echo(f"active account is now: {info.id}  ({info.name})")
+
+
+def _resolve_account_for_crypto(ctx: click.Context, name: str | None) -> AccountInfo:
+    """Pick the account a crypto command targets: an explicit NAME if given,
+    otherwise the resolved active account from the root group."""
+    if name:
+        registry: AccountRegistry = ctx.obj[_CTX_KEY]["registry"]
+        info = registry.get_by_name_or_id(name)
+        if info is None:
+            raise click.ClickException(f"no such account: {name!r}")
+        return info
+    return ctx.obj[_CTX_KEY]["account"]
+
+
+@account.command("encrypt")
+@click.argument("name", required=False)
+@click.option(
+    "--delete-plaintext/--keep-plaintext",
+    "delete_plain",
+    default=None,
+    help="Delete (or keep) the plaintext safety copy without prompting. "
+    "If neither is given you're asked interactively.",
+)
+@click.pass_context
+def account_encrypt(
+    ctx: click.Context, name: str | None, delete_plain: bool | None
+) -> None:
+    """Encrypt an account's database at rest (AES-256 via SQLCipher).
+
+    Prompts for a new password (twice), then offers to delete the
+    timestamped plaintext safety copy it keeps next to the DB."""
+    from expense_analyzer.storage import crypto
+
+    info = _resolve_account_for_crypto(ctx, name)
+    if not crypto.encryption_available():
+        raise click.ClickException(
+            "encryption needs the optional dependency: "
+            "pip install -e '.[encryption]'  (from the repo root)"
+        )
+    if not info.db_path.is_file():
+        raise click.ClickException(
+            f"no database yet for {info.id!r}; run `expense init` first."
+        )
+    if crypto.looks_encrypted(info.db_path):
+        raise click.ClickException(f"{info.id!r} is already encrypted.")
+    pw = click.prompt("New password", hide_input=True, confirmation_prompt=True)
+    try:
+        safety = crypto.encrypt_file(info.db_path, pw, keep_safety=True)
+    except crypto.EncryptionError as e:
+        raise click.ClickException(str(e)) from e
+    click.echo(f"encrypted {info.db_path}")
+    if safety is None:
+        return
+    # Offer to remove the plaintext safety copy. Default to keeping it; when
+    # the flag isn't set, ask interactively (but only if there's a TTY, so a
+    # piped/cron run keeps the copy rather than aborting on the prompt).
+    if delete_plain is None:
+        delete_plain = sys.stdin.isatty() and click.confirm(
+            f"A plaintext copy was saved at {safety}. Delete it now?",
+            default=False,
+        )
+    if delete_plain:
+        try:
+            safety.unlink()
+            click.echo("  deleted the plaintext safety copy.")
+        except OSError as e:
+            click.echo(f"  could not delete the plaintext copy: {e}", err=True)
+    else:
+        click.echo(
+            f"  plaintext safety copy kept: {safety}\n"
+            "  delete it once you've confirmed the password works."
+        )
+
+
+@account.command("decrypt")
+@click.argument("name", required=False)
+@click.pass_context
+def account_decrypt(ctx: click.Context, name: str | None) -> None:
+    """Remove encryption from an account's database.
+
+    Reads the current password from ``EXPENSE_ANALYZER_DB_PASSWORD`` or
+    prompts for it. Keeps a timestamped encrypted safety copy."""
+    from expense_analyzer.storage import crypto
+
+    info = _resolve_account_for_crypto(ctx, name)
+    if not crypto.looks_encrypted(info.db_path):
+        raise click.ClickException(f"{info.id!r} is not encrypted.")
+    pw = os.environ.get("EXPENSE_ANALYZER_DB_PASSWORD") or click.prompt(
+        "Current password", hide_input=True
+    )
+    try:
+        safety = crypto.decrypt_file(info.db_path, pw, keep_safety=True)
+    except crypto.WrongPassword as e:
+        raise click.ClickException("incorrect password.") from e
+    except crypto.EncryptionError as e:
+        raise click.ClickException(str(e)) from e
+    click.echo(f"decrypted {info.db_path}")
+    if safety is not None:
+        click.echo(f"  encrypted safety copy: {safety}")
+
+
+@account.command("passwd")
+@click.argument("name", required=False)
+@click.pass_context
+def account_passwd(ctx: click.Context, name: str | None) -> None:
+    """Change an encrypted account's password.
+
+    Reads the current password from ``EXPENSE_ANALYZER_DB_PASSWORD`` or
+    prompts for it, then prompts for the new password (twice)."""
+    from expense_analyzer.storage import crypto
+
+    info = _resolve_account_for_crypto(ctx, name)
+    if not crypto.looks_encrypted(info.db_path):
+        raise click.ClickException(
+            f"{info.id!r} is not encrypted; use `expense account encrypt` first."
+        )
+    old = os.environ.get("EXPENSE_ANALYZER_DB_PASSWORD") or click.prompt(
+        "Current password", hide_input=True
+    )
+    new = click.prompt("New password", hide_input=True, confirmation_prompt=True)
+    try:
+        crypto.change_password(info.db_path, old, new)
+    except crypto.WrongPassword as e:
+        raise click.ClickException("incorrect current password.") from e
+    except crypto.EncryptionError as e:
+        raise click.ClickException(str(e)) from e
+    click.echo(f"password changed for {info.id!r}.")
 
 
 # --- own-iban ----------------------------------------------------------------

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
@@ -78,4 +78,104 @@ def uncategorized_stat(conn: sqlite3.Connection) -> CategoryStat:
         total_eur=float(row["total"] or 0.0),
         abs_total_eur=float(row["abs_total"] or 0.0),
         last_seen=(str(row["last_seen"]) if row["last_seen"] is not None else None),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Database structure overview (Settings → Database)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ColumnInfo:
+    name: str
+    type: str
+    notnull: bool
+    pk: bool
+
+
+@dataclass(frozen=True)
+class TableInfo:
+    name: str
+    n_rows: int
+    columns: list[ColumnInfo]
+
+    @property
+    def n_columns(self) -> int:
+        return len(self.columns)
+
+
+@dataclass(frozen=True)
+class DatabaseOverview:
+    schema_version: int | None
+    tables: list[TableInfo]
+    views: list[str] = field(default_factory=list)
+    indexes: list[str] = field(default_factory=list)
+
+    @property
+    def n_tables(self) -> int:
+        return len(self.tables)
+
+    @property
+    def n_rows_total(self) -> int:
+        return sum(t.n_rows for t in self.tables)
+
+    @property
+    def n_columns_total(self) -> int:
+        return sum(t.n_columns for t in self.tables)
+
+
+def _schema_version(conn: sqlite3.Connection) -> int | None:
+    try:
+        row = conn.execute(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    if row is None:
+        return None
+    try:
+        return int(row["value"])
+    except (TypeError, ValueError):
+        return None
+
+
+def database_overview(conn: sqlite3.Connection) -> DatabaseOverview:
+    """Introspect the live DB: user tables with row + column counts, plus
+    the views and indexes. Powers the detailed Settings → Database stats.
+
+    Reads ``sqlite_master`` and ``PRAGMA table_info`` -- works identically
+    on plaintext and encrypted (already-unlocked) connections."""
+    obj_rows = conn.execute(
+        """
+        SELECT name, type FROM sqlite_master
+        WHERE name NOT LIKE 'sqlite_%'
+        ORDER BY type, name
+        """
+    ).fetchall()
+    table_names = [r["name"] for r in obj_rows if r["type"] == "table"]
+    views = [r["name"] for r in obj_rows if r["type"] == "view"]
+    indexes = [r["name"] for r in obj_rows if r["type"] == "index"]
+
+    tables: list[TableInfo] = []
+    for name in table_names:
+        # Identifiers can't be bound; quote defensively against odd names.
+        quoted = '"' + name.replace('"', '""') + '"'
+        cols = [
+            ColumnInfo(
+                name=c["name"],
+                type=(c["type"] or ""),
+                notnull=bool(c["notnull"]),
+                pk=bool(c["pk"]),
+            )
+            for c in conn.execute(f"PRAGMA table_info({quoted})").fetchall()
+        ]
+        n_rows = conn.execute(f"SELECT COUNT(*) AS n FROM {quoted}").fetchone()["n"]
+        tables.append(TableInfo(name=name, n_rows=int(n_rows), columns=cols))
+
+    return DatabaseOverview(
+        schema_version=_schema_version(conn),
+        tables=tables,
+        views=views,
+        indexes=indexes,
     )

@@ -44,19 +44,34 @@ from expense_analyzer.storage.backup import (
     restore_database,
     validate_backup,
 )
+from expense_analyzer.storage.crypto import (
+    EncryptionError,
+    change_password,
+    cipher_version,
+    decrypt_file,
+    encrypt_file,
+    encryption_available,
+    export_encrypted_copy,
+    looks_encrypted,
+)
 from expense_analyzer.storage.own_ibans import (
     add_own_iban,
     list_own_ibans,
     remove_own_iban,
     update_label,
 )
+from expense_analyzer.storage.stats import database_overview
 from expense_analyzer.ui._shared import (
+    account_is_encrypted,
+    clear_password_for,
     get_active_account,
     get_config,
     get_conn,
     get_global_home,
+    get_password_for,
     invalidate_connection,
     invalidate_global_config,
+    set_password_for,
 )
 
 
@@ -85,7 +100,7 @@ def render() -> None:
     conn = get_conn()
     st.title("Settings")
 
-    with st.expander("My Accounts", expanded=False):
+    with st.expander("My Bank Accounts", expanded=False):
         _render_own_ibans_body(conn)
 
     with st.expander("Active Learning", expanded=False):
@@ -649,6 +664,7 @@ _DESTRUCTIVE_BUTTON_KEYS: tuple[str, ...] = (
     "db_delete_user_labels",
     "db_reset_data",
     "db_factory_reset",
+    "db_remove_encryption",
 )
 
 
@@ -682,27 +698,256 @@ def _inject_destructive_button_css() -> None:
 
 
 def _render_database_body(cfg, conn) -> None:
-    """Database section body: stats + backup/restore + destructive ops."""
+    """Database section body: stats + encryption + backup/restore + resets."""
     _inject_destructive_button_css()
-    _render_db_stats(cfg)
+    _render_db_stats(cfg, conn)
+    with st.expander("Encryption", expanded=False):
+        _render_encryption(cfg)
     _render_administration(cfg, conn)
 
 
-def _render_db_stats(cfg) -> None:
+def _render_db_stats(cfg, conn) -> None:
+    """Detailed database statistics: file metadata, encryption status, and a
+    structure overview (tables, row + column counts, views, indexes)."""
     db_path = cfg.db_path
     try:
-        db_mtime = (
-            _dt.datetime.fromtimestamp(db_path.stat().st_mtime)
-            if db_path.exists() else None
-        )
+        st_info = db_path.stat() if db_path.exists() else None
     except OSError:
-        db_mtime = None
-    stat_cols = st.columns([1.5, 4])
-    stat_cols[0].metric(
-        "Last modified",
-        db_mtime.strftime("%Y-%m-%d %H:%M") if db_mtime else "—",
+        st_info = None
+    db_mtime = (
+        _dt.datetime.fromtimestamp(st_info.st_mtime) if st_info else None
     )
-    stat_cols[1].caption(f"Path: `{db_path}`")
+    size_mb = (st_info.st_size / (1024 * 1024)) if st_info else 0.0
+    encrypted = account_is_encrypted()
+
+    try:
+        overview = database_overview(conn)
+    except Exception as e:  # never let a stats query break the page
+        st.caption(f"(could not read structure: {e})")
+        overview = None
+
+    m = st.columns(5)
+    m[0].metric("Last modified", db_mtime.strftime("%Y-%m-%d %H:%M") if db_mtime else "—")
+    m[1].metric("File size", f"{size_mb:.2f} MB")
+    m[2].metric(
+        "Encryption",
+        "🔒 Encrypted" if encrypted else "🔓 Plaintext",
+        help=(
+            f"SQLCipher {cipher_version()}." if encrypted
+            else "Stored as a plain SQLite file. Set a password under "
+            "Encryption below to protect it at rest."
+        ),
+    )
+    if overview is not None:
+        m[3].metric(
+            "Tables",
+            overview.n_tables,
+            help=f"{overview.n_columns_total} columns across all tables; "
+                 f"{len(overview.views)} view(s), {len(overview.indexes)} index(es).",
+        )
+        m[4].metric("Total rows", f"{overview.n_rows_total:,}")
+        sv = overview.schema_version
+        st.caption(
+            f"Path: `{db_path}`"
+            + (f"  ·  schema version {sv}" if sv is not None else "")
+        )
+        with st.expander("Structure overview", expanded=False):
+            _render_structure_overview(overview)
+    else:
+        st.caption(f"Path: `{db_path}`")
+
+
+def _render_structure_overview(overview) -> None:
+    """Table-by-table breakdown: per-table row/column summary plus the
+    column list (name, type, flags) for each table."""
+    summary = [
+        {"Table": t.name, "Rows": t.n_rows, "Columns": t.n_columns}
+        for t in overview.tables
+    ]
+    st.dataframe(summary, hide_index=True, use_container_width=True)
+    if overview.views:
+        st.caption("Views: " + ", ".join(f"`{v}`" for v in overview.views))
+    if overview.indexes:
+        st.caption("Indexes: " + ", ".join(f"`{i}`" for i in overview.indexes))
+
+    st.markdown("**Columns per table**")
+    for t in overview.tables:
+        with st.expander(f"{t.name}  ({t.n_columns} columns · {t.n_rows:,} rows)",
+                         expanded=False):
+            cols = [
+                {
+                    "Column": c.name,
+                    "Type": c.type or "—",
+                    "Not null": "✓" if c.notnull else "",
+                    "PK": "✓" if c.pk else "",
+                }
+                for c in t.columns
+            ]
+            st.dataframe(cols, hide_index=True, use_container_width=True)
+
+
+def _render_encryption(cfg) -> None:
+    """Set / change / remove the active account's database password.
+
+    Encryption is per-account and backed by SQLCipher (optional
+    ``[encryption]`` extra). When the dependency is missing and the DB is
+    plaintext, we explain how to enable it; an already-encrypted account is
+    always manageable because reaching this screen means it was unlocked.
+    """
+    active = get_active_account()
+    encrypted = account_is_encrypted(active)
+    st.caption(
+        "Per-account setting — encrypts **this account's** database file at "
+        "rest with AES-256 (SQLCipher). The password is never written to "
+        "disk; you'll be asked for it when you switch to this account."
+    )
+
+    if not encryption_available() and not encrypted:
+        st.info(
+            "Encryption needs the optional SQLCipher dependency. Install it "
+            "with `pip install -e '.[encryption]'` (from the repo root) and "
+            "restart the UI (`expense ui-restart`)."
+        )
+        return
+
+    _render_plaintext_safety_cleanup(cfg)
+
+    if encrypted:
+        _render_change_password(cfg, active)
+        st.markdown("---")
+        _render_remove_encryption(cfg, active)
+    else:
+        _render_set_password(cfg, active)
+
+
+def _plaintext_safety_copies(cfg) -> list[Path]:
+    """Leftover plaintext ``*.pre-encrypt.*.sqlite`` snapshots next to the DB.
+
+    These are written when an account is encrypted (UI or CLI) so a
+    forgotten password isn't fatal -- but they're unencrypted, so we
+    surface them for deletion once the password is confirmed working."""
+    db_path = Path(cfg.db_path)
+    return sorted(db_path.parent.glob(f"{db_path.stem}.pre-encrypt.*.sqlite"))
+
+
+def _render_plaintext_safety_cleanup(cfg) -> None:
+    leftovers = _plaintext_safety_copies(cfg)
+    if not leftovers:
+        return
+    st.warning(
+        "A **plaintext** safety copy from encrypting this account is still "
+        "on disk — your data is readable from it regardless of the password. "
+        "Delete it once you've confirmed the password works."
+    )
+    for p in leftovers:
+        cols = st.columns([5, 1])
+        cols[0].code(str(p), language=None)
+        if cols[1].button("Delete", key=f"del_safety_{p.name}",
+                          use_container_width=True):
+            try:
+                p.unlink()
+                st.toast(f"deleted {p.name}")
+            except OSError as e:
+                st.error(f"could not delete: {e}")
+            st.rerun()
+
+
+def _close_live_connection() -> None:
+    """Close + drop the cached DB connection so the file can be rewritten.
+
+    SQLCipher's encrypt/decrypt/rekey rewrite or replace the file on disk;
+    a live handle would block that on Windows and risk a partial read
+    elsewhere. The next ``get_conn()`` reopens with the new key."""
+    try:
+        get_conn().close()
+    except Exception:
+        pass
+    invalidate_connection()
+
+
+def _render_set_password(cfg, active) -> None:
+    with st.form("db_encrypt_form"):
+        st.markdown("**Encrypt this database**")
+        pw1 = st.text_input("New password", type="password", key="db_enc_pw1")
+        pw2 = st.text_input("Confirm password", type="password", key="db_enc_pw2")
+        if st.form_submit_button("Encrypt database", type="primary"):
+            if not pw1:
+                st.error("password cannot be empty")
+                return
+            if pw1 != pw2:
+                st.error("passwords don't match")
+                return
+            try:
+                _close_live_connection()
+                safety = encrypt_file(cfg.db_path, pw1, keep_safety=True)
+            except EncryptionError as e:
+                st.error(f"encryption failed: {e}")
+                invalidate_connection()
+                return
+            set_password_for(active.id, pw1)
+            invalidate_connection()
+            st.success("Database encrypted.")
+            if safety is not None:
+                st.warning(
+                    f"A **plaintext** safety copy was kept at `{safety}` in "
+                    "case you forget the password. Delete it once you've "
+                    "confirmed the new password works — until then your data "
+                    "is still readable from that copy."
+                )
+            st.rerun()
+
+
+def _render_change_password(cfg, active) -> None:
+    with st.form("db_change_pw_form"):
+        st.markdown("**Change password**")
+        old = st.text_input("Current password", type="password", key="db_old_pw")
+        new1 = st.text_input("New password", type="password", key="db_new_pw1")
+        new2 = st.text_input("Confirm new password", type="password", key="db_new_pw2")
+        if st.form_submit_button("Change password", type="primary"):
+            if not new1:
+                st.error("new password cannot be empty")
+                return
+            if new1 != new2:
+                st.error("new passwords don't match")
+                return
+            try:
+                _close_live_connection()
+                change_password(cfg.db_path, old, new1)
+            except EncryptionError as e:
+                st.error(f"could not change password: {e}")
+                invalidate_connection()
+                return
+            set_password_for(active.id, new1)
+            invalidate_connection()
+            st.success("Password changed.")
+            st.rerun()
+
+
+def _render_remove_encryption(cfg, active) -> None:
+    st.markdown("**Remove encryption**")
+    st.write(
+        "Decrypts the database back to a plain SQLite file. A timestamped "
+        "copy of the still-encrypted DB is kept alongside as a safety net."
+    )
+    confirm = st.text_input("Type `decrypt` to confirm", key="db_decrypt_confirm")
+    if st.button("🔓 Remove encryption", key="db_remove_encryption"):
+        if confirm.strip().lower() != "decrypt":
+            st.error("type the confirmation phrase exactly")
+            return
+        pw = get_password_for(active.id)
+        try:
+            _close_live_connection()
+            safety = decrypt_file(cfg.db_path, pw, keep_safety=True)
+        except EncryptionError as e:
+            st.error(f"decryption failed: {e}")
+            invalidate_connection()
+            return
+        clear_password_for(active.id)
+        invalidate_connection()
+        st.success("Encryption removed; database is now plaintext.")
+        if safety is not None:
+            st.info(f"Encrypted safety copy: `{safety}`")
+        st.rerun()
 
 
 def _render_administration(cfg, conn) -> None:
@@ -715,7 +960,7 @@ def _render_administration(cfg, conn) -> None:
     the visual cue lives on the button itself, not the section header.
     """
     with st.expander("Backup", expanded=False):
-        _render_backup(conn)
+        _render_backup(cfg, conn)
     with st.expander("Restore", expanded=False):
         _render_restore(cfg)
     with st.expander("Delete user labels", expanded=False):
@@ -726,13 +971,24 @@ def _render_administration(cfg, conn) -> None:
         _render_factory_reset(conn)
 
 
-def _render_backup(conn) -> None:
+def _render_backup(cfg, conn) -> None:
+    encrypted = account_is_encrypted()
     st.caption(
-        "Download a complete copy of the SQLite database. Includes every "
+        "Download a complete copy of the database. Includes every "
         "ingested row, label, embedding, note, vendor-cache entry, and "
-        "category. The file is a standard SQLite 3 DB -- open it in any "
-        "SQLite browser, or re-import here on another machine."
+        "category."
     )
+    if encrypted:
+        st.info(
+            "This account is encrypted, so the backup is **also encrypted** "
+            "under this account's current password. You'll need that same "
+            "password to restore it."
+        )
+    else:
+        st.caption(
+            "The file is a standard SQLite 3 DB -- open it in any SQLite "
+            "browser, or re-import here on another machine."
+        )
     # Render the backup bytes lazily into the download_button. SQLite's
     # online backup API is safe with the live UI connection open.
     # TemporaryDirectory (rather than NamedTemporaryFile) because the
@@ -742,7 +998,14 @@ def _render_backup(conn) -> None:
     try:
         with _tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as _td:
             _bk_tmp = Path(_td) / "backup.sqlite"
-            export_database(conn, _bk_tmp)
+            if encrypted:
+                # Export a self-contained SQLCipher copy under the same key
+                # (conn.backup() can't cross the sqlcipher↔sqlite3 boundary).
+                export_encrypted_copy(
+                    cfg.db_path, get_password_for(get_active_account().id), _bk_tmp
+                )
+            else:
+                export_database(conn, _bk_tmp)
             _bk_bytes = _bk_tmp.read_bytes()
         # Embed the active account's slug in the filename so backups
         # from multiple accounts don't collide in the user's Downloads
@@ -750,14 +1013,17 @@ def _render_backup(conn) -> None:
         # picks up something funky from a hand-edit.
         active = get_active_account()
         slug = slugify(active.id) or "account"
+        # `.enc.sqlite` hints the file is encrypted; restore detects it by
+        # header regardless of name.
+        ext = "enc.sqlite" if encrypted else "sqlite"
         st.download_button(
             "⬇️ Download backup",
             data=_bk_bytes,
             file_name=(
                 f"expense-analyzer-{slug}-backup-"
-                f"{_dt.date.today().isoformat()}.sqlite"
+                f"{_dt.date.today().isoformat()}.{ext}"
             ),
-            mime="application/x-sqlite3",
+            mime="application/octet-stream" if encrypted else "application/x-sqlite3",
             key="db_backup_download",
             type="primary",
         )
@@ -767,13 +1033,13 @@ def _render_backup(conn) -> None:
 
 def _render_restore(cfg) -> None:
     st.caption(
-        "Replace the **current** database with an uploaded `.sqlite` backup. "
+        "Replace the **current** database with an uploaded backup. "
         "A timestamped safety copy of the current DB is saved alongside it "
         "(`db.pre-restore.<ts>.sqlite`) so you can roll back manually if "
         "the restore turns out to be the wrong file."
     )
     upload = st.file_uploader(
-        "Pick a backup file (.sqlite)",
+        "Pick a backup file (.sqlite / .enc.sqlite)",
         type=["sqlite", "db"],
         key="db_restore_uploader",
     )
@@ -785,7 +1051,21 @@ def _render_restore(cfg) -> None:
     with _tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as _td:
         _upload_path = Path(_td) / "uploaded_backup.sqlite"
         _upload_path.write_bytes(upload.getbuffer())
-        result = validate_backup(_upload_path)
+        encrypted_upload = looks_encrypted(_upload_path)
+
+        backup_pw: str | None = None
+        if encrypted_upload:
+            st.info(
+                "This backup is **encrypted**. Enter the password it was "
+                "created with — the restored account will use that password."
+            )
+            backup_pw = st.text_input(
+                "Backup password", type="password", key="db_restore_pw"
+            )
+            if not backup_pw:
+                return  # wait for the password before validating
+
+        result = validate_backup(_upload_path, password=backup_pw)
         if not result.ok:
             st.error("upload is not a valid backup: " + "; ".join(result.errors))
             return
@@ -793,6 +1073,12 @@ def _render_restore(cfg) -> None:
             "valid backup — rows: "
             + ", ".join(f"{k}={v}" for k, v in result.table_counts.items())
         )
+        if account_is_encrypted() and not encrypted_upload:
+            st.warning(
+                "Heads up: this account is encrypted but the backup is "
+                "plaintext — restoring leaves the database **unencrypted**. "
+                "Re-encrypt it afterwards under Encryption above."
+            )
         confirm_restore = st.text_input(
             "Type `restore` to confirm",
             key="confirm_db_restore",
@@ -817,7 +1103,17 @@ def _render_restore(cfg) -> None:
                 invalidate_connection()
                 report = restore_database(
                     cfg.db_path, _upload_path, keep_safety=True,
+                    password=backup_pw,
                 )
+                # Sync the session password to whatever the restored file
+                # is: the backup's password if encrypted, else cleared so
+                # the account is treated as plaintext.
+                active_id = get_active_account().id
+                if encrypted_upload:
+                    set_password_for(active_id, backup_pw)
+                else:
+                    clear_password_for(active_id)
+                invalidate_connection()
                 st.success(
                     "restored: "
                     + ", ".join(

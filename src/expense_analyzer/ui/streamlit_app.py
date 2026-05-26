@@ -29,15 +29,18 @@ from expense_analyzer.ui import (
     settings,
 )
 from expense_analyzer.ui._shared import (
+    account_is_encrypted,
     add_account_via_ui,
     clear_tab_state,
     get_active_account,
     get_config,
     get_conn,
     get_registry,
+    is_unlocked,
     remove_account_via_ui,
     rename_account_via_ui,
     set_active_account,
+    unlock,
 )
 
 # ---------------------------------------------------------------------------
@@ -134,6 +137,9 @@ def _add_account_dialog() -> None:
             return
         set_active_account(info.id)
         clear_tab_state()
+        # Sync the account picker so it shows the new account on rerun,
+        # not the previously-active (possibly encrypted) account.
+        st.session_state["account_picker"] = info.name
         # Clear the dialog's inputs so the next open is blank.
         for k in ("add_account_name", "add_account_with_defaults"):
             st.session_state.pop(k, None)
@@ -230,19 +236,24 @@ def _render_account_picker() -> None:
             _add_account_dialog()
         return
 
-    # The selectbox uses display labels (name); we map back via the
-    # _picker_label_to_id dict. Storing the mapping on session_state
-    # lets the on_change handler resolve without re-walking the
-    # registry.
-    labels = [a.name for a in rows]
-    st.session_state["_picker_label_to_id"] = {a.name: a.id for a in rows}
+    # The selectbox uses display labels (name + optional 🔒); we map
+    # back via _picker_label_to_id. Storing on session_state lets the
+    # on_change handler resolve without re-walking the registry.
+    def _account_label(a) -> str:
+        return f"🔒 {a.name}" if account_is_encrypted(a) else a.name
+
+    labels = [_account_label(a) for a in rows]
+    st.session_state["_picker_label_to_id"] = {lbl: a.id for lbl, a in zip(labels, rows, strict=True)}
     active = get_active_account()
+    active_label = _account_label(active)
     try:
-        index = labels.index(active.name)
+        index = labels.index(active_label)
     except ValueError:
         index = 0
 
-    picker_col, add_col, rename_col, remove_col = st.columns([2, 0.5, 0.5, 0.5], width=350, gap='small')
+    picker_col, add_col, rename_col, remove_col = st.columns(
+        [2, 0.5, 0.5, 0.5], width=350, gap="small",
+    )
     with picker_col:
         st.selectbox(
             "Account",
@@ -263,6 +274,48 @@ def _render_account_picker() -> None:
                                "(files on disk stay).",
                           disabled=len(rows) <= 1):
         _remove_account_dialog()
+
+
+# ---------------------------------------------------------------------------
+# Unlock gate for encrypted accounts.
+# ---------------------------------------------------------------------------
+
+
+def _render_unlock_gate() -> bool:
+    """Gate the rest of the page behind a password when the active account
+    is encrypted and not yet unlocked this session.
+
+    Returns True when the account is accessible (plaintext or already
+    unlocked); otherwise renders a password prompt and returns False so the
+    caller can ``st.stop()`` before any tab touches the locked DB. Switching
+    to an encrypted account triggers a rerun that lands here, which is what
+    makes the UI ask for the password on account switch."""
+    active = get_active_account()
+    if is_unlocked(active):
+        return True
+
+    from expense_analyzer.storage.crypto import encryption_available
+
+    st.title("🔒 Locked account")
+    st.write(
+        f"Account **{active.name}** is encrypted. Enter its password to continue."
+    )
+    if not encryption_available():
+        st.error(
+            "This database is encrypted but the SQLCipher dependency isn't "
+            "installed in the running environment. Install it with "
+            "`pip install -e '.[encryption]'` (from the repo root) and restart the UI."
+        )
+        return False
+    with st.form("unlock_form"):
+        pw = st.text_input("Password", type="password", key="unlock_pw")
+        if st.form_submit_button("Unlock", type="primary"):
+            if unlock(active, pw):
+                st.session_state.pop("unlock_pw", None)
+                st.rerun()
+            else:
+                st.error("Incorrect password.")
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -337,6 +390,8 @@ def _render_header() -> None:
 
 
 _render_account_picker()
+if not _render_unlock_gate():
+    st.stop()
 _render_header()
 
 tab_dash, tab_review, tab_data, tab_cats, tab_quality, tab_settings = st.tabs(

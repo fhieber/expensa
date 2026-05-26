@@ -73,8 +73,10 @@ def _load_registry_cached(global_home_str: str) -> AccountRegistry:
 
 
 @st.cache_resource
-def _connect_cached(db_path_str: str) -> sqlite3.Connection:
-    return get_or_create_database(Path(db_path_str))
+def _connect_cached(db_path_str: str, password: str | None) -> sqlite3.Connection:
+    # `password` is part of the cache key so re-keying / encrypting an
+    # account opens a fresh connection rather than reusing a stale handle.
+    return get_or_create_database(Path(db_path_str), password)
 
 
 @st.cache_resource
@@ -157,6 +159,9 @@ def set_active_account(account_id: str) -> None:
         # still wins for this session.
         pass
     _connect_cached.clear()
+    # Drop any cached password for the target account so the unlock gate
+    # always re-prompts when switching to an encrypted account.
+    clear_password_for(info.id)
 
 
 def get_config() -> Config:
@@ -165,7 +170,63 @@ def get_config() -> Config:
 
 
 def get_conn() -> sqlite3.Connection:
-    return _connect_cached(str(get_active_account().db_path))
+    account = get_active_account()
+    password = get_password_for(account.id) if account_is_encrypted(account) else None
+    return _connect_cached(str(account.db_path), password)
+
+
+# ---------------------------------------------------------------------------
+# Per-account encryption / unlock state (session-scoped passwords)
+# ---------------------------------------------------------------------------
+
+# Passwords entered during this session, keyed by account slug. Lives in
+# session_state so it's never written to disk and is dropped when the
+# Streamlit session ends.
+_PASSWORDS_KEY = "_account_passwords"
+
+
+def _passwords() -> dict[str, str]:
+    return st.session_state.setdefault(_PASSWORDS_KEY, {})
+
+
+def get_password_for(account_id: str) -> str | None:
+    return _passwords().get(account_id)
+
+
+def set_password_for(account_id: str, password: str) -> None:
+    _passwords()[account_id] = password
+
+
+def clear_password_for(account_id: str) -> None:
+    _passwords().pop(account_id, None)
+
+
+def account_is_encrypted(account: AccountInfo | None = None) -> bool:
+    """True when the account's DB file on disk is SQLCipher-encrypted."""
+    from expense_analyzer.storage.crypto import looks_encrypted
+
+    acc = account or get_active_account()
+    return looks_encrypted(acc.db_path)
+
+
+def is_unlocked(account: AccountInfo | None = None) -> bool:
+    """True when the account is plaintext, or encrypted with a password
+    already entered (and verified) this session."""
+    acc = account or get_active_account()
+    if not account_is_encrypted(acc):
+        return True
+    return get_password_for(acc.id) is not None
+
+
+def unlock(account: AccountInfo, password: str) -> bool:
+    """Verify ``password`` against the account's encrypted DB and, on
+    success, stash it for the session. Returns whether it was correct."""
+    from expense_analyzer.storage.crypto import verify_password
+
+    if verify_password(account.db_path, password):
+        set_password_for(account.id, password)
+        return True
+    return False
 
 
 def get_embedder() -> Embedder:
