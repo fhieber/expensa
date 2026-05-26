@@ -243,7 +243,7 @@ def _render_account_picker() -> None:
         return f"🔒 {a.name}" if account_is_encrypted(a) else a.name
 
     labels = [_account_label(a) for a in rows]
-    st.session_state["_picker_label_to_id"] = {lbl: a.id for lbl, a in zip(labels, rows)}
+    st.session_state["_picker_label_to_id"] = {lbl: a.id for lbl, a in zip(labels, rows, strict=True)}
     active = get_active_account()
     active_label = _account_label(active)
     try:
