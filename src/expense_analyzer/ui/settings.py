@@ -805,8 +805,8 @@ def _render_encryption(cfg) -> None:
     if not encryption_available() and not encrypted:
         st.info(
             "Encryption needs the optional SQLCipher dependency. Install it "
-            "with `pip install expense-analyzer-de[encryption]` and restart "
-            "the UI (`expense ui-restart`)."
+            "with `pip install -e '.[encryption]'` (from the repo root) and "
+            "restart the UI (`expense ui-restart`)."
         )
         return
 

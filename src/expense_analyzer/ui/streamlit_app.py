@@ -295,7 +295,7 @@ def _render_unlock_gate() -> bool:
         st.error(
             "This database is encrypted but the SQLCipher dependency isn't "
             "installed in the running environment. Install it with "
-            "`pip install expense-analyzer-de[encryption]` and restart the UI."
+            "`pip install -e '.[encryption]'` (from the repo root) and restart the UI."
         )
         return False
     with st.form("unlock_form"):

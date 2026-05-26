@@ -443,7 +443,7 @@ def account_encrypt(
     if not crypto.encryption_available():
         raise click.ClickException(
             "encryption needs the optional dependency: "
-            "pip install expense-analyzer-de[encryption]"
+            "pip install -e '.[encryption]'  (from the repo root)"
         )
     if not info.db_path.is_file():
         raise click.ClickException(
