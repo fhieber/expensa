@@ -809,10 +809,20 @@ def _run_enrich(conn, cfg: Config, path: Path, source: str, embedder) -> None:
         conn, records, adapter, embedder=embedder,
         date_window_days=cfg.enrichment.date_window_days,
     )
-    click.echo(
-        f"{path.name:<40} source={rep.source}  parsed={rep.parsed:>4}  "
-        f"matched={rep.matched:>4}  reembedded={rep.reembedded:>4}"
-    )
+    parts = [
+        f"source={rep.source}",
+        f"parsed={rep.parsed:>4}",
+        f"matched={rep.matched:>4}",
+    ]
+    if rep.already_enriched:
+        parts.append(f"already_enriched={rep.already_enriched:>4}")
+    if rep.ambiguous:
+        parts.append(f"ambiguous={rep.ambiguous:>4}")
+    if rep.unmatched:
+        parts.append(f"unmatched={rep.unmatched:>4}")
+    if rep.reembedded:
+        parts.append(f"reembedded={rep.reembedded:>4}")
+    click.echo(f"{path.name:<40} " + "  ".join(parts))
 
 
 def _preview_enrich(
