@@ -38,7 +38,9 @@ def _add_column_if_missing(
 def _migrate_v3(conn: sqlite3.Connection) -> None:
     # v2 -> v3: per-category savings flag.
     _add_column_if_missing(conn, "categories", "is_savings", "INTEGER NOT NULL DEFAULT 0")
-    conn.execute("UPDATE categories SET is_savings = 1 WHERE name = 'Sparen'")
+    rows = conn.execute("PRAGMA table_info(categories)").fetchall()
+    if rows:
+        conn.execute("UPDATE categories SET is_savings = 1 WHERE name = 'Sparen'")
 
 
 def _migrate_v4(conn: sqlite3.Connection) -> None:
