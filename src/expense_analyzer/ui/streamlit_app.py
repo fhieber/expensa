@@ -136,6 +136,9 @@ def _add_account_dialog() -> None:
             return
         set_active_account(info.id)
         clear_tab_state()
+        # Sync the account picker so it shows the new account on rerun,
+        # not the previously-active (possibly encrypted) account.
+        st.session_state["account_picker"] = info.name
         # Clear the dialog's inputs so the next open is blank.
         for k in ("add_account_name", "add_account_with_defaults"):
             st.session_state.pop(k, None)
