@@ -1031,7 +1031,7 @@ def _render_top_action_bar_and_grid_and_actions(
         st.session_state[_GRID_STATE_KEY] = _gs
 
     edited_df = response.get("data")
-    if edited_df is None:
+    if not isinstance(edited_df, pd.DataFrame):
         edited_df = df
     selected_rows = response.get("selected_rows")
     if isinstance(selected_rows, pd.DataFrame):
@@ -1053,12 +1053,12 @@ def _render_top_action_bar_and_grid_and_actions(
 
     n_pending = len(pending_updates)
     n_selected = len(sel_ids)
-    n_rows = len(edited_df) if edited_df is not None else 0
+    n_rows = len(edited_df) if isinstance(edited_df, pd.DataFrame) else 0
 
     # Signed totals over the SQL-filter scope (= every row AgGrid
     # received). Column-filtering at the grid level is invisible from
     # here; see comment in `_render_caption`.
-    if edited_df is not None and not edited_df.empty:
+    if isinstance(edited_df, pd.DataFrame) and not edited_df.empty:
         total_amount = float(edited_df["betrag_€"].sum())
         sel_set_for_sum = {int(x) for x in sel_ids}
         if sel_set_for_sum:
