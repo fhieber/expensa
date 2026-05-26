@@ -286,9 +286,8 @@ def _render_import_expander(conn) -> None:
         st.caption(
             "Drop one or more German bank-export CSVs (`;` separator, comma "
             "decimal). On Ingest each new row's text/IBAN/numeric features "
-            "and sentence-transformer embedding are computed and stored; the "
-            "table below then pins to those new rows so you can review and "
-            "label them with the Auto-Label flow."
+            "are computed and stored; the table below then pins to those new "
+            "rows so you can review and label them with the Auto-Label flow."
         )
         files = st.file_uploader(
             "CSV file(s)", accept_multiple_files=True, type=["csv"],
@@ -302,12 +301,23 @@ def _render_import_expander(conn) -> None:
                  "detail. Matched to bank rows by amount + nearby date; the "
                  "real merchant/item is attached and the row re-embedded.",
         )
+        skip_embed = st.checkbox(
+            "Skip embedding computation",
+            value=False,
+            key="data_ingest_skip_embed",
+            help=(
+                "Skip the sentence-transformer embedding step. Useful when "
+                "importing a large backlog or when the model isn't downloaded "
+                "yet. Missing embeddings are filled automatically the first "
+                "time Auto-Label or Predict-all runs."
+            ),
+        )
         ingest_clicked = st.button(
             "Ingest", type="primary", disabled=not (files or enrich_files),
             key="data_ingest_btn",
         )
         if ingest_clicked and (files or enrich_files):
-            emb = get_embedder()
+            emb = None if skip_embed else get_embedder()
             new_ids: list[int] = []
             with st.status("Importing…", expanded=True) as status:
                 progress = st.progress(0.0, text="starting…")
