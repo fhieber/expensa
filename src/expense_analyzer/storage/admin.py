@@ -132,8 +132,6 @@ _WHITESPACE_BACKFILL_COLUMNS: tuple[str, ...] = (
     "glaeubiger_id",
     "mandatsreferenz",
     "kundenreferenz",
-    "enriched_counterparty",
-    "enriched_description",
 )
 
 

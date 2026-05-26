@@ -28,9 +28,9 @@ def test_save_merges_into_existing(tmp_path: Path, monkeypatch) -> None:
 
 def test_load_config_picks_up_saved_choice(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("EXPENSE_ANALYZER_HOME", str(tmp_path))
-    save_user_config({"embedding_model": "felix/preferred-model"}, data_dir=tmp_path)
+    save_user_config({"embedding_model": "test/preferred-model"}, data_dir=tmp_path)
     cfg = load_config()
-    assert cfg.embedding_model == "felix/preferred-model"
+    assert cfg.embedding_model == "test/preferred-model"
 
 
 def test_save_deep_merges_nested(tmp_path: Path, monkeypatch) -> None:

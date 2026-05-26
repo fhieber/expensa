@@ -42,12 +42,6 @@ _DASHBOARD_RECORDS_SELECT = """
         e.id, e.buchungsdatum,
         e.counterparty,
         e.verwendungszweck,
-        -- Pulled for the enrichment.display helper, which rewrites the
-        -- two columns above for PayPal-enriched rows ("PayPal {merchant}"
-        -- + reconstructed Verwendungszweck). The raw bank values stay
-        -- on disk untouched.
-        e.enrichment_source,
-        e.enriched_counterparty,
         e.betrag_cents / 100.0 AS "betrag_€",
         COALESCE(c.name, '(unkategorisiert)') AS category,
         e.iban
@@ -204,18 +198,6 @@ def _render_records_table(conn, since, until) -> None:
         + " ORDER BY e.buchungsdatum DESC, e.id DESC LIMIT 5000"
     )
     full_df = pd.read_sql_query(sql, conn, params=params)
-    # Rewrite the counterparty + verwendungszweck cells for PayPal-
-    # enriched rows BEFORE styling / display. Helper is a no-op for
-    # other sources, so always-safe to call.
-    from expense_analyzer.enrichment.display import apply_to_dataframe
-
-    apply_to_dataframe(full_df)
-    # Drop the helper columns now that the rewrite is done -- they'd
-    # otherwise show up as empty columns in the dataframe display.
-    full_df = full_df.drop(
-        columns=[c for c in ("enrichment_source", "enriched_counterparty") if c in full_df.columns],
-        errors="ignore",
-    )
     if not full_df.empty:
         full_df["buchungsdatum"] = pd.to_datetime(full_df["buchungsdatum"])
         full_df["category"] = full_df["category"].fillna("(unkategorisiert)")

@@ -56,7 +56,7 @@ def test_vendor_lookup_disabled_by_default(tmp_db: sqlite3.Connection) -> None:
     cfg = VendorLookupConfig()
     assert cfg.enabled is False
     with pytest.raises(VendorLookupDisabled):
-        lookup_vendor(tmp_db, "rewe markt", cfg)
+        lookup_vendor(tmp_db, "markt alpha", cfg)
 
 
 def test_vendor_lookup_only_sends_counterparty(tmp_db: sqlite3.Connection) -> None:
@@ -67,14 +67,14 @@ def test_vendor_lookup_only_sends_counterparty(tmp_db: sqlite3.Connection) -> No
 
     def fake_ddg(query: str, max_results: int = 3) -> str:
         captured.append(query)
-        return "REWE is a German supermarket chain"
+        return "Markt Alpha ist ein Supermarkt"
 
     with patch("expense_analyzer.enrichment.vendor_web._ddg_search", side_effect=fake_ddg):
-        info = lookup_vendor(tmp_db, "rewe markt", cfg)
+        info = lookup_vendor(tmp_db, "markt alpha", cfg)
 
     # The single outbound call must equal the counterparty - nothing else.
-    assert captured == ["rewe markt"]
-    assert info.counterparty_normalized == "rewe markt"
+    assert captured == ["markt alpha"]
+    assert info.counterparty_normalized == "markt alpha"
     assert info.industry == "Supermarkt"
 
 
@@ -84,11 +84,11 @@ def test_vendor_lookup_uses_cache_on_second_call(tmp_db: sqlite3.Connection) -> 
 
     def fake(query: str, max_results: int = 3) -> str:
         calls.append(query)
-        return "Edeka Supermarkt"
+        return "Markt Beta Supermarkt"
 
     with patch("expense_analyzer.enrichment.vendor_web._ddg_search", side_effect=fake):
-        lookup_vendor(tmp_db, "edeka sued", cfg)
-        lookup_vendor(tmp_db, "edeka sued", cfg)
+        lookup_vendor(tmp_db, "markt beta", cfg)
+        lookup_vendor(tmp_db, "markt beta", cfg)
 
     assert len(calls) == 1, "second lookup should hit the cache"
 
@@ -96,10 +96,10 @@ def test_vendor_lookup_uses_cache_on_second_call(tmp_db: sqlite3.Connection) -> 
 def test_heuristic_industry_classifies_known_categories() -> None:
     """Industry labels are German (multilingual NLI + DE embedding both
     benefit from the same-language signal)."""
-    assert _heuristic_industry("rewe markt", "supermarkt edeka") == "Supermarkt"
+    assert _heuristic_industry("markt alpha", "supermarkt haendler") == "Supermarkt"
     assert _heuristic_industry("netflix international", "streaming") == "Streaming"
     assert _heuristic_industry("telekom deutschland", "mobilfunk") == "Telekommunikation"
-    assert _heuristic_industry("vermieter schmidt", "miete januar") == "Miete"
+    assert _heuristic_industry("vermieter", "miete januar") == "Miete"
     # Fallback is the German "Sonstige" sentinel, not the English "other".
     assert _heuristic_industry("xyzzy", "nothing here") == "Sonstige"
 

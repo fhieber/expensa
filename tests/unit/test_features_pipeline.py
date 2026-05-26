@@ -66,7 +66,7 @@ def test_recurrence_features(tmp_db: sqlite3.Connection, fixtures_dir: Path) -> 
     df = add_temporal_recurrence(tmp_db, base_dataframe(tmp_db))
     # The Feb-1 rent has a Jan-1 prior.
     feb_rent = df[
-        (df["counterparty_normalized"] == "vermieter schmidt")
+        (df["counterparty_normalized"] == "vermieter")
         & (df["buchungsdatum"].astype(str) == "2026-02-01")
     ].iloc[0]
     assert feb_rent["days_since_prev_same_cp"] == 31
@@ -82,7 +82,7 @@ def test_is_likely_recurring_needs_three_months(
     ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
     feb_rent_id = tmp_db.execute(
         "SELECT id FROM expenses "
-        "WHERE counterparty_normalized = 'vermieter schmidt' "
+        "WHERE counterparty_normalized = 'vermieter' "
         "ORDER BY buchungsdatum DESC LIMIT 1"
     ).fetchone()["id"]
     assert is_likely_recurring(tmp_db, feb_rent_id) is False
@@ -90,8 +90,8 @@ def test_is_likely_recurring_needs_three_months(
 
 def test_hash_embedder_deterministic() -> None:
     e = HashEmbedder(dim=128)
-    a = e.encode(["rewe markt | einkauf"])
-    b = e.encode(["rewe markt | einkauf"])
+    a = e.encode(["markt alpha | einkauf"])
+    b = e.encode(["markt alpha | einkauf"])
     assert a.shape == (1, 128)
     assert (a == b).all()
 
@@ -129,9 +129,9 @@ def test_build_full_features_with_embeddings(
 
 
 def test_fuzzy_match_known_vendor() -> None:
-    known = ["rewe markt", "edeka sued", "vermieter schmidt"]
-    name, score = best_fuzzy_match_known_vendor("rewe markt filiale", known)
-    assert name == "rewe markt"
+    known = ["markt alpha", "markt beta", "vermieter"]
+    name, score = best_fuzzy_match_known_vendor("markt alpha filiale", known)
+    assert name == "markt alpha"
     assert score >= 80
     name, score = best_fuzzy_match_known_vendor("totally unknown vendor 1234", known)
     assert score < 80

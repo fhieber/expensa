@@ -1,26 +1,23 @@
-"""Generic secondary-source enrichment engine.
+"""PayPal enrichment engine (simplified).
 
-Matches a list of :class:`~expense_analyzer.ingestion.sources.EnrichmentRecord`
-objects (produced by some adapter) against expenses by **absolute amount +
-date proximity**, then writes the enrichment onto the matched expense, rebuilds
-its ``combined_text`` and re-embeds it so the richer description actually
-improves classification.
+Matches EnrichmentRecords against bank expenses by absolute amount +
+nearest date within ±N days.  On a match, rewrites the expense's
+``verwendungszweck`` directly to the string carried by
+``EnrichmentRecord.description`` (e.g. "PayPal . Etsy Inc"), then
+re-normalises and optionally re-embeds the row.
 
-The engine is source-agnostic: it only ever sees ``EnrichmentRecord`` and the
-adapter's ``name`` / ``candidate_filter``. Adding a new source needs no change
-here. The same matching core powers a no-DB ``preview_enrichment`` used by the
-``ingest --dry-run`` showcase.
+Idempotency: matched records carry their PayPal Transaktionscode in
+``enrichment_ref``; rows with a non-NULL ``enrichment_ref`` are
+skipped on re-run.
 """
 
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date
 
 from expense_analyzer.features.embeddings import Embedder, store_embeddings
-from expense_analyzer.ingestion.csv_loader import ParsedRow
 from expense_analyzer.ingestion.normalizer import (
     combined_text,
     normalize_counterparty,
@@ -35,94 +32,50 @@ DEFAULT_DATE_WINDOW_DAYS = 4
 class EnrichReport:
     source: str
     parsed: int = 0
-    candidate_expenses: int = 0
     matched: int = 0
-    ambiguous: int = 0
-    unmatched_expenses: int = 0
-    unused_records: int = 0
     reembedded: int = 0
     enriched_ids: list[int] = field(default_factory=list)
 
 
-@dataclass
-class _Candidate:
-    """A transaction that could be enriched, abstracted away from whether it
-    came from the DB or a freshly-parsed bank CSV."""
-
-    key: int                 # DB expense id, or list index for a parsed bank row
-    txn_date: date
-    betrag_cents: int
-    filter_row: Mapping[str, object]  # passed to adapter.candidate_filter
-    verwendungszweck: str
-
-
-@dataclass
-class _MatchResult:
-    matches: list[tuple[_Candidate, EnrichmentRecord]]
-    candidate_count: int
-    ambiguous: int
-    unmatched: int
-    consumed_refs: set[str]
-
-
-def _match_candidates(
-    candidates: list[_Candidate],
+def _match(
+    candidates: list[dict],
     records: list[EnrichmentRecord],
     adapter: SourceAdapter,
     date_window_days: int,
-) -> _MatchResult:
-    """Pure matching: amount (abs cents) + nearest date within the window,
-    one-to-one, ambiguous ties left unmatched. No DB / side effects."""
-    eligible_cands = [c for c in candidates if adapter.candidate_filter(c.filter_row)]
+) -> list[tuple[dict, EnrichmentRecord]]:
+    """Return one-to-one (candidate, record) pairs by |amount| + nearest date.
+
+    Eligible candidates are those passing ``adapter.candidate_filter``.
+    If two records tie for nearest date, neither is matched (ambiguous).
+    Each record is consumed by at most one candidate.
+    """
+    eligible = [c for c in candidates if adapter.candidate_filter(c)]
 
     by_cents: dict[int, list[EnrichmentRecord]] = {}
     for rec in records:
         by_cents.setdefault(abs(rec.amount_cents), []).append(rec)
 
     consumed: set[str] = set()
-    matches: list[tuple[_Candidate, EnrichmentRecord]] = []
-    ambiguous = 0
-    unmatched = 0
+    matches: list[tuple[dict, EnrichmentRecord]] = []
 
-    for cand in sorted(eligible_cands, key=lambda c: (c.txn_date, c.key)):
+    for cand in sorted(eligible, key=lambda c: (c["buchungsdatum"], c["id"])):
         pool = [
             rec
-            for rec in by_cents.get(abs(cand.betrag_cents), [])
+            for rec in by_cents.get(abs(int(cand["betrag_cents"])), [])
             if rec.source_ref not in consumed
-            and abs((cand.txn_date - rec.txn_date).days) <= date_window_days
+            and abs((cand["buchungsdatum"] - rec.txn_date).days) <= date_window_days
         ]
         if not pool:
-            unmatched += 1
             continue
-        best = min(abs((cand.txn_date - r.txn_date).days) for r in pool)
-        closest = [r for r in pool if abs((cand.txn_date - r.txn_date).days) == best]
+        best = min(abs((cand["buchungsdatum"] - r.txn_date).days) for r in pool)
+        closest = [r for r in pool if abs((cand["buchungsdatum"] - r.txn_date).days) == best]
         if len(closest) > 1:
-            ambiguous += 1
-            continue
+            continue  # ambiguous
         rec = closest[0]
         consumed.add(rec.source_ref)
         matches.append((cand, rec))
 
-    return _MatchResult(
-        matches=matches,
-        candidate_count=len(eligible_cands),
-        ambiguous=ambiguous,
-        unmatched=unmatched,
-        consumed_refs=consumed,
-    )
-
-
-def _rebuilt_combined_text(verwendungszweck: str, rec: EnrichmentRecord) -> str:
-    cp = normalize_counterparty(rec.counterparty)
-    vz = normalize_verwendungszweck(f"{verwendungszweck or ''} {rec.description or ''}")
-    return combined_text(cp, vz)
-
-
-_CANDIDATE_SELECT = """
-    SELECT id, buchungsdatum, betrag_cents, verwendungszweck,
-           zahlungsempfaenger, zahlungspflichtiger, enrichment_ref
-    FROM expenses
-"""
+    return matches
 
 
 def enrich_from_records(
@@ -132,11 +85,13 @@ def enrich_from_records(
     embedder: Embedder | None = None,
     date_window_days: int = DEFAULT_DATE_WINDOW_DAYS,
 ) -> EnrichReport:
+    """Match records against the DB and write enriched Verwendungszweck.
+
+    Safe to call repeatedly — expenses with a non-NULL ``enrichment_ref``
+    are excluded from matching, so re-running on the same data is a no-op.
+    """
     report = EnrichReport(source=adapter.name, parsed=len(records))
 
-    # Idempotency: records whose source_ref is already attached to some
-    # expense are considered applied; expenses already enriched are not
-    # re-matched.
     used_refs = {
         r["enrichment_ref"]
         for r in conn.execute(
@@ -146,60 +101,40 @@ def enrich_from_records(
     eligible = [r for r in records if r.source_ref not in used_refs]
 
     candidates = [
-        _Candidate(
-            key=int(row["id"]),
-            txn_date=row["buchungsdatum"],
-            betrag_cents=int(row["betrag_cents"]),
-            filter_row=dict(row),
-            verwendungszweck=row["verwendungszweck"] or "",
-        )
-        for row in conn.execute(_CANDIDATE_SELECT).fetchall()
-        if row["enrichment_ref"] is None
+        dict(row)
+        for row in conn.execute(
+            "SELECT id, buchungsdatum, betrag_cents, "
+            "zahlungsempfaenger, zahlungspflichtiger "
+            "FROM expenses WHERE enrichment_ref IS NULL"
+        ).fetchall()
     ]
 
-    result = _match_candidates(candidates, eligible, adapter, date_window_days)
-    report.candidate_expenses = result.candidate_count
-    report.ambiguous = result.ambiguous
-    report.unmatched_expenses = result.unmatched
-    report.matched = len(result.matches)
-    report.unused_records = len(eligible) - len(result.consumed_refs)
+    matches = _match(candidates, eligible, adapter, date_window_days)
+    report.matched = len(matches)
 
-    for cand, rec in result.matches:
-        eid = int(cand.key)
-        # Re-derive the normalized counterparty from the enriched name so
-        # the cascade's vendor_exact_match keys on the merchant ("amazon",
-        # "betterplace org") rather than on every bank Lastschrift
-        # collapsing to "paypal europe". Falls back to the bank-side
-        # value if the enrichment lacks a usable name.
-        enriched_cp_norm = normalize_counterparty(rec.counterparty or "")
+    for cand, rec in matches:
+        eid = int(cand["id"])
+        new_vz = rec.description          # pre-formatted by the adapter
+        new_vz_norm = normalize_verwendungszweck(new_vz)
+        cp_norm = normalize_counterparty(rec.counterparty)
+        new_combined = combined_text(cp_norm, new_vz_norm)
         conn.execute(
             """
             UPDATE expenses
-               SET enrichment_source = ?,
-                   enrichment_ref = ?,
-                   enriched_counterparty = ?,
-                   enriched_description = ?,
-                   enriched_at = CURRENT_TIMESTAMP,
-                   counterparty_normalized = COALESCE(NULLIF(?, ''), counterparty_normalized),
-                   combined_text = ?
+               SET verwendungszweck            = ?,
+                   verwendungszweck_normalized = ?,
+                   counterparty_normalized     = ?,
+                   combined_text               = ?,
+                   enrichment_source           = ?,
+                   enrichment_ref              = ?
              WHERE id = ?
             """,
-            (
-                adapter.name,
-                rec.source_ref,
-                rec.counterparty,
-                rec.description,
-                enriched_cp_norm,
-                _rebuilt_combined_text(cand.verwendungszweck, rec),
-                eid,
-            ),
+            (new_vz, new_vz_norm, cp_norm, new_combined, adapter.name, rec.source_ref, eid),
         )
         report.enriched_ids.append(eid)
 
     if embedder is not None and report.enriched_ids:
         ph = ",".join("?" * len(report.enriched_ids))
-        # combined_text changed, so drop stale vectors first --
-        # store_embeddings skips ids that already have one.
         conn.execute(
             f"DELETE FROM embeddings WHERE expense_id IN ({ph})",
             report.enriched_ids,
@@ -215,80 +150,55 @@ def enrich_from_records(
     return report
 
 
-# --- Dry-run preview (no DB) -------------------------------------------------
+# --- Dry-run preview (no DB writes) -----------------------------------------
 
 
 @dataclass
 class EnrichmentPreview:
-    """One matched bank row shown with and without enrichment."""
-
-    row: ParsedRow
-    record: EnrichmentRecord
-    combined_before: str
-    combined_after: str
+    vz_before: str
+    vz_after: str
 
 
 @dataclass
 class PreviewReport:
     source: str
-    parsed_records: int
-    candidate_rows: int
     matched: int
-    ambiguous: int
-    unmatched: int
     previews: list[EnrichmentPreview] = field(default_factory=list)
 
 
-def _row_combined_text(row: ParsedRow) -> str:
-    """combined_text exactly as plain ingestion would compute it (no
-    enrichment) -- mirrors ingestion._row_to_params."""
-    counterparty = row.zahlungsempfaenger or row.zahlungspflichtiger
-    return combined_text(
-        normalize_counterparty(counterparty),
-        normalize_verwendungszweck(row.verwendungszweck),
-    )
-
-
 def preview_enrichment(
-    rows: list[ParsedRow],
+    rows,  # list[ParsedRow]
     records: list[EnrichmentRecord],
     adapter: SourceAdapter,
     date_window_days: int = DEFAULT_DATE_WINDOW_DAYS,
 ) -> PreviewReport:
-    """Match parsed bank rows against secondary records purely in memory and
-    return a before/after view for each match. No DB, no writes."""
-    # Key by position in the combined list -- source_row restarts per file,
-    # so it isn't unique when several bank CSVs are previewed together.
+    """Match parsed bank rows against secondary records in memory.
+
+    Returns a before/after view for each match without writing to the DB.
+    """
+    from expense_analyzer.ingestion.csv_loader import ParsedRow
+
     candidates = [
-        _Candidate(
-            key=i,
-            txn_date=row.buchungsdatum,
-            betrag_cents=row.betrag_cents,
-            filter_row={
-                "zahlungsempfaenger": row.zahlungsempfaenger,
-                "zahlungspflichtiger": row.zahlungspflichtiger,
-            },
-            verwendungszweck=row.verwendungszweck,
-        )
+        {
+            "id": i,
+            "buchungsdatum": row.buchungsdatum,
+            "betrag_cents": row.betrag_cents,
+            "zahlungsempfaenger": row.zahlungsempfaenger,
+            "zahlungspflichtiger": row.zahlungspflichtiger,
+        }
         for i, row in enumerate(rows)
     ]
 
-    result = _match_candidates(candidates, records, adapter, date_window_days)
+    matches = _match(candidates, records, adapter, date_window_days)
     previews = [
         EnrichmentPreview(
-            row=rows[cand.key],
-            record=rec,
-            combined_before=_row_combined_text(rows[cand.key]),
-            combined_after=_rebuilt_combined_text(cand.verwendungszweck, rec),
+            vz_before=rows[cand["id"]].verwendungszweck,
+            vz_after=rec.description,
         )
-        for cand, rec in result.matches
+        for cand, rec in matches
     ]
     return PreviewReport(
         source=adapter.name,
-        parsed_records=len(records),
-        candidate_rows=result.candidate_count,
-        matched=len(result.matches),
-        ambiguous=result.ambiguous,
-        unmatched=result.unmatched,
+        matched=len(matches),
         previews=previews,
     )

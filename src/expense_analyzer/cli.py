@@ -167,12 +167,45 @@ def cli(
 # --- init --------------------------------------------------------------------
 
 @cli.command()
+@click.argument("name", required=False, default=None)
 @click.option("--with-defaults/--no-defaults", default=True,
               help="Install the bundled German default categories.")
 @click.pass_context
-def init(ctx: click.Context, with_defaults: bool) -> None:
-    """Create the data directory, initialize the DB, install categories."""
-    cfg: Config = ctx.obj[_CTX_KEY]["config"]
+def init(ctx: click.Context, name: str | None, with_defaults: bool) -> None:
+    """Create the data directory, initialize the DB, install categories.
+
+    On a fresh install (no accounts registered yet) NAME is required.
+    If omitted, the command prompts interactively.
+    """
+    obj = ctx.obj[_CTX_KEY]
+    registry: AccountRegistry = obj["registry"]
+    global_home: Path = obj["global_home"]
+
+    if not registry.all():
+        # Fresh install: we need a real account name.
+        if not name:
+            name = click.prompt("Account name")
+        name = name.strip()
+        if not name:
+            raise click.ClickException("Account name cannot be empty.")
+        from expense_analyzer.accounts import init_account_db
+        try:
+            info = registry.add(name)
+        except ValueError as e:
+            raise click.ClickException(str(e)) from e
+        registry.save()
+        registry.set_active_id(info.id)
+        conn = init_account_db(info, with_defaults=with_defaults)
+        conn.close()
+        click.echo(f"created account: {info.id}  ({info.name})")
+        click.echo(f"  data dir: {info.data_dir}")
+        click.echo(f"  database: {info.db_path}")
+        if with_defaults:
+            click.echo("  seeded default German categories.")
+        return
+
+    # Existing install: apply migrations and report.
+    cfg: Config = obj["config"]
     cfg.data_dir.mkdir(parents=True, exist_ok=True)
     conn = _connect(cfg)
     try:
@@ -180,7 +213,8 @@ def init(ctx: click.Context, with_defaults: bool) -> None:
             from expense_analyzer.storage.categories import import_categories_from_yaml
 
             n = import_categories_from_yaml(conn, packaged_default_categories())
-            click.echo(f"installed {n} default categories")
+            if n:
+                click.echo(f"installed {n} default categories")
         click.echo(f"data dir: {cfg.data_dir}")
         click.echo(f"database: {cfg.db_path}")
     finally:
@@ -658,8 +692,7 @@ def clean_whitespace(ctx: click.Context, dry_run: bool) -> None:
     parse time, but rows imported under the old code-path still
     carry the noise. Touches counterparty, verwendungszweck,
     zahlungspflichtiger, status, umsatztyp, glaeubiger_id,
-    mandatsreferenz, kundenreferenz, enriched_counterparty and
-    enriched_description. Categories, labels, notes and embeddings
+    mandatsreferenz, kundenreferenz. Categories, labels, notes and embeddings
     are untouched.
 
     Idempotent -- safe to re-run; a clean DB reports zero updates.
@@ -779,8 +812,7 @@ def _run_enrich(conn, cfg: Config, path: Path, source: str, embedder) -> None:
     )
     click.echo(
         f"{path.name:<40} source={rep.source}  parsed={rep.parsed:>4}  "
-        f"matched={rep.matched:>4}  ambiguous={rep.ambiguous:>4}  "
-        f"unmatched={rep.unmatched_expenses:>4}  reembedded={rep.reembedded:>4}"
+        f"matched={rep.matched:>4}  reembedded={rep.reembedded:>4}"
     )
 
 
@@ -810,26 +842,14 @@ def _preview_enrich(
             date_window_days=cfg.enrichment.date_window_days,
         )
         click.echo(
-            f"=== {path.name} (source={rep.source}) — "
-            f"matched={rep.matched}, ambiguous={rep.ambiguous}, "
-            f"unmatched={rep.unmatched} of {rep.candidate_rows} candidate row(s) ==="
+            f"=== {path.name} (source={rep.source}) — matched={rep.matched} ==="
         )
         if not rep.previews:
             click.echo("  (no records matched a bank row)\n")
             continue
         for pv in rep.previews:
-            amount = pv.row.betrag_cents / 100
-            click.echo(
-                f"\n● {pv.row.buchungsdatum}  {amount:>9.2f} €  "
-                f"{pv.row.zahlungsempfaenger or pv.row.zahlungspflichtiger}"
-            )
-            click.echo(f"    bank Verwendungszweck : {pv.row.verwendungszweck or '—'}")
-            click.echo(f"    without enrichment    : {pv.combined_before}")
-            click.echo(f"    with enrichment       : {pv.combined_after}")
-            click.echo(
-                f"    └ {rep.source} txn {pv.record.source_ref}: "
-                f"{pv.record.counterparty} — {pv.record.description or '—'}"
-            )
+            click.echo(f"\n● without enrichment    : {pv.vz_before or '—'}")
+            click.echo(f"  with enrichment       : {pv.vz_after}")
         click.echo("")
 
 

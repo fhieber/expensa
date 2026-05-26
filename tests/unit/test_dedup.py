@@ -77,10 +77,10 @@ def test_ingested_rows_have_normalized_text(
     ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
     row = tmp_db.execute(
         "SELECT counterparty_normalized, combined_text FROM expenses "
-        "WHERE zahlungsempfaenger='REWE Markt GmbH' LIMIT 1"
+        "WHERE zahlungsempfaenger='Markt Alpha GmbH' LIMIT 1"
     ).fetchone()
-    assert row["counterparty_normalized"] == "rewe markt"
-    assert "rewe markt" in row["combined_text"]
+    assert row["counterparty_normalized"] == "markt alpha"
+    assert "markt alpha" in row["combined_text"]
 
 
 def test_ingested_rows_have_iban_features(
@@ -88,13 +88,13 @@ def test_ingested_rows_have_iban_features(
 ) -> None:
     ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
     foreign = tmp_db.execute(
-        "SELECT iban_country, iban_is_foreign FROM expenses WHERE zahlungsempfaenger='Amazon EU SARL' LIMIT 1"
+        "SELECT iban_country, iban_is_foreign FROM expenses WHERE zahlungsempfaenger='Onlinehandel SARL' LIMIT 1"
     ).fetchone()
     assert foreign["iban_country"] == "LU"
     assert foreign["iban_is_foreign"] == 1
 
     domestic = tmp_db.execute(
-        "SELECT iban_country, iban_is_foreign FROM expenses WHERE zahlungsempfaenger='Vermieter Schmidt' LIMIT 1"
+        "SELECT iban_country, iban_is_foreign FROM expenses WHERE zahlungsempfaenger='Vermieter GmbH' LIMIT 1"
     ).fetchone()
     assert domestic["iban_country"] == "DE"
     assert domestic["iban_is_foreign"] == 0

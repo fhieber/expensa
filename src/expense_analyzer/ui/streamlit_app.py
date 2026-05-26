@@ -389,6 +389,38 @@ def _render_header() -> None:
     st.divider()
 
 
+_registry = get_registry()
+if not _registry.all():
+    # Fresh install: no accounts yet. Show a minimal setup page and stop.
+    st.title("expense-analyzer-de")
+    st.markdown("Welcome! Create your first account to get started.")
+    st.divider()
+    _col, _ = st.columns([2, 3])
+    with _col:
+        _new_name = st.text_input(
+            "Account name",
+            placeholder="e.g. Personal",
+            key="setup_account_name",
+        )
+        _with_defaults = st.checkbox(
+            "Install default German categories",
+            value=True,
+            key="setup_with_defaults",
+            help=(
+                "Seeds a standard set of German expense categories "
+                "(Lebensmittel, Miete, Transport, …). You can add, rename, "
+                "or remove categories later in the Categories tab."
+            ),
+        )
+        if st.button("Create & Initialize", type="primary",
+                     disabled=not (_new_name or "").strip()):
+            _name = (_new_name or "").strip()
+            if _name:
+                _info = add_account_via_ui(_name, with_defaults=_with_defaults)
+                set_active_account(_info.id)
+                st.rerun()
+    st.stop()
+
 _render_account_picker()
 if not _render_unlock_gate():
     st.stop()

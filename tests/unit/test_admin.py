@@ -31,7 +31,7 @@ def test_category_removal_impact_counts_labels(
     ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
     cid = upsert_category(tmp_db, "Food")
     rows = tmp_db.execute(
-        "SELECT id FROM expenses WHERE counterparty_normalized='rewe markt'"
+        "SELECT id FROM expenses WHERE counterparty_normalized='markt alpha'"
     ).fetchall()
     for r in rows:
         add_label(tmp_db, int(r["id"]), cid, "user")
@@ -54,7 +54,7 @@ def test_remove_category_cascades_labels(
     ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
     cid = upsert_category(tmp_db, "Food")
     rows = tmp_db.execute(
-        "SELECT id FROM expenses WHERE counterparty_normalized='rewe markt' LIMIT 3"
+        "SELECT id FROM expenses WHERE counterparty_normalized='markt alpha' LIMIT 3"
     ).fetchall()
     for r in rows:
         add_label(tmp_db, int(r["id"]), cid, "user")
@@ -223,18 +223,17 @@ def test_collapse_text_whitespace_is_idempotent(
 def test_collapse_text_whitespace_leaves_none_columns_alone(
     tmp_db: sqlite3.Connection, fixtures_dir: Path
 ) -> None:
-    """``enriched_*`` columns are NULL for un-enriched rows. The
-    backfill must not turn them into empty strings (that would
-    break the COALESCE in the display SQL we just added)."""
+    """enrichment_ref is NULL for un-enriched rows. The backfill must
+    not turn NULL into an empty string."""
     from expense_analyzer.storage.admin import collapse_text_whitespace
 
     ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
     before = tmp_db.execute(
-        "SELECT enriched_counterparty FROM expenses WHERE id = 1"
+        "SELECT enrichment_ref FROM expenses WHERE id = 1"
     ).fetchone()
-    assert before["enriched_counterparty"] is None  # baseline
+    assert before["enrichment_ref"] is None  # baseline
     collapse_text_whitespace(tmp_db)
     after = tmp_db.execute(
-        "SELECT enriched_counterparty FROM expenses WHERE id = 1"
+        "SELECT enrichment_ref FROM expenses WHERE id = 1"
     ).fetchone()
-    assert after["enriched_counterparty"] is None
+    assert after["enrichment_ref"] is None

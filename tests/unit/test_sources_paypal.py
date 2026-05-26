@@ -1,4 +1,4 @@
-"""Tests for the PayPal secondary-source adapter."""
+"""Tests for the simplified PayPal secondary-source adapter."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from expense_analyzer.ingestion.sources import detect_adapter
-from expense_analyzer.ingestion.sources.paypal import PaypalAdapter
+from expense_analyzer.ingestion.sources.paypal import PaypalAdapter, make_paypal_vz
 
 
 def test_sniff_accepts_paypal_rejects_bank(fixtures_dir: Path) -> None:
@@ -21,111 +21,65 @@ def test_detect_adapter_picks_paypal(fixtures_dir: Path) -> None:
 
 
 def test_parse_skips_rows_without_transaktionscode(fixtures_dir: Path) -> None:
-    """Drops: rows without a Transaktionscode (can't be deduped or
-    linked back) and orphan wrapper rows (Bankgutschrift without a
-    linked purchase -- just bank-pull noise with no merchant info).
-
-    Keeps: regular purchases, refunds, AND wrapper rows that DO link
-    to a purchase row in the same file (the wrapper is resolved to
-    carry the linked merchant's name/description)."""
+    """Drops rows with an empty Transaktionscode (can't be deduped or linked)."""
     records = PaypalAdapter().parse(fixtures_dir / "sample_paypal.csv")
-    # 11 data rows in the fixture; one empty-Transaktionscode row and
-    # one orphan-wrapper row are dropped → 9 parsed.
-    assert len(records) == 9
     refs = {r.source_ref for r in records}
     assert "" not in refs
-    assert "TXN-REFUND" in refs
-    # Wrapper rows with a linked purchase survive (resolved to the
-    # merchant); orphan wrappers are dropped because they'd only add
-    # boilerplate to the enrichment.
-    assert "TXN-BETTER-WRAPPER" in refs
-    assert "TXN-ORPHAN-WRAPPER" not in refs
+    # The no-ref row (NoRef Shop) must be dropped.
+    assert all(r.source_ref for r in records)
 
 
-def test_parse_maps_fields_from_real_columns(fixtures_dir: Path) -> None:
-    """Verify the four columns we actually consume map correctly:
-    Datum → date, Brutto → amount, Name → counterparty, Beschreibung
-    → description."""
+def test_parse_skips_rows_without_name(fixtures_dir: Path) -> None:
+    """Rows without a Name have nothing useful to put in the VZ — skip them."""
     records = PaypalAdapter().parse(fixtures_dir / "sample_paypal.csv")
-    etsy = next(r for r in records if r.source_ref == "TXN-ETSY-1")
-    assert etsy.counterparty == "Etsy Inc"
-    # Beschreibung is PayPal's free-text description -- either a
-    # merchant-supplied memo (as here) or, for many txns, the
-    # generic PayPal classification like "Allgemeine Zahlung".
-    assert etsy.description == "Bestellung Handmade Keramik Tasse"
-    assert etsy.txn_date == date(2026, 3, 3)
-    assert etsy.amount == Decimal("-19.80")
-    assert etsy.amount_cents == -1980
+    assert all(r.counterparty for r in records)
 
 
-def test_parse_handles_generic_paypal_txn_type_descriptions(
-    fixtures_dir: Path,
-) -> None:
-    """For txns without a merchant memo PayPal puts its own
-    classification in Beschreibung (e.g. "Express-Zahlung"). That's
-    less informative than a memo but still useful as a tiebreaker
-    for the embedding model."""
+def test_parse_correct_record_count(fixtures_dir: Path) -> None:
+    """6 data rows; 1 has an empty Transaktionscode → 5 parsed."""
     records = PaypalAdapter().parse(fixtures_dir / "sample_paypal.csv")
-    steam = next(r for r in records if r.source_ref == "TXN-STEAM-1")
-    assert steam.description == "Express-Zahlung"
+    assert len(records) == 5
 
 
-def test_parse_uses_brutto_with_netto_as_fallback(fixtures_dir: Path) -> None:
-    """The Steam row has both Brutto and Netto populated; we should
-    prefer Brutto. Verified by the value (-45.00 lives in both
-    columns in this fixture but the contract is "Brutto first")."""
+def test_parse_maps_date_netto_name(fixtures_dir: Path) -> None:
+    """Datum → txn_date, Netto → amount, Name → counterparty."""
     records = PaypalAdapter().parse(fixtures_dir / "sample_paypal.csv")
-    steam = next(r for r in records if r.source_ref == "TXN-STEAM-1")
-    assert steam.amount == Decimal("-45.00")
+    alpha = next(r for r in records if r.source_ref == "TXN-ALPHA-1")
+    assert alpha.counterparty == "Haendler Alpha GmbH"
+    assert alpha.txn_date == date(2026, 3, 3)
+    assert alpha.amount == Decimal("-19.80")
+    assert alpha.amount_cents == -1980
 
 
-def test_parse_handles_positive_refund_amounts(fixtures_dir: Path) -> None:
-    """A Rückzahlung carries a positive Brutto; the adapter must not
-    coerce signs (the matching engine compares absolute cents)."""
+def test_parse_formats_description_without_email(fixtures_dir: Path) -> None:
+    """When Absender E-Mail-Adresse is empty, description is 'PayPal . <name>'."""
     records = PaypalAdapter().parse(fixtures_dir / "sample_paypal.csv")
-    refund = next(r for r in records if r.source_ref == "TXN-REFUND")
-    assert refund.amount == Decimal("15.00")
-    assert refund.description == "Rückzahlung"
+    beta = next(r for r in records if r.source_ref == "TXN-BETA-1")
+    assert beta.description == "PayPal . Haendler Beta GmbH"
 
 
-def test_wrapper_row_resolves_to_linked_purchase_merchant(
-    fixtures_dir: Path,
-) -> None:
-    """The headline fix: a "Bankgutschrift auf PayPal-Konto" row used
-    to enrich every PayPal bank Lastschrift with the boilerplate
-    description, hiding the actual merchant. With the
-    Zugehöriger-Transaktionscode resolution, the wrapper now carries
-    the linked purchase's Name + Beschreibung -- so the enrichment
-    surfaces the real merchant (betterplace.org) instead of
-    "Bankgutschrift auf PayPal-Konto"."""
+def test_parse_formats_description_with_email(fixtures_dir: Path) -> None:
+    """When email is present, description is 'PayPal . <name> (<email>)'."""
     records = PaypalAdapter().parse(fixtures_dir / "sample_paypal.csv")
-    wrapper = next(r for r in records if r.source_ref == "TXN-BETTER-WRAPPER")
-    # source_ref + amount + date are still the wrapper's own (those
-    # are what the bank sees and dedupes against).
-    assert wrapper.amount == Decimal("14.00")
-    assert wrapper.txn_date == date(2026, 4, 4)
-    # name + description come from the linked purchase row.
-    assert wrapper.counterparty == "betterplace.org gGmbH"
-    assert wrapper.description == "Bestellung betterplace Spende"
-    assert "Bankgutschrift" not in wrapper.description
+    gamma = next(r for r in records if r.source_ref == "TXN-GAMMA")
+    assert gamma.description == "PayPal . Haendler Gamma GmbH (vendor-a@example.com)"
 
 
-def test_orphan_wrapper_row_is_dropped(fixtures_dir: Path) -> None:
-    """A "Bankgutschrift" row without a Zugehöriger Transaktionscode
-    has no merchant info we can recover. Better to skip it entirely
-    than to enrich a bank row with boilerplate."""
-    records = PaypalAdapter().parse(fixtures_dir / "sample_paypal.csv")
-    assert all(r.source_ref != "TXN-ORPHAN-WRAPPER" for r in records)
-    # Defensive: no surviving record carries the boilerplate description.
-    assert all("Bankgutschrift" not in r.description for r in records)
+def test_make_paypal_vz_with_email() -> None:
+    assert make_paypal_vz("Haendler Alpha GmbH", "buyer@example.com") == "PayPal . Haendler Alpha GmbH (buyer@example.com)"
+
+
+def test_make_paypal_vz_without_email() -> None:
+    assert make_paypal_vz("Haendler Beta GmbH", "") == "PayPal . Haendler Beta GmbH"
+
+
+def test_make_paypal_vz_strips_whitespace() -> None:
+    assert make_paypal_vz("  Shop  ", "  test@x.com  ") == "PayPal . Shop (test@x.com)"
 
 
 def test_candidate_filter_matches_paypal_bank_rows() -> None:
-    """The bank-side counterparty contains 'PayPal' (raw, before
-    normalisation strips the word). Confirm both column variants."""
     adapter = PaypalAdapter()
     assert adapter.candidate_filter({"zahlungsempfaenger": "PayPal Europe"}) is True
     assert adapter.candidate_filter({"zahlungspflichtiger": "paypal s.a.r.l."}) is True
-    assert adapter.candidate_filter({"zahlungsempfaenger": "REWE Markt GmbH"}) is False
-    # Defensive: missing keys must not raise.
+    assert adapter.candidate_filter({"zahlungsempfaenger": "Markt Alpha GmbH"}) is False
     assert adapter.candidate_filter({}) is False

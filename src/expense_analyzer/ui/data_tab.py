@@ -73,11 +73,6 @@ _DATA_RECORDS_SELECT = """
         e.id, e.buchungsdatum,
         e.counterparty,
         e.zahlungspflichtiger, e.verwendungszweck,
-        -- Pulled so enrichment.display can rewrite counterparty +
-        -- verwendungszweck for PayPal-enriched rows. Dropped from
-        -- the dataframe after the rewrite so they don't surface as
-        -- extra grid columns.
-        e.enrichment_source, e.enriched_counterparty,
         e.betrag_cents / 100.0 AS "betrag_€",
         c.name AS category, ll.category_id AS category_id,
         ll.label_source AS label_source, ll.confidence,
@@ -134,16 +129,11 @@ def _build_data_query(
         params.append(int(amount_max * 100))
     if search:
         like = f"%{search.lower()}%"
-        # Search across both the bank counterparty AND the enriched
-        # merchant name so "rewe" matches rows where the bank string
-        # says "PayPal Europe" but enrichment surfaced REWE.
         parts.append(
             "(LOWER(e.counterparty) LIKE ? "
-            "OR LOWER(e.enriched_counterparty) LIKE ? "
-            "OR LOWER(e.verwendungszweck) LIKE ? "
-            "OR LOWER(e.enriched_description) LIKE ?)"
+            "OR LOWER(e.verwendungszweck) LIKE ?)"
         )
-        params.extend([like, like, like, like])
+        params.extend([like, like])
     if cats:
         unlabeled_picked = "(unkategorisiert)" in cats
         named = [c for c in cats if c != "(unkategorisiert)"]
@@ -203,15 +193,6 @@ def _show_inspect_dialog(eid: int) -> None:
     meta_cols[0].write(f"**Source file:** {full_dict.get('source_file') or '—'}")
     meta_cols[1].write(f"**IBAN:** {full_dict.get('iban') or '—'}")
     meta_cols[2].write(f"**Umsatztyp:** {full_dict.get('umsatztyp') or '—'}")
-
-    if full_dict.get("enriched_counterparty"):
-        src = full_dict.get("enrichment_source") or "secondary source"
-        st.markdown(f"**Enriched from `{src}`**")
-        enr_cols = st.columns(2)
-        enr_cols[0].write(f"**Merchant:** {full_dict.get('enriched_counterparty')}")
-        enr_cols[1].write(f"**Reference:** {full_dict.get('enrichment_ref') or '—'}")
-        if full_dict.get("enriched_description"):
-            st.caption(f"Detail: {full_dict['enriched_description']}")
 
     note = get_note(conn, eid) or ""
     new_note = st.text_area("Note", value=note, key=f"inspect_note_{eid}")
@@ -456,17 +437,6 @@ def _fetch_and_overlay(
         pinned_ids=pinned_ids if pinned_ids else None,
     )
     df = pd.read_sql_query(sql, conn, params=params)
-    # Rewrite counterparty + verwendungszweck for PayPal-enriched rows
-    # ("PayPal {merchant}" + reconstructed Verwendungszweck). The helper
-    # is a no-op for other sources; the helper columns get dropped
-    # afterwards so they don't show up as extra grid columns.
-    from expense_analyzer.enrichment.display import apply_to_dataframe
-
-    apply_to_dataframe(df)
-    df = df.drop(
-        columns=[c for c in ("enrichment_source", "enriched_counterparty") if c in df.columns],
-        errors="ignore",
-    )
     if not df.empty:
         df["buchungsdatum"] = pd.to_datetime(df["buchungsdatum"]).dt.strftime("%Y-%m-%d")
         df["category"] = df["category"].fillna("(unkategorisiert)")

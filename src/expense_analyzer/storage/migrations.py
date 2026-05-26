@@ -44,7 +44,7 @@ def _migrate_v3(conn: sqlite3.Connection) -> None:
 
 
 def _migrate_v4(conn: sqlite3.Connection) -> None:
-    # v3 -> v4: add source-agnostic secondary-source enrichment columns.
+    # v3 -> v4: add enrichment tracking + the now-removed enriched_* columns.
     for column, decl in (
         ("enrichment_source", "TEXT"),
         ("enrichment_ref", "TEXT"),
@@ -53,6 +53,79 @@ def _migrate_v4(conn: sqlite3.Connection) -> None:
         ("enriched_at", "TIMESTAMP"),
     ):
         _add_column_if_missing(conn, "expenses", column, decl)
+
+
+def _migrate_v5(conn: sqlite3.Connection) -> None:
+    # v4 -> v5: direct VZ rewriting replaces display-time enrichment.
+    #
+    # 1. For rows previously enriched via the old approach (enriched_counterparty
+    #    is set), write "PayPal . {merchant}" directly into verwendungszweck and
+    #    re-derive the normalised columns.
+    # 2. For existing PayPal bank rows where the merchant is already in the
+    #    VZ ("Ihr Einkauf bei <merchant>"), apply the same ingest-time
+    #    simplification retroactively.
+    # 3. Drop the three columns that are no longer needed.
+    import re as _re
+
+    from expense_analyzer.ingestion.normalizer import (
+        combined_text as _ct,
+        normalize_counterparty as _ncp,
+        normalize_verwendungszweck as _nvz,
+    )
+
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(expenses)").fetchall()}
+    if not cols:
+        return
+
+    # Step 1: migrate previously-enriched rows.
+    if "enriched_counterparty" in cols:
+        for row in conn.execute(
+            "SELECT id, enriched_counterparty FROM expenses "
+            "WHERE enrichment_source = 'paypal' "
+            "AND enriched_counterparty IS NOT NULL AND enriched_counterparty != ''"
+        ).fetchall():
+            name = row["enriched_counterparty"]
+            new_vz = f"PayPal . {name}"
+            cp_norm = _ncp(name)
+            conn.execute(
+                "UPDATE expenses SET verwendungszweck = ?, "
+                "verwendungszweck_normalized = ?, counterparty_normalized = ?, "
+                "combined_text = ? WHERE id = ?",
+                (new_vz, _nvz(new_vz), cp_norm, _ct(cp_norm, _nvz(new_vz)), row["id"]),
+            )
+
+    # Step 2: simplify existing PayPal rows with "Ihr Einkauf bei <merchant>" in VZ.
+    _step2_cols = {"verwendungszweck", "zahlungsempfaenger", "zahlungspflichtiger"}
+    if _step2_cols.issubset(cols):
+        _IEB = _re.compile(r"Ihr\s+Einkauf\s+bei\s+(.+)$", _re.IGNORECASE | _re.DOTALL)
+        for row in conn.execute(
+            "SELECT id, verwendungszweck, zahlungsempfaenger, zahlungspflichtiger "
+            "FROM expenses WHERE enrichment_ref IS NULL"
+        ).fetchall():
+            zep = (row["zahlungsempfaenger"] or "").lower()
+            zpf = (row["zahlungspflichtiger"] or "").lower()
+            if "paypal" not in zep and "paypal" not in zpf:
+                continue
+            vz = row["verwendungszweck"] or ""
+            m = _IEB.search(vz)
+            if not m:
+                continue
+            merchant = m.group(1).strip()
+            if not merchant:
+                continue
+            new_vz = f"PayPal . {merchant}"
+            cp_norm = _ncp(merchant)
+            conn.execute(
+                "UPDATE expenses SET verwendungszweck = ?, "
+                "verwendungszweck_normalized = ?, counterparty_normalized = ?, "
+                "combined_text = ? WHERE id = ?",
+                (new_vz, _nvz(new_vz), cp_norm, _ct(cp_norm, _nvz(new_vz)), row["id"]),
+            )
+
+    # Step 3: drop columns superseded by direct VZ rewriting.
+    for col in ("enriched_counterparty", "enriched_description", "enriched_at"):
+        if col in cols:
+            conn.execute(f"ALTER TABLE expenses DROP COLUMN {col}")
 
 
 # (target_version, migration) — applied in order to any DB whose current
@@ -73,6 +146,7 @@ _MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     ),
     (3, _migrate_v3),
     (4, _migrate_v4),
+    (5, _migrate_v5),
 ]
 
 

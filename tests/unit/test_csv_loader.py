@@ -26,7 +26,7 @@ def test_first_row_typed_correctly(fixtures_dir: Path) -> None:
     rows = parse_csv(fixtures_dir / "sample_de.csv")
     r0 = rows[0]
     assert r0.buchungsdatum == date(2026, 1, 1)
-    assert r0.zahlungsempfaenger == "Vermieter Schmidt"
+    assert r0.zahlungsempfaenger == "Vermieter GmbH"
     assert r0.betrag == Decimal("-950.00")
     assert r0.iban == "DE89370400440532013000"
     assert r0.umsatztyp == "Dauerauftrag"
@@ -34,7 +34,7 @@ def test_first_row_typed_correctly(fixtures_dir: Path) -> None:
 
 def test_betrag_cents_int(fixtures_dir: Path) -> None:
     rows = parse_csv(fixtures_dir / "sample_de.csv")
-    salary = next(r for r in rows if r.zahlungspflichtiger == "Arbeitgeber AG")
+    salary = next(r for r in rows if r.zahlungspflichtiger == "Arbeitgeber GmbH")
     assert salary.betrag_cents == 320050
 
 
@@ -102,7 +102,7 @@ def test_parse_csv_with_two_digit_year_dates(fixtures_dir: Path) -> None:
     rows = parse_csv(fixtures_dir / "sample_de_short_dates.csv")
     assert len(rows) == 3
     assert rows[0].buchungsdatum == date(2026, 5, 8)
-    assert rows[0].zahlungsempfaenger == "REWE Markt GmbH"
+    assert rows[0].zahlungsempfaenger == "Markt Alpha GmbH"
     assert rows[2].buchungsdatum == date(2026, 6, 1)
 
 

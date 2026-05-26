@@ -16,7 +16,7 @@ def test_fresh_db_is_at_current_schema_version(tmp_path: Path) -> None:
             "SELECT value FROM schema_meta WHERE key='schema_version'"
         ).fetchone()["value"]
         # Bump expected version when adding migrations.
-        assert int(v) == 4
+        assert int(v) == 5
     finally:
         conn.close()
 
@@ -81,7 +81,7 @@ def test_v1_to_latest_drops_cluster_id_and_adds_is_savings(tmp_path: Path) -> No
 
     applied = apply_migrations(conn)
     # A v1 DB now chains all the way through the latest migration.
-    assert applied == [2, 3, 4]
+    assert applied == [2, 3, 4, 5]
 
     cols = [r["name"] for r in conn.execute("PRAGMA table_info(expenses)").fetchall()]
     assert "cluster_id" not in cols
@@ -92,7 +92,7 @@ def test_v1_to_latest_drops_cluster_id_and_adds_is_savings(tmp_path: Path) -> No
     v = conn.execute(
         "SELECT value FROM schema_meta WHERE key='schema_version'"
     ).fetchone()["value"]
-    assert int(v) == 4
+    assert int(v) == 5
 
     # Re-running is a no-op.
     assert apply_migrations(conn) == []
@@ -120,7 +120,7 @@ def test_v2_to_v3_adds_is_savings_and_backfills_sparen(tmp_path: Path) -> None:
     )
     conn.commit()
 
-    assert apply_migrations(conn) == [3, 4]
+    assert apply_migrations(conn) == [3, 4, 5]
 
     cols = [r["name"] for r in conn.execute("PRAGMA table_info(categories)").fetchall()]
     assert "is_savings" in cols
@@ -136,23 +136,23 @@ def test_v2_to_v3_adds_is_savings_and_backfills_sparen(tmp_path: Path) -> None:
 
 
 def test_fresh_db_has_enrichment_columns(tmp_path: Path) -> None:
-    """v3 enrichment columns must be present on a fresh DB (landed directly
-    from schema.sql, migrations a no-op)."""
+    """Enrichment tracking columns must be present on a fresh DB.
+    The three v4 columns dropped in v5 must NOT be present."""
     conn = get_or_create_database(tmp_path / "fresh.sqlite")
     try:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(expenses)")}
-        for c in (
-            "enrichment_source", "enrichment_ref", "enriched_counterparty",
-            "enriched_description", "enriched_at",
-        ):
-            assert c in cols
+        assert "enrichment_source" in cols
+        assert "enrichment_ref" in cols
+        # Dropped in v5 — must not appear on a fresh schema.
+        for dropped in ("enriched_counterparty", "enriched_description", "enriched_at"):
+            assert dropped not in cols
     finally:
         conn.close()
 
 
-def test_v2_to_v3_adds_enrichment_columns_idempotently(tmp_path: Path) -> None:
-    """A v2 DB (no enrichment columns) gains them on migrate, and the
-    migration is safe to re-run."""
+def test_v2_to_v5_adds_enrichment_columns_and_drops_old_ones(tmp_path: Path) -> None:
+    """A v2 DB gains enrichment_source/ref via v4, then loses the three
+    stale columns via v5. Migration chain is idempotent on re-run."""
     db_path = tmp_path / "v2.sqlite"
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
@@ -170,11 +170,49 @@ def test_v2_to_v3_adds_enrichment_columns_idempotently(tmp_path: Path) -> None:
     )
     conn.commit()
 
-    assert apply_migrations(conn) == [3, 4]
+    assert apply_migrations(conn) == [3, 4, 5]
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(expenses)")}
-    assert "enriched_counterparty" in cols
     assert "enrichment_ref" in cols
+    assert "enrichment_source" in cols
+    # enriched_* were added by v4 and removed by v5.
+    for dropped in ("enriched_counterparty", "enriched_description", "enriched_at"):
+        assert dropped not in cols
 
     # Idempotent re-run.
+    assert apply_migrations(conn) == []
+    conn.close()
+
+
+def test_v4_to_v5_drops_enriched_columns(tmp_path: Path) -> None:
+    """A v4 DB (with the three stale enriched_* columns) loses them on v5."""
+    db_path = tmp_path / "v4.sqlite"
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE expenses (
+            id INTEGER PRIMARY KEY,
+            buchungsdatum DATE NOT NULL,
+            betrag_cents INTEGER NOT NULL,
+            dedup_hash TEXT NOT NULL UNIQUE,
+            enrichment_source TEXT,
+            enrichment_ref TEXT,
+            enriched_counterparty TEXT,
+            enriched_description TEXT,
+            enriched_at TIMESTAMP
+        );
+        CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT);
+        INSERT INTO schema_meta(key, value) VALUES ('schema_version', '4');
+        """
+    )
+    conn.commit()
+
+    assert apply_migrations(conn) == [5]
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(expenses)")}
+    assert "enrichment_source" in cols
+    assert "enrichment_ref" in cols
+    for dropped in ("enriched_counterparty", "enriched_description", "enriched_at"):
+        assert dropped not in cols
+
     assert apply_migrations(conn) == []
     conn.close()

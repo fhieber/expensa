@@ -183,9 +183,6 @@ def _load_expense_rows(conn: sqlite3.Connection, ids: list[int]) -> dict[int, di
         SELECT e.id, e.buchungsdatum,
                e.counterparty,
                e.zahlungspflichtiger, e.verwendungszweck,
-               -- For enrichment.display to rewrite the two fields above
-               -- ("PayPal {{merchant}}" + reconstructed Verwendungszweck).
-               e.enrichment_source, e.enriched_counterparty,
                e.betrag_cents,
                c.name  AS model_cat_name,
                ll.category_id AS model_cat_id,
@@ -198,23 +195,9 @@ def _load_expense_rows(conn: sqlite3.Connection, ids: list[int]) -> dict[int, di
         """,
         ids,
     ).fetchall()
-    # Rewrite counterparty + verwendungszweck for PayPal-enriched rows
-    # via the shared helper. Operates on plain dicts here (no pandas)
-    # so we apply per-row rather than using apply_to_dataframe.
-    from expense_analyzer.enrichment.display import (
-        display_counterparty,
-        display_verwendungszweck,
-    )
-
     out: dict[int, dict] = {}
     for r in rows:
         d = dict(r)
-        src = d.get("enrichment_source")
-        ecp = d.get("enriched_counterparty")
-        d["counterparty"] = display_counterparty(d.get("counterparty"), src, ecp)
-        d["verwendungszweck"] = display_verwendungszweck(
-            d.get("verwendungszweck"), src, ecp,
-        )
         out[int(d["id"])] = d
     return out
 

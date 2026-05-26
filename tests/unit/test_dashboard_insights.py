@@ -41,7 +41,7 @@ def test_recurring_subscriptions_detects_recurring_vendors(
     tmp_db: sqlite3.Connection, fixtures_dir: Path
 ) -> None:
     """sample_de.csv has multiple vendors with >=3 transactions
-    (REWE / Edeka / etc.). The cadence detector should surface them."""
+    (Markt Alpha / Beta / etc.). The cadence detector should surface them."""
     ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
     df = recurring_subscriptions(tmp_db, min_charges=3)
     assert not df.empty
@@ -180,8 +180,8 @@ def test_anomalies_returns_only_above_threshold(
     charges, then one giant REWE charge. The big one should surface."""
     ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
     # Drop everything we don't care about to make the assertion tight.
-    tmp_db.execute("DELETE FROM expenses WHERE counterparty_normalized != 'rewe markt'")
-    # Now add an outlier row -- 5x the typical REWE bill.
+    tmp_db.execute("DELETE FROM expenses WHERE counterparty_normalized != 'markt alpha'")
+    # Now add an outlier row -- 5x the typical bill.
     typical = tmp_db.execute(
         "SELECT AVG(ABS(betrag_cents)) FROM expenses"
     ).fetchone()[0]
@@ -192,7 +192,7 @@ def test_anomalies_returns_only_above_threshold(
             buchungsdatum, betrag_cents, counterparty,
             counterparty_normalized, is_income, dedup_hash
         )
-        VALUES (?, ?, 'REWE Markt', 'rewe markt', 0, ?)
+        VALUES (?, ?, 'Markt Alpha', 'markt alpha', 0, ?)
         """,
         (date.today().isoformat(), -outlier_cents, "synthetic_outlier_hash"),
     )
@@ -223,15 +223,15 @@ def test_anomalies_columns_include_category_when_labeled(
 ) -> None:
     ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
     cid = upsert_category(tmp_db, "Lebensmittel")
-    # Label every REWE row to ensure the JOIN finds something.
+    # Label every Markt Alpha row to ensure the JOIN finds something.
     for r in tmp_db.execute(
-        "SELECT id FROM expenses WHERE counterparty_normalized = 'rewe markt'"
+        "SELECT id FROM expenses WHERE counterparty_normalized = 'markt alpha'"
     ):
         add_label(tmp_db, int(r["id"]), cid, "user")
     # Synthesize an outlier so the table isn't empty.
     typical = tmp_db.execute(
         "SELECT AVG(ABS(betrag_cents)) FROM expenses "
-        "WHERE counterparty_normalized = 'rewe markt'"
+        "WHERE counterparty_normalized = 'markt alpha'"
     ).fetchone()[0]
     cur = tmp_db.execute(
         """
@@ -239,7 +239,7 @@ def test_anomalies_columns_include_category_when_labeled(
             buchungsdatum, betrag_cents, counterparty,
             counterparty_normalized, is_income, dedup_hash
         )
-        VALUES (?, ?, 'REWE Markt', 'rewe markt', 0, ?)
+        VALUES (?, ?, 'Markt Alpha', 'markt alpha', 0, ?)
         """,
         (date.today().isoformat(), -int(typical * 5), "synthetic_outlier_2"),
     )

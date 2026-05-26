@@ -134,27 +134,27 @@ def test_clear_removes_cache(tmp_path: Path) -> None:
 
 def test_build_premise_text_only() -> None:
     """No vendor data -> the premise is the expense text, period-suffixed."""
-    p = _build_zeroshot_premise("rewe markt einkauf", "", "", 240)
-    assert p == "rewe markt einkauf."
+    p = _build_zeroshot_premise("markt alpha einkauf", "", "", 240)
+    assert p == "markt alpha einkauf."
 
 
 def test_build_premise_preserves_existing_period() -> None:
     """If the text already ends with '.', don't double it up."""
-    p = _build_zeroshot_premise("rewe markt.", "", "", 240)
-    assert p == "rewe markt."
+    p = _build_zeroshot_premise("markt alpha.", "", "", 240)
+    assert p == "markt alpha."
 
 
 def test_build_premise_adds_industry_and_summary() -> None:
     p = _build_zeroshot_premise(
-        "edeka filiale",
+        "markt beta filiale",
         "supermarket",
-        "Edeka ist eine deutsche Supermarktkette mit Sitz in Hamburg.",
+        "Markt Beta ist ein Haendler mit Sitz in Musterstadt.",
         240,
     )
     # Order: text → industry → summary, separated by single spaces.
-    assert p.startswith("edeka filiale.")
+    assert p.startswith("markt beta filiale.")
     assert "Branche: supermarket." in p
-    assert "Hamburg" in p
+    assert "Musterstadt" in p
     # No double spaces, no stray separators.
     assert "  " not in p
 

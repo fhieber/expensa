@@ -17,7 +17,7 @@ from expense_analyzer.storage.own_ibans import (
 )
 
 # Valid German IBAN with correct check digits. Shows up in sample_de.csv
-# as Arbeitgeber AG's "from" IBAN -- so ingesting + adding it as an own
+# as Arbeitgeber GmbH's "from" IBAN -- so ingesting + adding it as an own
 # IBAN should retroactively flag the salary row.
 _SALARY_IBAN = "DE12500105170648489890"
 
