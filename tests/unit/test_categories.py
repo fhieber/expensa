@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from expense_analyzer.storage.categories import (
+from expensa.storage.categories import (
     add_label,
     get_category_by_name,
     import_categories_from_yaml,

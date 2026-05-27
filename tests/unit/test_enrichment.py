@@ -7,9 +7,9 @@ from unittest.mock import patch
 
 import pytest
 
-from expense_analyzer.config import VendorLookupConfig
-from expense_analyzer.enrichment.notes import delete_note, get_note, set_note
-from expense_analyzer.enrichment.vendor_web import (
+from expensa.config import VendorLookupConfig
+from expensa.enrichment.notes import delete_note, get_note, set_note
+from expensa.enrichment.vendor_web import (
     VendorLookupDisabled,
     _heuristic_industry,
     lookup_vendor,
@@ -69,7 +69,7 @@ def test_vendor_lookup_only_sends_counterparty(tmp_db: sqlite3.Connection) -> No
         captured.append(query)
         return "Markt Alpha ist ein Supermarkt"
 
-    with patch("expense_analyzer.enrichment.vendor_web._ddg_search", side_effect=fake_ddg):
+    with patch("expensa.enrichment.vendor_web._ddg_search", side_effect=fake_ddg):
         info = lookup_vendor(tmp_db, "markt alpha", cfg)
 
     # The single outbound call must equal the counterparty - nothing else.
@@ -86,7 +86,7 @@ def test_vendor_lookup_uses_cache_on_second_call(tmp_db: sqlite3.Connection) -> 
         calls.append(query)
         return "Markt Beta Supermarkt"
 
-    with patch("expense_analyzer.enrichment.vendor_web._ddg_search", side_effect=fake):
+    with patch("expensa.enrichment.vendor_web._ddg_search", side_effect=fake):
         lookup_vendor(tmp_db, "markt beta", cfg)
         lookup_vendor(tmp_db, "markt beta", cfg)
 
@@ -115,7 +115,7 @@ def test_normalize_industry_translates_legacy_english() -> None:
     """Legacy cached "supermarket"/"telco"/etc. rows from before the
     German-label switch must surface as German on read so the UI and
     cascade never see two dialects."""
-    from expense_analyzer.enrichment.vendor_web import normalize_industry
+    from expensa.enrichment.vendor_web import normalize_industry
 
     assert normalize_industry("supermarket") == "Supermarkt"
     assert normalize_industry("telco") == "Telekommunikation"
@@ -133,7 +133,7 @@ def test_normalize_industry_translates_legacy_english() -> None:
 def test_is_meaningful_industry_filters_no_signal_values() -> None:
     """Cascade stages call this to skip enrichment that would only
     add a dead token like "Sonstige" to the premise / lexical overlap."""
-    from expense_analyzer.enrichment.vendor_web import is_meaningful_industry
+    from expensa.enrichment.vendor_web import is_meaningful_industry
 
     assert is_meaningful_industry("Supermarkt") is True
     assert is_meaningful_industry("Miete") is True

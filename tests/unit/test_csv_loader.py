@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from expense_analyzer.ingestion.csv_loader import (
+from expensa.ingestion.csv_loader import (
     CsvParseError,
     _normalize_header,
     _parse_amount,

@@ -7,11 +7,11 @@ from pathlib import Path
 
 import numpy as np
 
-from expense_analyzer.config import Config
-from expense_analyzer.features.embeddings import HashEmbedder
-from expense_analyzer.ingestion import ingest_csv
-from expense_analyzer.ml.classifier import CategorizationCascade, _knn_vote, _vendor_exact_match
-from expense_analyzer.storage.categories import (
+from expensa.config import Config
+from expensa.features.embeddings import HashEmbedder
+from expensa.ingestion import ingest_csv
+from expensa.ml.classifier import CategorizationCascade, _knn_vote, _vendor_exact_match
+from expensa.storage.categories import (
     add_label,
     upsert_category,
 )
@@ -159,7 +159,7 @@ def test_vendor_industry_boosts_category_similarity(
     counterparty's industry as "supermarket". With the boost the
     targeted category must win even though the embedding signal alone
     can be too noisy."""
-    from expense_analyzer.storage.categories import upsert_category as _upsert
+    from expensa.storage.categories import upsert_category as _upsert
 
     ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
 
@@ -277,7 +277,7 @@ def test_knn_vote_from_sims_equivalent_to_knn_vote() -> None:
     historical per-vector _knn_vote. Pin the contract because
     predict_batch's kNN stage now exclusively uses the precomputed
     sim matrix."""
-    from expense_analyzer.ml.classifier import _knn_vote_from_sims
+    from expensa.ml.classifier import _knn_vote_from_sims
 
     rng = np.random.default_rng(0)
     train_vecs = rng.standard_normal((20, 16)).astype(np.float32)

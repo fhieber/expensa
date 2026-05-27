@@ -30,7 +30,7 @@ This file is read by Claude Code at the start of each session. Keep it concise a
 - **Zero-shot fallback:** `MoritzLaurer/mDeBERTa-v3-base-mnli-xnli`.
 - **UI:** Both `click` CLI and a local-only Streamlit app (binds to `127.0.0.1`).
 - **Vendor web lookup:** Off by default. When enabled, **only the normalized counterparty name** is sent — never amount, IBAN, or Verwendungszweck.
-- **Storage:** SQLite single-file under `~/.expense-analyzer/db.sqlite`.
+- **Storage:** SQLite single-file under `~/.expensa/db.sqlite`.
 - **Min Python:** 3.10.
 
 ## Privacy invariants (must not break)
@@ -67,7 +67,7 @@ See the "Proposed feature set per expense" section of `../../.claude/plans/build
 
 Accounts can be encrypted at rest with AES-256 via SQLCipher.
 Encryption is **opt-in per account** and the driver is an **optional
-extra** (`pip install expense-analyzer-de[encryption]`, package
+extra** (`pip install expensa[encryption]`, package
 `sqlcipher3-wheels` — ships Linux/macOS/**Windows** wheels, imports as
 `sqlcipher3`). Plaintext accounts keep using stdlib `sqlite3`, so the
 dependency stays optional.
@@ -77,7 +77,7 @@ dependency stays optional.
   No flag in `accounts.yaml` to drift.
 - **Passwords are never persisted.** In the UI they live only in
   `st.session_state["_account_passwords"]` (per slug). The CLI reads
-  `EXPENSE_ANALYZER_DB_PASSWORD` or prompts interactively.
+  `EXPENSA_DB_PASSWORD` or prompts interactively.
 - **UI flow:** switching to an encrypted account hits the unlock gate in
   `streamlit_app.py` (`_render_unlock_gate`), which `st.stop()`s the page
   until the right password is entered. Set / change / remove the password
@@ -86,7 +86,7 @@ dependency stays optional.
   (defaults to the active account). encrypt prompts for a new password,
   then asks whether to delete the plaintext safety copy
   (`--delete-plaintext/--keep-plaintext` to skip the prompt; non-TTY
-  keeps it). decrypt/passwd read `EXPENSE_ANALYZER_DB_PASSWORD` or
+  keeps it). decrypt/passwd read `EXPENSA_DB_PASSWORD` or
   prompt. Read-only commands open encrypted DBs via the same env var /
   interactive prompt.
 - **Set-password migration:** `crypto.encrypt_file` exports the plain DB
@@ -121,8 +121,8 @@ cache), `ui/streamlit_app.py` (unlock gate), `ui/settings.py`,
 ### 2026-05-22 — Multi-account support
 
 The package now supports multiple accounts (e.g. Personal vs Business)
-each backed by its own SQLite DB. Layout under `$EXPENSE_ANALYZER_HOME`
-(default `~/.expense-analyzer/`):
+each backed by its own SQLite DB. Layout under `$EXPENSA_HOME`
+(default `~/.expensa/`):
 
     config.yaml              # global: ML models, vendor_lookup, streamlit
     accounts.yaml            # registry: [{id, name, data_dir}]
@@ -155,12 +155,12 @@ new DB. Settings sections that affect global config are flagged
 `<global_home>/config.yaml`.
 
 Key files:
-- `src/expense_analyzer/accounts.py` — registry + slugify + migration.
-- `src/expense_analyzer/config.py` — `GlobalConfig` / `Config` /
+- `src/expensa/accounts.py` — registry + slugify + migration.
+- `src/expensa/config.py` — `GlobalConfig` / `Config` /
   `load_config_for_account()`.
-- `src/expense_analyzer/cli.py` — `expense account ...` subgroup.
-- `src/expense_analyzer/ui/_shared.py` — cached per-session state.
-- `src/expense_analyzer/ui/streamlit_app.py` — `_render_account_picker()`
+- `src/expensa/cli.py` — `expense account ...` subgroup.
+- `src/expensa/ui/_shared.py` — cached per-session state.
+- `src/expensa/ui/streamlit_app.py` — `_render_account_picker()`
   + Add/Rename/Remove dialogs.
 
 ### 2026-05-21 — Clustering removed; deps trimmed
@@ -201,4 +201,4 @@ GPU:
 - **Add a new computed feature:** add column to `storage/schema.sql`, populate in `features/pipeline.py`, expose in `viz/` if useful for charts.
 - **Swap the embedding model:** edit `embedding_model` in `config/default_config.yaml`. Re-run `expense train` afterward — embeddings of existing records are recomputed lazily.
 - **Add a new visualization:** create a function in `viz/` returning a Plotly Figure, register it in `cli.py viz` and in the Streamlit dashboard.
-- **Add a new CLI command:** add a `@cli.command` in `src/expense_analyzer/cli.py` and a corresponding test in `tests/unit/test_cli.py`.
+- **Add a new CLI command:** add a `@cli.command` in `src/expensa/cli.py` and a corresponding test in `tests/unit/test_cli.py`.

@@ -5,9 +5,9 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from expense_analyzer.ingestion import ingest_csv
-from expense_analyzer.ingestion.csv_loader import parse_csv
-from expense_analyzer.ingestion.dedup import compute_dedup_hash
+from expensa.ingestion import ingest_csv
+from expensa.ingestion.csv_loader import parse_csv
+from expensa.ingestion.dedup import compute_dedup_hash
 
 
 def test_dedup_hash_stable_across_calls(fixtures_dir: Path) -> None:
@@ -37,7 +37,7 @@ def test_ingest_inserts_all_new(tmp_db: sqlite3.Connection, fixtures_dir: Path) 
 def test_ingest_with_embedder_computes_embeddings(
     tmp_db: sqlite3.Connection, fixtures_dir: Path
 ) -> None:
-    from expense_analyzer.features.embeddings import HashEmbedder
+    from expensa.features.embeddings import HashEmbedder
 
     emb = HashEmbedder(dim=64)
     report = ingest_csv(tmp_db, fixtures_dir / "sample_de.csv", embedder=emb)

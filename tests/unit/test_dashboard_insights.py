@@ -8,9 +8,9 @@ from pathlib import Path
 
 import pandas as pd
 
-from expense_analyzer.ingestion import ingest_csv
-from expense_analyzer.storage.categories import add_label, upsert_category
-from expense_analyzer.viz import (
+from expensa.ingestion import ingest_csv
+from expensa.storage.categories import add_label, upsert_category
+from expensa.viz import (
     anomalies,
     monthly_flow_by_category,
     monthly_income_vs_expense,
@@ -88,7 +88,7 @@ def test_weekly_by_category_groups_by_iso_week(
 
 
 def test_classify_cadence_snaps_to_buckets() -> None:
-    from expense_analyzer.viz.data import _classify_cadence
+    from expensa.viz.data import _classify_cadence
 
     # Each of the canonical buckets should map back to itself.
     label, cpy = _classify_cadence(7)

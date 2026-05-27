@@ -12,14 +12,14 @@ from pathlib import Path
 
 import pytest
 
-from expense_analyzer.features.temporal import (
+from expensa.features.temporal import (
     amount_zscore_within_counterparty,
     compute_temporal_features_bulk,
     count_to_same_counterparty,
     days_since_prev_to_same_counterparty,
     is_likely_recurring,
 )
-from expense_analyzer.ingestion import ingest_csv
+from expensa.ingestion import ingest_csv
 
 
 @pytest.fixture

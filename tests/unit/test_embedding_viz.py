@@ -8,14 +8,14 @@ from pathlib import Path
 
 import numpy as np
 
-from expense_analyzer.features.embeddings import HashEmbedder, store_embeddings
-from expense_analyzer.ingestion import ingest_csv
-from expense_analyzer.ml import embedding_viz_cache
-from expense_analyzer.ml.embedding_viz import (
+from expensa.features.embeddings import HashEmbedder, store_embeddings
+from expensa.ingestion import ingest_csv
+from expensa.ml import embedding_viz_cache
+from expensa.ml.embedding_viz import (
     ProjectionResult,
     project_labeled_embeddings,
 )
-from expense_analyzer.storage.categories import add_label, upsert_category
+from expensa.storage.categories import add_label, upsert_category
 
 
 def _seed_labels_and_embeddings(

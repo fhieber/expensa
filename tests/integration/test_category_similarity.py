@@ -10,15 +10,15 @@ from pathlib import Path
 
 import pytest
 
-from expense_analyzer.config import Config, packaged_default_categories
-from expense_analyzer.features.embeddings import SentenceTransformerEmbedder
-from expense_analyzer.ingestion import ingest_csv
-from expense_analyzer.ml.classifier import CategorizationCascade
-from expense_analyzer.storage.categories import (
+from expensa.config import Config, packaged_default_categories
+from expensa.features.embeddings import SentenceTransformerEmbedder
+from expensa.ingestion import ingest_csv
+from expensa.ml.classifier import CategorizationCascade
+from expensa.storage.categories import (
     import_categories_from_yaml,
     list_categories,
 )
-from expense_analyzer.storage.database import get_or_create_database
+from expensa.storage.database import get_or_create_database
 
 
 @pytest.mark.slow

@@ -3,7 +3,7 @@
 ## Context
 
 The expense analyzer is currently single-account: one SQLite DB, one set of categories, one
-set of own IBANs, all stored under `~/.expense-analyzer/`. Users want to track multiple
+set of own IBANs, all stored under `~/.expensa/`. Users want to track multiple
 separate accounts (e.g. personal, business, spouse), each with their own expense history,
 categories, and IBAN allowlists. ML model settings and vendor lookup are shared concerns that
 need no per-account configuration.
@@ -21,7 +21,7 @@ need no per-account configuration.
 ## New Data Directory Layout
 
 ```
-~/.expense-analyzer/
+~/.expensa/
   config.yaml              # Global config: ML models, vendor_lookup, streamlit
   accounts.yaml            # Account registry: list of {id, name, data_dir}
   active_account           # Plain-text file: slug of the currently active account
@@ -36,7 +36,7 @@ need no per-account configuration.
 
 **Migration (zero-data-movement):** On first run with new code, if `db.sqlite` exists at the
 root but `accounts.yaml` does not, auto-create a `"Default"` account whose `data_dir` points at
-`~/.expense-analyzer/` itself. No files are moved. The old `config.yaml` becomes the global
+`~/.expensa/` itself. No files are moved. The old `config.yaml` becomes the global
 config automatically (its ML keys are already there). New accounts created afterwards go under
 `accounts/<slug>/`.
 
@@ -67,7 +67,7 @@ db_filename → "db.sqlite" (not user-facing)
 
 ```
 load_global_config(config_path?) → GlobalConfig
-  merges: packaged defaults ← ~/.expense-analyzer/config.yaml ← env vars
+  merges: packaged defaults ← ~/.expensa/config.yaml ← env vars
 
 load_config_for_account(account_info, global_cfg?) → Config
   GlobalConfig + data_dir=account.data_dir → full Config
@@ -78,7 +78,7 @@ internally. Zero impact on callers.
 
 ---
 
-## New Module: `src/expense_analyzer/accounts.py`
+## New Module: `src/expensa/accounts.py`
 
 Dependency-free (stdlib + PyYAML only).
 
@@ -90,7 +90,7 @@ class AccountInfo:
     data_dir: Path
 
 class AccountRegistry:
-    """Loaded from ~/.expense-analyzer/accounts.yaml."""
+    """Loaded from ~/.expensa/accounts.yaml."""
     def load(global_home: Path) -> AccountRegistry
     def save() -> None                              # atomic write (tmp + rename)
     def add(name: str, data_dir: Path | None) -> AccountInfo
@@ -210,7 +210,7 @@ All existing commands (`ingest`, `categories`, `own-iban`, `predict`, `train`, `
 ### `expense ui` / `ui-stop` / `ui-status` / `ui-restart`
 
 - PID file moves from `cfg.data_dir` to `global_home` (one server, many accounts).
-- `expense ui` passes `EXPENSE_ANALYZER_HOME=global_home` env var (already done); account
+- `expense ui` passes `EXPENSA_HOME=global_home` env var (already done); account
   switching now happens in-UI via the account picker.
 
 ### `expense init`
@@ -224,10 +224,10 @@ preferred path for adding a second account. No deprecation warning yet.
 
 | File | Nature |
 |------|--------|
-| `src/expense_analyzer/accounts.py` | **NEW** — AccountInfo, AccountRegistry, migrate_legacy_if_needed, init_account_db |
-| `src/expense_analyzer/config.py` | Add `GlobalConfig`, `load_global_config()`, `load_config_for_account()`; keep `load_config()` |
-| `src/expense_analyzer/cli.py` | Add `account` subgroup; `--account` flag; fix PID dir; pass global_home to UI subprocess |
-| `src/expense_analyzer/ui/streamlit_app.py` | Refactor boot sequence; add account picker to `_render_header()`; fix Settings model-save path; narrow cache-clear on DB restore |
+| `src/expensa/accounts.py` | **NEW** — AccountInfo, AccountRegistry, migrate_legacy_if_needed, init_account_db |
+| `src/expensa/config.py` | Add `GlobalConfig`, `load_global_config()`, `load_config_for_account()`; keep `load_config()` |
+| `src/expensa/cli.py` | Add `account` subgroup; `--account` flag; fix PID dir; pass global_home to UI subprocess |
+| `src/expensa/ui/streamlit_app.py` | Refactor boot sequence; add account picker to `_render_header()`; fix Settings model-save path; narrow cache-clear on DB restore |
 | `tests/unit/test_accounts.py` | **NEW** — slugify, AccountRegistry CRUD, save/load roundtrip, migration, active account I/O |
 | `tests/unit/test_config_accounts.py` | **NEW** — GlobalConfig field assertions, load_config_for_account |
 | `tests/unit/test_cli.py` | Extend — `expense account` commands, `--account` flag targeting |
@@ -242,7 +242,7 @@ preferred path for adding a second account. No deprecation warning yet.
 | DB restore clears all caches (including embedder) | Narrow `st.cache_resource.clear()` → `_connect_cached.clear()` only |
 | Settings model-save writes to account dir instead of global | Pass `global_home` to `save_user_config()`; clear only `_load_global_config_cached` |
 | PID file becomes ambiguous with multiple accounts | Fix `ui/ui-stop/ui-status/ui-restart` to use `global_home` — one-line change per command |
-| Existing tests pass `EXPENSE_ANALYZER_HOME=tmp_path` | Migration sees no `accounts.yaml` and no `db.sqlite` → empty registry; `expense init` sets up default account as before |
+| Existing tests pass `EXPENSA_HOME=tmp_path` | Migration sees no `accounts.yaml` and no `db.sqlite` → empty registry; `expense init` sets up default account as before |
 
 ---
 

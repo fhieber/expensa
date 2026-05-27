@@ -6,8 +6,8 @@ from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
-from expense_analyzer.ingestion.sources import detect_adapter
-from expense_analyzer.ingestion.sources.paypal import PaypalAdapter, make_paypal_vz
+from expensa.ingestion.sources import detect_adapter
+from expensa.ingestion.sources.paypal import PaypalAdapter, make_paypal_vz
 
 
 def test_sniff_accepts_paypal_rejects_bank(fixtures_dir: Path) -> None:

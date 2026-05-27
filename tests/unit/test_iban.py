@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from expense_analyzer.features.iban import classify_iban
+from expensa.features.iban import classify_iban
 
 
 def test_valid_german_iban_decomposed() -> None:

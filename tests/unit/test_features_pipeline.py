@@ -5,24 +5,24 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from expense_analyzer.features.embeddings import (
+from expensa.features.embeddings import (
     HashEmbedder,
     load_embeddings,
     store_embeddings,
 )
-from expense_analyzer.features.pipeline import (
+from expensa.features.pipeline import (
     add_calendar_features,
     add_log_amount,
     add_temporal_recurrence,
     base_dataframe,
     build_full_features,
 )
-from expense_analyzer.features.similarity import best_fuzzy_match_known_vendor
-from expense_analyzer.features.temporal import (
+from expensa.features.similarity import best_fuzzy_match_known_vendor
+from expensa.features.temporal import (
     basic_calendar_features,
     is_likely_recurring,
 )
-from expense_analyzer.ingestion import ingest_csv
+from expensa.ingestion import ingest_csv
 
 
 def test_basic_calendar_features() -> None:

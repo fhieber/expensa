@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from expense_analyzer.ingestion import ingest_csv
-from expense_analyzer.storage.own_ibans import (
+from expensa.ingestion import ingest_csv
+from expensa.storage.own_ibans import (
     add_own_iban,
     list_own_ibans,
     reflag_all_expenses,

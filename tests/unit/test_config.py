@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from expense_analyzer.config import (
+from expensa.config import (
     Config,
     StreamlitConfig,
     load_config,
@@ -57,7 +57,7 @@ def test_user_config_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
         "  confidence_threshold: 0.9\n",
         encoding="utf-8",
     )
-    monkeypatch.setenv("EXPENSE_ANALYZER_CONFIG", str(user_cfg))
+    monkeypatch.setenv("EXPENSA_CONFIG", str(user_cfg))
     cfg = load_config()
     assert cfg.embedding_model.endswith("MiniLM-L12-v2")
     assert cfg.classifier.confidence_threshold == 0.9
@@ -66,7 +66,7 @@ def test_user_config_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_data_dir_env_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("EXPENSE_ANALYZER_HOME", str(tmp_path / "elsewhere"))
+    monkeypatch.setenv("EXPENSA_HOME", str(tmp_path / "elsewhere"))
     cfg = load_config()
     assert cfg.data_dir == (tmp_path / "elsewhere")
     assert cfg.db_path == cfg.data_dir / cfg.db_filename

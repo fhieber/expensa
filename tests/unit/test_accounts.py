@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from expense_analyzer.accounts import (
+from expensa.accounts import (
     ACCOUNTS_FILENAME,
     ACTIVE_ACCOUNT_FILENAME,
     LEGACY_DB_FILENAME,

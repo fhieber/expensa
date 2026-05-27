@@ -1,7 +1,7 @@
-# expense-analyzer-de default configuration
-# Copy to ~/.expense-analyzer/config.yaml and edit, or pass --config <path>.
+# expensa default configuration
+# Copy to ~/.expensa/config.yaml and edit, or pass --config <path>.
 
-data_dir: ~/.expense-analyzer
+data_dir: ~/.expensa
 db_filename: db.sqlite
 
 # --- ML models (all run locally; no cloud calls) ---

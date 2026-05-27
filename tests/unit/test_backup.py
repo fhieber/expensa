@@ -7,15 +7,15 @@ from pathlib import Path
 
 import pytest
 
-from expense_analyzer.ingestion import ingest_csv
-from expense_analyzer.storage.backup import (
+from expensa.ingestion import ingest_csv
+from expensa.storage.backup import (
     REQUIRED_TABLES,
     export_database,
     restore_database,
     validate_backup,
 )
-from expense_analyzer.storage.categories import add_label, upsert_category
-from expense_analyzer.storage.database import get_or_create_database
+from expensa.storage.categories import add_label, upsert_category
+from expensa.storage.database import get_or_create_database
 
 
 def _row_counts(conn: sqlite3.Connection) -> dict[str, int]:
@@ -153,7 +153,7 @@ def test_encrypted_backup_validate_and_restore_round_trip(
 ) -> None:
     """An encrypted account backs up to an encrypted file; validate/restore
     require the password and yield an encrypted database."""
-    from expense_analyzer.storage import crypto
+    from expensa.storage import crypto
 
     ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
     cid = upsert_category(tmp_db, "Lebensmittel")

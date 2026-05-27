@@ -1,4 +1,4 @@
-# expense-analyzer-de
+# expensa
 
 Local German bank-statement analyzer. Ingest CSV exports, deduplicate, build features, and categorize — all on-device using locally hosted Hugging Face models. **No expense data ever leaves your machine.**
 
@@ -18,7 +18,7 @@ Local German bank-statement analyzer. Ingest CSV exports, deduplicate, build fea
 - All ML inference runs locally via `sentence-transformers` / `transformers`.
 - Streamlit binds to `127.0.0.1` only; no telemetry, no auto-update checks.
 - Vendor web lookup is **off by default**; when enabled it sends only the normalized counterparty name.
-- SQLite database stored under `~/.expense-analyzer/` (or `$EXPENSE_ANALYZER_HOME`).
+- SQLite database stored under `~/.expensa/` (or `$EXPENSA_HOME`).
 
 ---
 
@@ -64,63 +64,63 @@ Combine extras: `pip install -e ".[vendor-lookup,png-export,dev]"`
 ## Quick start
 
 ```bash
-expense init                            # create data dir, DB, and default config
-expense categories edit                 # open category list in $EDITOR
+expensa init                            # create data dir, DB, and default config
+expensa categories edit                 # open category list in $EDITOR
 
-expense ingest path/to/export1.csv      # de-duplicating import
-expense ingest path/to/export2.csv      # second ingest reports new vs. duplicate
+expensa ingest path/to/export1.csv      # de-duplicating import
+expensa ingest path/to/export2.csv      # second ingest reports new vs. duplicate
 
-expense label --n 20                    # interactively label 20 active-learning candidates
-expense train                           # fit the classifier on your labels
-expense predict                         # auto-categorize unlabeled expenses
+expensa label --n 20                    # interactively label 20 active-learning candidates
+expensa train                           # fit the classifier on your labels
+expensa predict                         # auto-categorize unlabeled expenses
 
-expense viz pie                         # spend-by-category pie chart (opens as HTML)
-expense viz trend                       # monthly trend line
+expensa viz pie                         # spend-by-category pie chart (opens as HTML)
+expensa viz trend                       # monthly trend line
 
-expense ui                              # launch Streamlit UI — opens in browser automatically
+expensa ui                              # launch Streamlit UI — opens in browser automatically
 ```
 
 ---
 
 ## Command reference
 
-Run `expense --help` or `expense <command> --help` for full option documentation.
+Run `expensa --help` or `expensa <command> --help` for full option documentation.
 
 ### Core commands
 
 | Command | Description |
 |---|---|
-| `expense init [--with-defaults]` | Create data directory, SQLite DB, and config file |
-| `expense status` | Show DB stats, account info, and model status |
-| `expense ingest <file> [<file>…]` | Import CSV(s); duplicates are silently skipped |
-| `expense label [--n N] [--strategy uncertainty\|diverse\|mixed]` | Interactive labeling session |
-| `expense train` | Fit classifier on current labels |
-| `expense predict [--threshold F] [--dry-run]` | Auto-categorize unlabeled expenses |
-| `expense eval` | Evaluate classifier accuracy (cross-validation) |
-| `expense export [--fmt csv\|json] [--out PATH]` | Export categorized expenses |
-| `expense reset [--wipe-all]` | Clear predictions or wipe everything |
+| `expensa init [--with-defaults]` | Create data directory, SQLite DB, and config file |
+| `expensa status` | Show DB stats, account info, and model status |
+| `expensa ingest <file> [<file>…]` | Import CSV(s); duplicates are silently skipped |
+| `expensa label [--n N] [--strategy uncertainty\|diverse\|mixed]` | Interactive labeling session |
+| `expensa train` | Fit classifier on current labels |
+| `expensa predict [--threshold F] [--dry-run]` | Auto-categorize unlabeled expenses |
+| `expensa eval` | Evaluate classifier accuracy (cross-validation) |
+| `expensa export [--fmt csv\|json] [--out PATH]` | Export categorized expenses |
+| `expensa reset [--wipe-all]` | Clear predictions or wipe everything |
 
 ### Visualization
 
 ```bash
-expense viz pie       [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--out FILE]
-expense viz histogram [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--out FILE]
-expense viz trend     [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--out FILE]
-expense viz top       [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--out FILE]
-expense viz calendar  [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--out FILE]
+expensa viz pie       [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--out FILE]
+expensa viz histogram [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--out FILE]
+expensa viz trend     [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--out FILE]
+expensa viz top       [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--out FILE]
+expensa viz calendar  [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--out FILE]
 ```
 
-Default output is `~/.expense-analyzer/exports/<name>.html`. Add `--out chart.png` to write PNG (requires the `png-export` extra).
+Default output is `~/.expensa/exports/<name>.html`. Add `--out chart.png` to write PNG (requires the `png-export` extra).
 
 ### Streamlit UI
 
 ```bash
-expense ui                  # detached (background) — browser opens automatically
-expense ui --foreground     # attached to terminal; Ctrl+C to stop
-expense ui --no-browser     # suppress automatic browser tab
-expense ui-stop             # stop the background server
-expense ui-restart          # stop + start (picks up config changes)
-expense ui-status           # show whether the server is running
+expensa ui                  # detached (background) — browser opens automatically
+expensa ui --foreground     # attached to terminal; Ctrl+C to stop
+expensa ui --no-browser     # suppress automatic browser tab
+expensa ui-stop             # stop the background server
+expensa ui-restart          # stop + start (picks up config changes)
+expensa ui-status           # show whether the server is running
 ```
 
 The UI is a single Streamlit server that serves all accounts via an in-app account picker. It reloads automatically when source files change (`--server.runOnSave true`).
@@ -128,25 +128,25 @@ The UI is a single Streamlit server that serves all accounts via an in-app accou
 ### Categories
 
 ```bash
-expense categories list
-expense categories add "Travel" [--description "…"] [--color "#4CAF50"]
-expense categories remove "Travel" [--yes]
-expense categories edit      # open in $EDITOR (YAML)
+expensa categories list
+expensa categories add "Travel" [--description "…"] [--color "#4CAF50"]
+expensa categories remove "Travel" [--yes]
+expensa categories edit      # open in $EDITOR (YAML)
 ```
 
 ### Multi-account management
 
 ```bash
-expense account list                        # list accounts (* = active)
-expense account add "Business"              # create a new account
-expense account use "Business"              # switch active account
-expense account rename "Business" "Work"   # rename
-expense account remove "Work" [--yes]      # delete account and its DB
+expensa account list                        # list accounts (* = active)
+expensa account add "Business"              # create a new account
+expensa account use "Business"              # switch active account
+expensa account rename "Business" "Work"   # rename
+expensa account remove "Work" [--yes]      # delete account and its DB
 ```
 
 Pass `--account NAME` to any command to target a non-active account without switching:
 ```bash
-expense --account Business ingest export.csv
+expensa --account Business ingest export.csv
 ```
 
 ### Own IBANs
@@ -154,27 +154,27 @@ expense --account Business ingest export.csv
 Register your own bank account IBANs so the tool can distinguish incoming from outgoing transfers:
 
 ```bash
-expense own-iban list
-expense own-iban add DE89370400440532013000 [--label "Girokonto"]
-expense own-iban remove DE89370400440532013000
+expensa own-iban list
+expensa own-iban add DE89370400440532013000 [--label "Girokonto"]
+expensa own-iban remove DE89370400440532013000
 ```
 
 ### Vendor lookup (optional)
 
 ```bash
 # Requires: pip install -e ".[vendor-lookup]"  AND  vendor_lookup.enabled: true in config
-expense vendor-lookup "Amazon"              # look up one merchant
-expense vendor-lookup --all                 # populate cache for every distinct counterparty
-expense vendor list [--min-count N]         # browse the vendor cache
-expense vendor show "Amazon"               # full detail for one vendor
-expense vendor clear [--yes]               # wipe the cache
+expensa vendor-lookup "Amazon"              # look up one merchant
+expensa vendor-lookup --all                 # populate cache for every distinct counterparty
+expensa vendor list [--min-count N]         # browse the vendor cache
+expensa vendor show "Amazon"               # full detail for one vendor
+expensa vendor clear [--yes]               # wipe the cache
 ```
 
 ---
 
 ## Configuration
 
-`expense init` writes `~/.expense-analyzer/config.yaml` from the built-in defaults. Edit it to tune models and thresholds:
+`expensa init` writes `~/.expensa/config.yaml` from the built-in defaults. Edit it to tune models and thresholds:
 
 ```yaml
 # ML models — all run locally
@@ -195,7 +195,7 @@ vendor_lookup:
   backend: duckduckgo         # duckduckgo | searxng
 ```
 
-Set `$EXPENSE_ANALYZER_HOME` to override the default data directory (`~/.expense-analyzer/`).
+Set `$EXPENSA_HOME` to override the default data directory (`~/.expensa/`).
 
 ---
 
@@ -204,7 +204,7 @@ Set `$EXPENSE_ANALYZER_HOME` to override the default data directory (`~/.expense
 ```bash
 pytest -q               # fast unit tests (embedder is mocked — no model download)
 pytest -q -m slow       # full pipeline with the real embedding model
-pytest --cov=expense_analyzer -q   # with coverage report
+pytest --cov=expensa -q   # with coverage report
 ```
 
 ---

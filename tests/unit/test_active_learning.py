@@ -5,17 +5,17 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from expense_analyzer.config import Config
-from expense_analyzer.features.embeddings import HashEmbedder
-from expense_analyzer.ingestion import ingest_csv
-from expense_analyzer.ml.active_learning import (
+from expensa.config import Config
+from expensa.features.embeddings import HashEmbedder
+from expensa.ingestion import ingest_csv
+from expensa.ml.active_learning import (
     pick_candidates,
     select_diverse,
     select_low_confidence,
     select_uncertain,
 )
-from expense_analyzer.ml.classifier import CategorizationCascade
-from expense_analyzer.storage.categories import add_label, upsert_category
+from expensa.ml.classifier import CategorizationCascade
+from expensa.storage.categories import add_label, upsert_category
 
 
 def _cfg(tmp_path: Path) -> Config:
@@ -45,7 +45,7 @@ def test_select_diverse_returns_unique(
     ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
     e = HashEmbedder(dim=64)
     # Embeddings need to exist for select_diverse to work.
-    from expense_analyzer.features.embeddings import store_embeddings
+    from expensa.features.embeddings import store_embeddings
 
     rows = tmp_db.execute("SELECT id, combined_text FROM expenses").fetchall()
     store_embeddings(tmp_db, e, [(r["id"], r["combined_text"]) for r in rows])
@@ -58,7 +58,7 @@ def test_pick_candidates_dispatch(
 ) -> None:
     ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
     e = HashEmbedder(dim=64)
-    from expense_analyzer.features.embeddings import store_embeddings
+    from expensa.features.embeddings import store_embeddings
 
     rows = tmp_db.execute("SELECT id, combined_text FROM expenses").fetchall()
     store_embeddings(tmp_db, e, [(r["id"], r["combined_text"]) for r in rows])

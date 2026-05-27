@@ -18,10 +18,10 @@ from pathlib import Path
 
 import numpy as np
 
-from expense_analyzer.config import Config, ZeroshotConfig
-from expense_analyzer.ml import eval_cache
-from expense_analyzer.ml.classifier import _build_zeroshot_premise
-from expense_analyzer.ml.evaluation import (
+from expensa.config import Config, ZeroshotConfig
+from expensa.ml import eval_cache
+from expensa.ml.classifier import _build_zeroshot_premise
+from expensa.ml.evaluation import (
     AblationResult,
     EvalResult,
     PerCategory,

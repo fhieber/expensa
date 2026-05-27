@@ -5,8 +5,8 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from expense_analyzer.storage.database import get_or_create_database
-from expense_analyzer.storage.migrations import apply_migrations
+from expensa.storage.database import get_or_create_database
+from expensa.storage.migrations import apply_migrations
 
 
 def test_fresh_db_is_at_current_schema_version(tmp_path: Path) -> None:

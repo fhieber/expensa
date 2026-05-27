@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from expense_analyzer.storage.database import get_or_create_database, transaction
+from expensa.storage.database import get_or_create_database, transaction
 
 
 def test_schema_creates_expected_tables(tmp_db: sqlite3.Connection) -> None:

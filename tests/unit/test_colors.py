@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import random
 
-from expense_analyzer.utils.colors import random_hex_color, readable_text_color
+from expensa.utils.colors import random_hex_color, readable_text_color
 
 
 def test_random_hex_color_format() -> None:

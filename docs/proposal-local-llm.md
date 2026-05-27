@@ -134,11 +134,11 @@ they run it — no manual ranking needed.
 ## 5. Module layout
 
 ```
-src/expense_analyzer/enrichment/local_llm.py   ← new
-src/expense_analyzer/features/model_registry.py ← add LLM_MODELS table
-src/expense_analyzer/config.py                  ← add LocalLLMConfig
-src/expense_analyzer/ml/classifier.py           ← add stage hook
-src/expense_analyzer/ui/settings.py             ← add Models > LLM section
+src/expensa/enrichment/local_llm.py   ← new
+src/expensa/features/model_registry.py ← add LLM_MODELS table
+src/expensa/config.py                  ← add LocalLLMConfig
+src/expensa/ml/classifier.py           ← add stage hook
+src/expensa/ui/settings.py             ← add Models > LLM section
 tests/unit/test_local_llm.py                    ← canned-output tests
 ```
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from expense_analyzer.ingestion.normalizer import (
+from expensa.ingestion.normalizer import (
     combined_text,
     normalize_counterparty,
     normalize_verwendungszweck,

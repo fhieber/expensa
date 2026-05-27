@@ -6,7 +6,7 @@ from decimal import Decimal
 
 import pytest
 
-from expense_analyzer.features.numeric import (
+from expensa.features.numeric import (
     amount_bucket,
     is_income,
     is_round_amount,

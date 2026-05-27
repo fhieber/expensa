@@ -5,14 +5,14 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from expense_analyzer.ingestion import ingest_csv
-from expense_analyzer.storage.admin import (
+from expensa.ingestion import ingest_csv
+from expensa.storage.admin import (
     category_removal_impact,
     remove_category,
     reset_all,
     reset_data,
 )
-from expense_analyzer.storage.categories import (
+from expensa.storage.categories import (
     add_label,
     list_categories,
     upsert_category,
@@ -107,7 +107,7 @@ def test_delete_user_labels_keeps_model_labels(
     """delete_user_labels() should wipe source='user' rows and leave
     source='model' rows alone, so subsequent latest_label queries fall
     back to the model entry."""
-    from expense_analyzer.storage.admin import delete_user_labels
+    from expensa.storage.admin import delete_user_labels
 
     ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
     food = upsert_category(tmp_db, "Food")
@@ -142,7 +142,7 @@ def test_delete_user_labels_keeps_model_labels(
 
 
 def test_delete_user_labels_returns_zero_when_empty(tmp_db: sqlite3.Connection) -> None:
-    from expense_analyzer.storage.admin import delete_user_labels
+    from expensa.storage.admin import delete_user_labels
 
     assert delete_user_labels(tmp_db) == 0
 
@@ -156,7 +156,7 @@ def test_collapse_text_whitespace_cleans_existing_rows(
     """Pre-cleanup-fix rows would have multi-space / tab runs in the
     raw text columns. This backfill helper rewrites them in place
     without touching ids, amounts, dates, labels or embeddings."""
-    from expense_analyzer.storage.admin import collapse_text_whitespace
+    from expensa.storage.admin import collapse_text_whitespace
 
     ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
     # Plant noisy whitespace directly into a few rows to simulate
@@ -207,7 +207,7 @@ def test_collapse_text_whitespace_is_idempotent(
 ) -> None:
     """Running the backfill on an already-clean DB must report zero
     updates -- otherwise users would dirty their DBs by re-running."""
-    from expense_analyzer.storage.admin import collapse_text_whitespace
+    from expensa.storage.admin import collapse_text_whitespace
 
     ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
     # First pass (the fixture is already clean -- ingestion strips
@@ -225,7 +225,7 @@ def test_collapse_text_whitespace_leaves_none_columns_alone(
 ) -> None:
     """enrichment_ref is NULL for un-enriched rows. The backfill must
     not turn NULL into an empty string."""
-    from expense_analyzer.storage.admin import collapse_text_whitespace
+    from expensa.storage.admin import collapse_text_whitespace
 
     ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
     before = tmp_db.execute(

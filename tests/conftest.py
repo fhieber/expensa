@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from expense_analyzer.config import Config
-from expense_analyzer.storage.database import get_or_create_database
+from expensa.config import Config
+from expensa.storage.database import get_or_create_database
 
 
 @pytest.fixture

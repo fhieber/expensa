@@ -11,12 +11,12 @@ from unittest.mock import patch
 
 from click.testing import CliRunner
 
-from expense_analyzer.cli import cli
-from expense_analyzer.features.embeddings import HashEmbedder
+from expensa.cli import cli
+from expensa.features.embeddings import HashEmbedder
 
 
 def _runner_env(tmp_path: Path) -> dict:
-    return {"EXPENSE_ANALYZER_HOME": str(tmp_path)}
+    return {"EXPENSA_HOME": str(tmp_path)}
 
 
 def _db(tmp_path: Path, slug: str = "personal") -> Path:
@@ -111,7 +111,7 @@ def test_train_with_mocked_embedder(tmp_path: Path, fixtures_dir: Path) -> None:
     conn.commit()
     conn.close()
 
-    with patch("expense_analyzer.cli._embedder", return_value=HashEmbedder(dim=64)):
+    with patch("expensa.cli._embedder", return_value=HashEmbedder(dim=64)):
         r = runner.invoke(cli, ["train"], env=_runner_env(tmp_path))
     assert r.exit_code == 0, r.output
     assert "trained" in r.output
@@ -167,7 +167,7 @@ def test_eval_with_mocked_embedder(tmp_path: Path, fixtures_dir: Path) -> None:
     conn.commit()
     conn.close()
 
-    with patch("expense_analyzer.cli._embedder", return_value=HashEmbedder(dim=64)):
+    with patch("expensa.cli._embedder", return_value=HashEmbedder(dim=64)):
         r = runner.invoke(
             cli,
             ["eval", "--folds", "2", "--no-zeroshot", "--no-ablation"],
@@ -632,7 +632,7 @@ _NO_SQLCIPHER = _ilu.find_spec("sqlcipher3") is None
 
 @pytest.mark.skipif(_NO_SQLCIPHER, reason="SQLCipher driver not installed")
 def test_account_encrypt_keep_plaintext(tmp_path: Path) -> None:
-    from expense_analyzer.storage import crypto
+    from expensa.storage import crypto
 
     runner = CliRunner()
     runner.invoke(cli, ["init", "Personal"], env=_runner_env(tmp_path))
@@ -650,7 +650,7 @@ def test_account_encrypt_keep_plaintext(tmp_path: Path) -> None:
 
 @pytest.mark.skipif(_NO_SQLCIPHER, reason="SQLCipher driver not installed")
 def test_account_encrypt_delete_plaintext(tmp_path: Path) -> None:
-    from expense_analyzer.storage import crypto
+    from expensa.storage import crypto
 
     runner = CliRunner()
     runner.invoke(cli, ["init", "Personal"], env=_runner_env(tmp_path))
@@ -668,7 +668,7 @@ def test_account_encrypt_delete_plaintext(tmp_path: Path) -> None:
 
 @pytest.mark.skipif(_NO_SQLCIPHER, reason="SQLCipher driver not installed")
 def test_account_encrypt_then_decrypt_round_trip(tmp_path: Path) -> None:
-    from expense_analyzer.storage import crypto
+    from expensa.storage import crypto
 
     runner = CliRunner()
     runner.invoke(cli, ["init", "Personal"], env=_runner_env(tmp_path))
@@ -679,7 +679,7 @@ def test_account_encrypt_then_decrypt_round_trip(tmp_path: Path) -> None:
     db = _db(tmp_path)
     assert crypto.looks_encrypted(db)
     # Read-only command needs the password via env var.
-    env = _runner_env(tmp_path) | {"EXPENSE_ANALYZER_DB_PASSWORD": "secret"}
+    env = _runner_env(tmp_path) | {"EXPENSA_DB_PASSWORD": "secret"}
     r = runner.invoke(cli, ["status"], env=env)
     assert r.exit_code == 0, r.output
     # Decrypt with env password.

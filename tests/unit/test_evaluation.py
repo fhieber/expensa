@@ -9,18 +9,18 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from expense_analyzer.config import Config
-from expense_analyzer.features.embeddings import HashEmbedder
-from expense_analyzer.ingestion import ingest_csv
-from expense_analyzer.ml.classifier import CategorizationCascade
-from expense_analyzer.ml.evaluation import (
+from expensa.config import Config
+from expensa.features.embeddings import HashEmbedder
+from expensa.ingestion import ingest_csv
+from expensa.ml.classifier import CategorizationCascade
+from expensa.ml.evaluation import (
     STAGE_ORDER,
     ablation,
     cross_validate,
     fold_sizes,
     planned_ablation_runs,
 )
-from expense_analyzer.storage.categories import (
+from expensa.storage.categories import (
     add_label,
     upsert_category,
     vendor_label_distribution,
@@ -265,7 +265,7 @@ def test_build_pdf_produces_pdf_bytes(
     except ImportError:
         pytest.skip("report-export extras not installed")
 
-    from expense_analyzer.ml.eval_report import (
+    from expensa.ml.eval_report import (
         ReportContext,
         build_pdf,
         default_filename,
@@ -300,7 +300,7 @@ def test_build_pdf_produces_pdf_bytes(
 def test_format_duration_picks_smallest_unit() -> None:
     """The PDF header + eval-tab caption + status bar all share this
     formatter. Pin its contract so the displayed string stays short."""
-    from expense_analyzer.ml.eval_report import format_duration
+    from expensa.ml.eval_report import format_duration
 
     assert format_duration(None) == "—"
     assert format_duration(0) == "0.0s"
@@ -320,7 +320,7 @@ def test_format_setting_value_renders_each_python_type() -> None:
     """``_format_setting_value`` is the appendix's one-stop value
     formatter; keep its contract pinned so future stage additions
     don't silently emit ``True``/``False``/``0.700000`` in the PDF."""
-    from expense_analyzer.ml.eval_report import _format_setting_value
+    from expensa.ml.eval_report import _format_setting_value
 
     assert _format_setting_value(True) == "yes"
     assert _format_setting_value(False) == "no"
@@ -349,7 +349,7 @@ def test_build_pdf_includes_cascade_settings_appendix(
     except ImportError:
         pytest.skip("report-export extras not installed")
 
-    from expense_analyzer.ml.eval_report import ReportContext, build_pdf
+    from expensa.ml.eval_report import ReportContext, build_pdf
 
     ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
     cat_ids = _seed_labels(tmp_db)

@@ -7,9 +7,9 @@ from pathlib import Path
 
 import plotly.graph_objects as go
 
-from expense_analyzer.ingestion import ingest_csv
-from expense_analyzer.storage.categories import add_label, upsert_category
-from expense_analyzer.viz import (
+from expensa.ingestion import ingest_csv
+from expensa.storage.categories import add_label, upsert_category
+from expensa.viz import (
     CHART_BUILDERS,
     amount_distribution,
     bar_top_counterparties,
@@ -123,8 +123,8 @@ def test_evaluation_chart_factories() -> None:
     empty inputs (no crash)."""
     import numpy as np
 
-    from expense_analyzer.ml.evaluation import StageBreakdown
-    from expense_analyzer.viz import (
+    from expensa.ml.evaluation import StageBreakdown
+    from expensa.viz import (
         ablation_cumulative_curve,
         ablation_leave_one_out_bar,
         confusion_matrix_heatmap,

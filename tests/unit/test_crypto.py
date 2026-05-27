@@ -11,9 +11,9 @@ import pytest
 
 pytest.importorskip("sqlcipher3", reason="SQLCipher driver not installed")
 
-from expense_analyzer.storage import crypto  # noqa: E402
-from expense_analyzer.storage.categories import upsert_category  # noqa: E402
-from expense_analyzer.storage.database import get_or_create_database  # noqa: E402
+from expensa.storage import crypto  # noqa: E402
+from expensa.storage.categories import upsert_category  # noqa: E402
+from expensa.storage.database import get_or_create_database  # noqa: E402
 
 
 def _make_plaintext_db(path: Path, marker: str = "Groceries") -> None:

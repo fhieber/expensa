@@ -5,10 +5,10 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from expense_analyzer.enrichment.secondary import enrich_from_records
-from expense_analyzer.features.embeddings import HashEmbedder, load_embeddings
-from expense_analyzer.ingestion import ingest_csv
-from expense_analyzer.ingestion.sources.paypal import PaypalAdapter
+from expensa.enrichment.secondary import enrich_from_records
+from expensa.features.embeddings import HashEmbedder, load_embeddings
+from expensa.ingestion import ingest_csv
+from expensa.ingestion.sources.paypal import PaypalAdapter
 
 
 def _ingest(tmp_db: sqlite3.Connection, fixtures_dir: Path, embedder=None):

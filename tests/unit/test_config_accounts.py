@@ -1,5 +1,5 @@
 """Tests for the GlobalConfig / Config split and the multi-account
-loader paths in :mod:`expense_analyzer.config`.
+loader paths in :mod:`expensa.config`.
 
 These pin the *contract* of the split: `GlobalConfig` is the cross-
 account ML / device / vendor_lookup / streamlit settings;
@@ -12,13 +12,13 @@ from pathlib import Path
 
 import pytest
 
-from expense_analyzer.accounts import (
+from expensa.accounts import (
     ACCOUNTS_FILENAME,
     LEGACY_DB_FILENAME,
     AccountInfo,
     AccountRegistry,
 )
-from expense_analyzer.config import (
+from expensa.config import (
     Config,
     GlobalConfig,
     load_config,
@@ -80,8 +80,8 @@ def test_global_config_rejects_data_dir(monkeypatch) -> None:
 def test_load_global_config_returns_packaged_defaults_in_clean_env(
     monkeypatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setenv("EXPENSE_ANALYZER_HOME", str(tmp_path))
-    monkeypatch.delenv("EXPENSE_ANALYZER_CONFIG", raising=False)
+    monkeypatch.setenv("EXPENSA_HOME", str(tmp_path))
+    monkeypatch.delenv("EXPENSA_CONFIG", raising=False)
     g = load_global_config()
     # Packaged default model name -- pinning this catches a config drift
     # where the YAML loader silently fails and returns an empty dict.
@@ -93,8 +93,8 @@ def test_load_global_config_user_overrides_apply(
     monkeypatch, tmp_path: Path
 ) -> None:
     """A user config.yaml override should reach GlobalConfig."""
-    monkeypatch.setenv("EXPENSE_ANALYZER_HOME", str(tmp_path))
-    monkeypatch.delenv("EXPENSE_ANALYZER_CONFIG", raising=False)
+    monkeypatch.setenv("EXPENSA_HOME", str(tmp_path))
+    monkeypatch.delenv("EXPENSA_CONFIG", raising=False)
     (tmp_path / "config.yaml").write_text(
         "embedding_model: my-custom/embedder\n", encoding="utf-8"
     )
@@ -107,8 +107,8 @@ def test_load_global_config_drops_per_account_keys(
 ) -> None:
     """The legacy single-account config.yaml may have data_dir in it.
     GlobalConfig must drop those keys cleanly rather than blowing up."""
-    monkeypatch.setenv("EXPENSE_ANALYZER_HOME", str(tmp_path))
-    monkeypatch.delenv("EXPENSE_ANALYZER_CONFIG", raising=False)
+    monkeypatch.setenv("EXPENSA_HOME", str(tmp_path))
+    monkeypatch.delenv("EXPENSA_CONFIG", raising=False)
     (tmp_path / "config.yaml").write_text(
         "data_dir: /tmp/legacy-stray\n"
         "db_filename: legacy.sqlite\n"
@@ -129,8 +129,8 @@ def test_load_global_config_drops_per_account_keys(
 def test_load_config_for_account_uses_account_data_dir(
     monkeypatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setenv("EXPENSE_ANALYZER_HOME", str(tmp_path))
-    monkeypatch.delenv("EXPENSE_ANALYZER_CONFIG", raising=False)
+    monkeypatch.setenv("EXPENSA_HOME", str(tmp_path))
+    monkeypatch.delenv("EXPENSA_CONFIG", raising=False)
     account = AccountInfo(
         id="business", name="Business", data_dir=tmp_path / "biz",
     )
@@ -145,8 +145,8 @@ def test_load_config_for_account_inherits_ml_settings(
 ) -> None:
     """Per-account configs must inherit the global ML model settings
     (the whole reason for the split is that those are shared)."""
-    monkeypatch.setenv("EXPENSE_ANALYZER_HOME", str(tmp_path))
-    monkeypatch.delenv("EXPENSE_ANALYZER_CONFIG", raising=False)
+    monkeypatch.setenv("EXPENSA_HOME", str(tmp_path))
+    monkeypatch.delenv("EXPENSA_CONFIG", raising=False)
     (tmp_path / "config.yaml").write_text(
         "embedding_model: shared/across-accounts\n", encoding="utf-8"
     )
@@ -165,8 +165,8 @@ def test_load_config_for_account_with_explicit_global_cfg(
     """Passing in a GlobalConfig avoids re-reading the YAML. The
     resulting Config should reflect THAT object, not whatever's on
     disk."""
-    monkeypatch.setenv("EXPENSE_ANALYZER_HOME", str(tmp_path))
-    monkeypatch.delenv("EXPENSE_ANALYZER_CONFIG", raising=False)
+    monkeypatch.setenv("EXPENSA_HOME", str(tmp_path))
+    monkeypatch.delenv("EXPENSA_CONFIG", raising=False)
     # Disk says one thing...
     (tmp_path / "config.yaml").write_text(
         "embedding_model: on-disk/model\n", encoding="utf-8"
@@ -187,10 +187,10 @@ def test_load_config_falls_back_to_legacy_layout_when_registry_empty(
     monkeypatch, tmp_path: Path
 ) -> None:
     """A fresh tmp_path has no accounts.yaml and no legacy db.sqlite, so
-    every existing test that points EXPENSE_ANALYZER_HOME at tmp_path
+    every existing test that points EXPENSA_HOME at tmp_path
     must still get a sensible Config back (data_dir = global_home)."""
-    monkeypatch.setenv("EXPENSE_ANALYZER_HOME", str(tmp_path))
-    monkeypatch.delenv("EXPENSE_ANALYZER_CONFIG", raising=False)
+    monkeypatch.setenv("EXPENSA_HOME", str(tmp_path))
+    monkeypatch.delenv("EXPENSA_CONFIG", raising=False)
     cfg = load_config()
     assert isinstance(cfg, Config)
     assert cfg.data_dir == tmp_path
@@ -202,8 +202,8 @@ def test_load_config_resolves_via_active_account(
 ) -> None:
     """If a registry exists and an active account is set, load_config
     returns that account's Config."""
-    monkeypatch.setenv("EXPENSE_ANALYZER_HOME", str(tmp_path))
-    monkeypatch.delenv("EXPENSE_ANALYZER_CONFIG", raising=False)
+    monkeypatch.setenv("EXPENSA_HOME", str(tmp_path))
+    monkeypatch.delenv("EXPENSA_CONFIG", raising=False)
     reg = AccountRegistry(tmp_path, accounts=[])
     biz = reg.add("Business", data_dir=tmp_path / "biz")
     reg.add("Personal", data_dir=tmp_path / "pers")
@@ -219,8 +219,8 @@ def test_load_config_picks_first_when_no_active_set(
     """Without an active_account file, load_config picks the first
     registered account. Deterministic enough for the CLI; the UI
     should always explicitly set active."""
-    monkeypatch.setenv("EXPENSE_ANALYZER_HOME", str(tmp_path))
-    monkeypatch.delenv("EXPENSE_ANALYZER_CONFIG", raising=False)
+    monkeypatch.setenv("EXPENSA_HOME", str(tmp_path))
+    monkeypatch.delenv("EXPENSA_CONFIG", raising=False)
     reg = AccountRegistry(tmp_path, accounts=[])
     reg.add("First", data_dir=tmp_path / "first")
     reg.add("Second", data_dir=tmp_path / "second")
@@ -236,8 +236,8 @@ def test_load_config_migrates_legacy_db_to_default_account(
     the root + no accounts.yaml -> first load_config call registers the
     Default account, flips it active, and returns a Config rooted at
     the global home (no data movement)."""
-    monkeypatch.setenv("EXPENSE_ANALYZER_HOME", str(tmp_path))
-    monkeypatch.delenv("EXPENSE_ANALYZER_CONFIG", raising=False)
+    monkeypatch.setenv("EXPENSA_HOME", str(tmp_path))
+    monkeypatch.delenv("EXPENSA_CONFIG", raising=False)
     (tmp_path / LEGACY_DB_FILENAME).write_bytes(b"not really a db, just present")
 
     cfg = load_config()
@@ -255,8 +255,8 @@ def test_save_user_config_then_load_global(
     """save_user_config + load_global_config roundtrip: writing the
     global YAML must propagate to the next load_global_config call.
     Pins the contract that the Settings model picker can rely on."""
-    monkeypatch.setenv("EXPENSE_ANALYZER_HOME", str(tmp_path))
-    monkeypatch.delenv("EXPENSE_ANALYZER_CONFIG", raising=False)
+    monkeypatch.setenv("EXPENSA_HOME", str(tmp_path))
+    monkeypatch.delenv("EXPENSA_CONFIG", raising=False)
     save_user_config({"embedding_model": "from/picker"}, data_dir=tmp_path)
     g = load_global_config()
     assert g.embedding_model == "from/picker"

@@ -5,9 +5,9 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from expense_analyzer.ingestion import ingest_csv
-from expense_analyzer.storage.categories import add_label, upsert_category
-from expense_analyzer.storage.stats import (
+from expensa.ingestion import ingest_csv
+from expensa.storage.categories import add_label, upsert_category
+from expensa.storage.stats import (
     CategoryStat,
     category_stats,
     database_overview,
