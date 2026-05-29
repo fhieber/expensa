@@ -25,6 +25,7 @@ _BASE_COLUMNS = [
     "id",
     "buchungsdatum",
     "betrag_cents",
+    "iban",
     "counterparty",
     "counterparty_normalized",
     "verwendungszweck_normalized",
@@ -99,6 +100,15 @@ def add_temporal_recurrence(conn: sqlite3.Connection, df: pd.DataFrame) -> pd.Da
     ]
     df["is_likely_recurring"] = [
         int(feats.get(eid, {}).get("is_likely_recurring", 0)) for eid in df.index
+    ]
+    df["recurring_months_12"] = [
+        int(feats.get(eid, {}).get("recurring_months_12", 0)) for eid in df.index
+    ]
+    df["recurring_is_exact_amount"] = [
+        int(feats.get(eid, {}).get("recurring_is_exact_amount", 0)) for eid in df.index
+    ]
+    df["iban_count_before"] = [
+        int(feats.get(eid, {}).get("iban_count_before", 0)) for eid in df.index
     ]
     return df
 

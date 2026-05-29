@@ -171,12 +171,17 @@ def cross_validate(
     seed: int = 0,
     enabled_stages: Sequence[str] | None = None,
     progress_callback: Callable[[int, int], None] | None = None,
+    train_ids_filter: set[int] | None = None,
 ) -> EvalResult:
     """Leak-free stratified k-fold CV of the cascade on user labels.
 
     ``enabled_stages`` masks the cascade to a subset of stages (used by
     ablation); ``None`` means use ``cfg`` as-is (all stages per config).
     ``progress_callback(done_folds, total_folds)`` drives a UI bar.
+    ``train_ids_filter``, if given, restricts the labelled universe to
+    those expense ids -- used by the active-learning feedback loop to
+    re-evaluate the model as if a freshly-labelled batch were still
+    unlabelled.
     """
     from sklearn.metrics import (
         accuracy_score,
@@ -189,6 +194,8 @@ def cross_validate(
         cfg = _apply_stage_mask(cfg, set(enabled_stages))
 
     labels = labeled_ids_with_categories(conn, source="user")
+    if train_ids_filter is not None:
+        labels = [(eid, cid) for eid, cid in labels if eid in train_ids_filter]
     ids = [eid for eid, _ in labels]
     y = np.array([cid for _, cid in labels], dtype=np.int64)
     n_labeled = len(ids)

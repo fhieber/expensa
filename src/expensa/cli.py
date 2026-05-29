@@ -980,16 +980,55 @@ def label(ctx: click.Context, n: int | None, strategy: str | None) -> None:
 
 
 @cli.command()
+@click.option(
+    "--force-reembed",
+    is_flag=True,
+    help="Delete embeddings from any other model and recompute every row "
+    "with the configured embedding model. Use after changing "
+    "`embedding_model`.",
+)
 @click.pass_context
-def train(ctx: click.Context) -> None:
+def train(ctx: click.Context, force_reembed: bool) -> None:
     """Re-train the supervised classifier on user-labeled data."""
     cfg: Config = ctx.obj[_CTX_KEY]["config"]
     conn = _connect(cfg)
     try:
+        from expensa.features.embeddings import (
+            embedding_model_inventory,
+            purge_embeddings_except,
+            store_embeddings,
+        )
         from expensa.ml.classifier import CategorizationCascade
+
+        # Detect a model swap: warn (or, with --force-reembed, fix) when the
+        # store holds vectors from a model other than the configured one.
+        inventory = embedding_model_inventory(conn)
+        stale = {m: n for m, n in inventory.items() if m != cfg.embedding_model}
+        if stale:
+            stale_desc = ", ".join(f"{m} ({n})" for m, n in stale.items())
+            if force_reembed:
+                removed = purge_embeddings_except(conn, cfg.embedding_model)
+                conn.commit()
+                click.echo(f"purged {removed} embedding(s) from other model(s): {stale_desc}")
+            else:
+                click.echo(
+                    f"warning: {sum(stale.values())} embedding(s) belong to a "
+                    f"different model ({stale_desc}). Predictions will only use "
+                    f"vectors stored under `{cfg.embedding_model}`. "
+                    f"Re-run with --force-reembed to rebuild them all.",
+                    err=True,
+                )
 
         click.echo(f"loading embedding model `{cfg.embedding_model}`...")
         emb = _embedder(cfg)
+        if force_reembed:
+            rows = conn.execute("SELECT id, combined_text FROM expenses").fetchall()
+            click.echo(f"re-embedding {len(rows)} expense(s) with `{cfg.embedding_model}`...")
+            n_added = store_embeddings(
+                conn, emb, [(r["id"], r["combined_text"]) for r in rows]
+            )
+            conn.commit()
+            click.echo(f"  {n_added} embedded, {len(rows) - n_added} already current")
         cascade = CategorizationCascade(conn, cfg, emb)
         click.echo("training on user labels (embeddings will be computed/cached)...")
         report = cascade.fit()

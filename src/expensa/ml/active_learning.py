@@ -123,29 +123,130 @@ def select_uncertain(
     return [p.expense_id for p in preds[:n]]
 
 
+def _undercovered_categories(
+    conn: sqlite3.Connection, min_per_category: int
+) -> set[int]:
+    """Category ids with fewer than ``min_per_category`` user labels.
+
+    A category absent from the labels table has zero labels and so is
+    under-covered by definition; we include every defined category and
+    subtract the well-covered ones.
+    """
+    covered = {
+        int(r["category_id"])
+        for r in conn.execute(
+            """
+            SELECT category_id, COUNT(*) AS n
+            FROM labels WHERE source = 'user'
+            GROUP BY category_id
+            HAVING n >= ?
+            """,
+            (min_per_category,),
+        ).fetchall()
+    }
+    all_cats = {
+        int(r["id"]) for r in conn.execute("SELECT id FROM categories").fetchall()
+    }
+    return all_cats - covered
+
+
 def select_diverse(
-    conn: sqlite3.Connection, embedder: Embedder, n: int
+    conn: sqlite3.Connection,
+    embedder: Embedder,
+    n: int,
+    config: Config | None = None,
 ) -> list[int]:
-    """Greedy max-min diversity sample over unlabeled embeddings."""
+    """Greedy max-min diversity sample over unlabeled embeddings.
+
+    When ``config.active_learning.stratified_diversity`` is on (the
+    default) and there are already some user labels, candidates whose
+    nearest labelled neighbour belongs to a well-covered category are
+    deprioritised so the sweep spends its budget on under-represented
+    categories instead of returning eight diverse-but-all-grocery rows.
+    Falls back to plain geometric diversity at true cold start (no labels).
+    """
     candidates = _unlabeled_ids(conn)
     if not candidates:
         return []
     ids, vecs = load_embeddings(conn, embedder.model_name, candidates)
     if not ids:
         return candidates[:n]
-    # Seed with the row whose vector is farthest from the global mean.
-    centroid = vecs.mean(axis=0)
-    dists = np.linalg.norm(vecs - centroid, axis=1)
-    chosen_pos = [int(np.argmax(dists))]
-    while len(chosen_pos) < min(n, len(ids)):
-        chosen_vecs = vecs[chosen_pos]
-        # Min distance from each candidate to any chosen point.
-        dmat = np.linalg.norm(vecs[:, None, :] - chosen_vecs[None, :, :], axis=2)
-        min_d = dmat.min(axis=1)
-        # Force already-chosen points to -inf so they don't get picked again.
-        min_d[chosen_pos] = -np.inf
-        chosen_pos.append(int(np.argmax(min_d)))
+
+    # Optional stratification: split candidates into a preferred pool
+    # (nearest labelled neighbour is an under-covered category) and the
+    # rest, then run the diversity sweep over the preferred pool first.
+    pref_mask: np.ndarray | None = None
+    if config is not None and config.active_learning.stratified_diversity:
+        undercovered = _undercovered_categories(
+            conn, config.active_learning.diversity_min_label_per_category
+        )
+        # Only stratify once at least one category is well-covered; before
+        # that everything is under-covered and stratification is a no-op.
+        all_cats = {
+            int(r["id"]) for r in conn.execute("SELECT id FROM categories").fetchall()
+        }
+        if undercovered and undercovered != all_cats:
+            nn_cat = _nearest_labelled_category(conn, embedder, ids, vecs)
+            pref_mask = np.array(
+                [nn_cat.get(eid) in undercovered for eid in ids], dtype=bool
+            )
+
+    def _greedy(pos_pool: list[int], want: int) -> list[int]:
+        if not pos_pool or want <= 0:
+            return []
+        sub = vecs[pos_pool]
+        centroid = sub.mean(axis=0)
+        dists = np.linalg.norm(sub - centroid, axis=1)
+        chosen_local = [int(np.argmax(dists))]
+        while len(chosen_local) < min(want, len(pos_pool)):
+            chosen_vecs = sub[chosen_local]
+            dmat = np.linalg.norm(sub[:, None, :] - chosen_vecs[None, :, :], axis=2)
+            min_d = dmat.min(axis=1)
+            min_d[chosen_local] = -np.inf
+            chosen_local.append(int(np.argmax(min_d)))
+        return [pos_pool[c] for c in chosen_local]
+
+    if pref_mask is not None:
+        pref_pos = [i for i in range(len(ids)) if pref_mask[i]]
+        rest_pos = [i for i in range(len(ids)) if not pref_mask[i]]
+        chosen_pos = _greedy(pref_pos, n)
+        if len(chosen_pos) < n:
+            chosen_pos += _greedy(rest_pos, n - len(chosen_pos))
+    else:
+        chosen_pos = _greedy(list(range(len(ids))), n)
     return [ids[p] for p in chosen_pos]
+
+
+def _nearest_labelled_category(
+    conn: sqlite3.Connection,
+    embedder: Embedder,
+    cand_ids: list[int],
+    cand_vecs: np.ndarray,
+) -> dict[int, int]:
+    """Map each candidate id to the category of its nearest user-labelled
+    expense (cosine). Empty when there are no labelled embeddings."""
+    rows = conn.execute(
+        """
+        SELECT l.expense_id, l.category_id
+        FROM labels l
+        JOIN (
+            SELECT expense_id, MAX(id) AS max_id
+            FROM labels WHERE source = 'user'
+            GROUP BY expense_id
+        ) m ON l.id = m.max_id
+        """
+    ).fetchall()
+    if not rows:
+        return {}
+    lab_cat = {int(r["expense_id"]): int(r["category_id"]) for r in rows}
+    lab_ids, lab_vecs = load_embeddings(conn, embedder.model_name, list(lab_cat))
+    if not lab_ids:
+        return {}
+    sims = cand_vecs @ lab_vecs.T  # (n_cand, n_lab)
+    best = sims.argmax(axis=1)
+    return {
+        cand_ids[i]: lab_cat[lab_ids[int(best[i])]] for i in range(len(cand_ids))
+    }
 
 
 def select_low_confidence(
@@ -193,6 +294,65 @@ def select_low_confidence(
     return (low_ids + extras)[:n]
 
 
+def evaluate_label_batch_impact(
+    conn: sqlite3.Connection,
+    cfg: Config,
+    embedder: Embedder,
+    batch_ids: list[int],
+    n_folds: int = 5,
+    seed: int = 0,
+) -> dict[str, float | int]:
+    """Measure how a freshly-labelled batch moved cross-validated accuracy.
+
+    Closes the active-learning loop: re-runs leak-free CV twice -- once
+    with the ``batch_ids`` labels masked out (the "before" state, as if the
+    user hadn't labelled them yet) and once with everything (the "after"
+    state) -- and reports the delta. Read-only: it temporarily restricts
+    the *training* view via the cascade's ``train_ids`` whitelist rather
+    than mutating any labels.
+
+    Returns a dict with ``before_accuracy``, ``after_accuracy``,
+    ``delta``, ``before_macro_f1``, ``after_macro_f1`` and
+    ``n_batch`` (batch rows that were actually labelled & usable).
+
+    NaNs come back when there isn't enough labelled data per category to
+    cross-validate (mirrors :func:`cross_validate`).
+    """
+    # Local import: evaluation pulls sklearn, which we keep out of this
+    # module's import-time cost for the lightweight selection paths.
+    from expensa.ml.evaluation import cross_validate
+    from expensa.storage.categories import labeled_ids_with_categories
+
+    all_labeled = {eid for eid, _ in labeled_ids_with_categories(conn, source="user")}
+    batch = {int(x) for x in batch_ids} & all_labeled
+    before_ids = all_labeled - batch
+
+    after = cross_validate(conn, cfg, embedder, n_folds=n_folds, seed=seed)
+    if before_ids:
+        before = cross_validate(
+            conn, cfg, embedder, n_folds=n_folds, seed=seed,
+            train_ids_filter=before_ids,
+        )
+        before_acc, before_f1 = before.accuracy, before.macro_f1
+    else:
+        # Everything was in the batch -> there's no "before" to compare.
+        before_acc = before_f1 = float("nan")
+
+    delta = (
+        after.accuracy - before_acc
+        if not (np.isnan(after.accuracy) or np.isnan(before_acc))
+        else float("nan")
+    )
+    return {
+        "before_accuracy": before_acc,
+        "after_accuracy": after.accuracy,
+        "delta": delta,
+        "before_macro_f1": before_f1,
+        "after_macro_f1": after.macro_f1,
+        "n_batch": len(batch),
+    }
+
+
 def pick_candidates(
     conn: sqlite3.Connection,
     config: Config,
@@ -208,14 +368,14 @@ def pick_candidates(
     if strategy == "low-confidence-first":
         return select_low_confidence(conn, cascade, n)
     if strategy == "diverse":
-        return select_diverse(conn, embedder, n)
+        return select_diverse(conn, embedder, n, config=config)
     if strategy == "mixed":
         per = max(1, n // 2)
         out: list[int] = []
         seen: set[int] = set()
         for src in (
             select_uncertain(conn, cascade, per),
-            select_diverse(conn, embedder, per),
+            select_diverse(conn, embedder, per, config=config),
         ):
             for x in src:
                 if x not in seen:

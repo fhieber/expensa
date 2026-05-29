@@ -195,8 +195,47 @@ def load_embeddings(
     if not rows:
         return [], np.zeros((0, 0), dtype=np.float32)
     dim = int(rows[0]["dim"])
-    ids = [int(r["expense_id"]) for r in rows]
-    matrix = np.zeros((len(rows), dim), dtype=np.float32)
-    for i, r in enumerate(rows):
-        matrix[i] = np.frombuffer(r["vector"], dtype=np.float32)
+    ids: list[int] = []
+    vecs: list[np.ndarray] = []
+    for r in rows:
+        # Guard against a corrupt / mixed-dimension store (e.g. a vector
+        # written under a different model that somehow shares this
+        # model_name). Skip mismatched rows rather than letting a ragged
+        # stack raise deep inside the cascade.
+        if int(r["dim"]) != dim:
+            continue
+        vec = np.frombuffer(r["vector"], dtype=np.float32)
+        if vec.shape[0] != dim:
+            continue
+        ids.append(int(r["expense_id"]))
+        vecs.append(vec)
+    if not ids:
+        return [], np.zeros((0, 0), dtype=np.float32)
+    matrix = np.vstack(vecs).astype(np.float32, copy=False)
     return ids, matrix
+
+
+def embedding_model_inventory(conn: sqlite3.Connection) -> dict[str, int]:
+    """Return ``{model_name: row_count}`` over the embeddings table.
+
+    Lets callers detect a model swap: if the configured embedding model
+    isn't the one with the most stored vectors, existing rows are stale /
+    only-lazily-recomputed and predictions will silently run on a subset.
+    """
+    rows = conn.execute(
+        "SELECT model_name, COUNT(*) AS n FROM embeddings GROUP BY model_name"
+    ).fetchall()
+    return {str(r["model_name"]): int(r["n"]) for r in rows}
+
+
+def purge_embeddings_except(conn: sqlite3.Connection, keep_model: str) -> int:
+    """Delete every stored embedding whose model_name isn't ``keep_model``.
+
+    Returns the number of rows removed. Used by ``train --force-reembed``
+    to clear vectors left behind by a previous embedding model before the
+    active model is recomputed from scratch.
+    """
+    cur = conn.execute(
+        "DELETE FROM embeddings WHERE model_name <> ?", (keep_model,)
+    )
+    return int(cur.rowcount or 0)

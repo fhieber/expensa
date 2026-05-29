@@ -17,11 +17,50 @@ class ClassifierConfig(BaseModel):
     rf_switch_threshold: int = 200
     confidence_threshold: float = 0.7
     retrain_after_n_new_labels: int = 10
+    # Probability calibration. A RandomForest / LogReg on an imbalanced
+    # label set emits over-confident scores for rare classes (0.95 for a
+    # category with two examples), which ``confidence_threshold`` then
+    # trusts blindly. Wrapping the estimator in
+    # ``CalibratedClassifierCV`` maps the scores back to real accuracy.
+    # Only kicks in once there's enough data to cross-validate the
+    # calibrator (``calibrate_min_train`` labels AND every class has at
+    # least ``calibrate_cv`` members), so tiny training sets keep the
+    # raw, fast estimator.
+    calibrate_probas: bool = True
+    calibrate_min_train: int = 50
+    calibrate_cv: int = 3
+
+
+class SignGuardrailConfig(BaseModel):
+    """Post-prediction guardrail on the income/expense sign.
+
+    Some categories are sign-consistent in practice: salary / refunds are
+    always income, groceries are always an expense. After the cascade
+    picks a category we check whether the expense's sign matches what that
+    category's training labels overwhelmingly show; a clear violation
+    (e.g. a positive amount predicted as ``Lebensmittel``) is demoted to an
+    abstention rather than served as a confident-but-wrong answer.
+
+    Only categories with at least ``min_support`` user labels and a sign
+    that holds for at least ``min_consistency`` of them are policed; the
+    rest are left untouched. User labels are never second-guessed.
+    """
+
+    enabled: bool = True
+    min_consistency: float = 0.95
+    min_support: int = 4
 
 
 class VendorExactMatchConfig(BaseModel):
     enabled: bool = True
     agreement_min: float = 0.8
+    # IBAN-based merchant identity. The same merchant often files under
+    # several counterparty-name variants (REWE, REWE MARKT, REWE-BONUS)
+    # but a stable IBAN. When the name-based exact match abstains we fall
+    # back to the label distribution for the expense's IBAN, using the
+    # same ``agreement_min`` threshold. Bridges the cold-start gap for
+    # variable-name vendors that name matching and kNN both miss.
+    use_iban: bool = True
 
 
 class KnnConfig(BaseModel):
@@ -90,6 +129,16 @@ class ActiveLearningConfig(BaseModel):
     default_strategy: Literal[
         "uncertainty", "low-confidence-first", "diverse", "mixed",
     ] = "uncertainty"
+    # Stratified diversity: when picking diverse candidates, prefer rows
+    # whose nearest labelled category is under-represented in the training
+    # set, so a greedy max-min sweep doesn't return eight diverse-but-all-
+    # grocery rows while rent stays unlabelled. Falls back to plain
+    # geometric diversity when there are no labels yet (true cold start).
+    stratified_diversity: bool = True
+    # A category counts as "covered" once it has at least this many user
+    # labels; diversity sampling deprioritises rows that map to covered
+    # categories.
+    diversity_min_label_per_category: int = 5
 
 
 class VendorLookupConfig(BaseModel):
@@ -146,6 +195,7 @@ class GlobalConfig(BaseModel):
     knn: KnnConfig = Field(default_factory=KnnConfig)
     zeroshot: ZeroshotConfig = Field(default_factory=ZeroshotConfig)
     category_similarity: CategorySimilarityConfig = Field(default_factory=CategorySimilarityConfig)
+    sign_guardrail: SignGuardrailConfig = Field(default_factory=SignGuardrailConfig)
     active_learning: ActiveLearningConfig = Field(default_factory=ActiveLearningConfig)
     vendor_lookup: VendorLookupConfig = Field(default_factory=VendorLookupConfig)
     enrichment: EnrichmentConfig = Field(default_factory=EnrichmentConfig)
