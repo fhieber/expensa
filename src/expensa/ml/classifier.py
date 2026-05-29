@@ -24,6 +24,8 @@ from expensa.config import Config
 from expensa.features.embeddings import Embedder, load_embeddings
 from expensa.features.pipeline import build_full_features
 from expensa.storage.categories import (
+    category_sign_consistency,
+    iban_label_distribution,
     labeled_ids_with_categories,
     vendor_label_distribution,
 )
@@ -58,6 +60,9 @@ _NUMERIC_COLS = (
     "has_glaeubiger_id",
     "mandatsreferenz_present",
     "is_likely_recurring",
+    "recurring_months_12",
+    "recurring_is_exact_amount",
+    "iban_count_before",
     "log_abs_amount",
     "year",
     "month",
@@ -89,15 +94,9 @@ def _build_x(df, embeddings: np.ndarray) -> np.ndarray:
     return np.hstack([embeddings.astype(np.float32, copy=False), _numeric_block(df)])
 
 
-def _vendor_exact_match(
-    conn: sqlite3.Connection,
-    counterparty_normalized: str,
-    agreement_min: float,
-    restrict_ids: set[int] | None = None,
-) -> tuple[int, float] | None:
-    if not counterparty_normalized:
-        return None
-    dist = vendor_label_distribution(conn, counterparty_normalized, restrict_ids=restrict_ids)
+def _agree(dist: dict[int, int], agreement_min: float) -> tuple[int, float] | None:
+    """Pick the majority category from a label distribution if its share
+    meets ``agreement_min``. Returns (category_id, agreement) or None."""
     total = sum(dist.values())
     if total == 0:
         return None
@@ -106,6 +105,68 @@ def _vendor_exact_match(
     if agreement >= agreement_min:
         return cat_id, agreement
     return None
+
+
+def _vendor_exact_match(
+    conn: sqlite3.Connection,
+    counterparty_normalized: str,
+    agreement_min: float,
+    restrict_ids: set[int] | None = None,
+    iban: str | None = None,
+) -> tuple[int, float] | None:
+    """Majority user-label for a vendor.
+
+    Tries the normalised counterparty name first; if that abstains (no
+    labels for the name, or below ``agreement_min``) and an ``iban`` is
+    given, falls back to the label distribution for that IBAN. The IBAN
+    fallback bridges merchants that vary their display name across exports
+    but keep a stable IBAN.
+    """
+    if counterparty_normalized:
+        hit = _agree(
+            vendor_label_distribution(
+                conn, counterparty_normalized, restrict_ids=restrict_ids
+            ),
+            agreement_min,
+        )
+        if hit is not None:
+            return hit
+    if iban:
+        return _agree(
+            iban_label_distribution(conn, iban, restrict_ids=restrict_ids),
+            agreement_min,
+        )
+    return None
+
+
+def _knn_tally_from_sims(
+    sims: np.ndarray,
+    train_labels: np.ndarray,
+    k: int,
+) -> tuple[int, int, int | None, int] | None:
+    """Tally the top-k neighbour vote without applying the threshold.
+
+    Returns ``(top_label, top_count, runner_up_label, runner_up_count)``
+    over the ``k`` nearest neighbours, or None when there are no
+    neighbours. ``runner_up_label`` is None when only one class appears.
+    Splitting the tally from the threshold lets callers surface the
+    runner-up even on rows the threshold rejects.
+    """
+    if len(sims) == 0:
+        return None
+    k_eff = min(k, len(sims))
+    # argpartition is O(N) vs argsort O(N log N); we only need the top-k.
+    top_idx = np.argpartition(-sims, k_eff - 1)[:k_eff]
+    votes = train_labels[top_idx]
+    values, counts = np.unique(votes, return_counts=True)
+    order = np.argsort(-counts)
+    top = int(order[0])
+    top_label = int(values[top])
+    top_count = int(counts[top])
+    if len(order) > 1:
+        ru = int(order[1])
+        return top_label, top_count, int(values[ru]), int(counts[ru])
+    return top_label, top_count, None, 0
 
 
 def _knn_vote_from_sims(
@@ -121,17 +182,13 @@ def _knn_vote_from_sims(
     and then do a cheap lookup per row -- instead of N separate
     matmuls inside the cascade loop.
     """
-    if len(sims) == 0:
+    tally = _knn_tally_from_sims(sims, train_labels, k)
+    if tally is None:
         return None
+    top_label, top_count, _ru_label, _ru_count = tally
     k_eff = min(k, len(sims))
-    # argpartition is O(N) vs argsort O(N log N); we only need the top-k
-    # so we use the cheaper version.
-    top_idx = np.argpartition(-sims, k_eff - 1)[:k_eff]
-    votes = train_labels[top_idx]
-    values, counts = np.unique(votes, return_counts=True)
-    best = int(counts.argmax())
-    if counts[best] >= agreement_min:
-        return int(values[best]), float(counts[best] / k_eff)
+    if top_count >= agreement_min:
+        return top_label, float(top_count / k_eff)
     return None
 
 
@@ -344,15 +401,36 @@ class CategorizationCascade:
             classifier_type = "logistic_regression"
             pipe = Pipeline([("scaler", StandardScaler(with_mean=False)), ("clf", clf)])
 
+        # Probability calibration. Over-confident scores from an
+        # imbalanced fit mislead the confidence_threshold gate; wrapping
+        # the pipeline in CalibratedClassifierCV maps them back toward
+        # empirical accuracy. We only calibrate when there's enough data
+        # to cross-validate the calibrator: at least ``calibrate_min_train``
+        # rows AND every class has >= ``calibrate_cv`` members (otherwise
+        # the internal StratifiedKFold raises). Small training sets keep
+        # the raw, fast estimator.
+        calibrated = False
+        if self.cfg.classifier.calibrate_probas:
+            _vals, _counts = np.unique(y, return_counts=True)
+            min_class = int(_counts.min())
+            cv = max(2, int(self.cfg.classifier.calibrate_cv))
+            if n_train >= self.cfg.classifier.calibrate_min_train and min_class >= cv:
+                from sklearn.calibration import CalibratedClassifierCV
+
+                pipe = CalibratedClassifierCV(pipe, method="isotonic", cv=cv)
+                calibrated = True
+
         pipe.fit(X, y)
         self._sk = pipe
-        self._classes_ = pipe.named_steps["clf"].classes_
+        self._classes_ = pipe.classes_ if calibrated else pipe.named_steps["clf"].classes_
         self._feature_dim = X.shape[1]
         train_score = float(pipe.score(X, y))
         return FitReport(
             n_train=n_train,
             n_classes=n_classes,
-            classifier_type=classifier_type,
+            classifier_type=(
+                f"{classifier_type}+calibrated" if calibrated else classifier_type
+            ),
             feature_dim=X.shape[1],
             train_score=train_score,
         )
@@ -381,8 +459,11 @@ class CategorizationCascade:
         train_ids_arr = np.array([eid for eid, _ in labels], dtype=np.int64)
         train_y = np.array([cid for _, cid in labels], dtype=np.int64)
         if len(train_ids_arr) > 0:
+            # Pass plain Python ints: this sqlite3 build doesn't match
+            # numpy int64 values in an ``IN (...)`` clause, which would
+            # silently return zero train vectors and disable the kNN stage.
             ids_loaded, train_vecs_all = load_embeddings(
-                self.conn, self.embedder.model_name, list(train_ids_arr)
+                self.conn, self.embedder.model_name, [int(x) for x in train_ids_arr]
             )
             id_to_pos = {eid: i for i, eid in enumerate(ids_loaded)}
             order = [id_to_pos.get(int(eid)) for eid in train_ids_arr]
@@ -501,13 +582,18 @@ class CategorizationCascade:
             target_pos = pos_for_eid[int(eid)]
             row = df.iloc[target_pos]
 
-            # Stage 1: vendor exact match
+            # Stage 1: vendor exact match (name first, IBAN identity fallback)
             if self.cfg.vendor_exact_match.enabled:
                 hit = _vendor_exact_match(
                     self.conn,
                     str(row.get("counterparty_normalized") or ""),
                     self.cfg.vendor_exact_match.agreement_min,
                     restrict_ids=self._train_ids,
+                    iban=(
+                        str(row.get("iban") or "")
+                        if self.cfg.vendor_exact_match.use_iban
+                        else None
+                    ),
                 )
                 if hit:
                     cid, agreement = hit
@@ -518,18 +604,26 @@ class CategorizationCascade:
 
             # Stage 2: k-NN -- use the precomputed sim row.
             if knn_sim_matrix is not None:
-                hit = _knn_vote_from_sims(
-                    knn_sim_matrix[target_pos],
-                    train_y,
-                    k=self.cfg.knn.k,
-                    agreement_min=self.cfg.knn.agreement_min,
+                tally = _knn_tally_from_sims(
+                    knn_sim_matrix[target_pos], train_y, k=self.cfg.knn.k
                 )
-                if hit:
-                    cid, conf = hit
-                    out[i] = Prediction(eid, cid, conf, "knn")
-                    done += 1
-                    _tick()
-                    continue
+                if tally is not None:
+                    top_label, top_count, ru_label, ru_count = tally
+                    k_eff = min(self.cfg.knn.k, knn_sim_matrix.shape[1])
+                    if top_count >= self.cfg.knn.agreement_min:
+                        out[i] = Prediction(
+                            eid,
+                            top_label,
+                            float(top_count / k_eff),
+                            "knn",
+                            runner_up=ru_label,
+                            runner_up_confidence=(
+                                float(ru_count / k_eff) if ru_label is not None else 0.0
+                            ),
+                        )
+                        done += 1
+                        _tick()
+                        continue
 
             # Stage 3: classifier -- look up the precomputed row.
             if proba_all is not None:
@@ -608,8 +702,55 @@ class CategorizationCascade:
 
         # Sanity: every slot must be filled -- a None here means a
         # stage path silently returned without ``out[i] = ...``.
-        return [p if p is not None else Prediction(int(expense_ids[i]), None, 0.0, "unknown")
-                for i, p in enumerate(out)]
+        final = [
+            p if p is not None else Prediction(int(expense_ids[i]), None, 0.0, "unknown")
+            for i, p in enumerate(out)
+        ]
+
+        # Sign guardrail: demote model predictions whose income/expense
+        # sign contradicts the chosen category's near-unanimous training
+        # sign (a refund predicted as a grocery expense, say).
+        if self.cfg.sign_guardrail.enabled:
+            self._apply_sign_guardrail(final, df)
+
+        return final
+
+    def _apply_sign_guardrail(self, preds: list[Prediction], df) -> None:
+        """In-place: turn a prediction into an abstention when its sign
+        clashes with the chosen category's dominant, well-supported sign.
+
+        Only categories with >= ``min_support`` user labels and a sign
+        holding for >= ``min_consistency`` of them are policed. Rows with a
+        zero amount or an unknown sign are left alone.
+        """
+        cons = category_sign_consistency(self.conn, restrict_ids=self._train_ids)
+        if not cons:
+            return
+        cfg = self.cfg.sign_guardrail
+        sign_by_eid: dict[int, int] = {}
+        if "betrag_cents" in df.columns:
+            for eid, cents in df["betrag_cents"].items():
+                c = int(cents)
+                sign_by_eid[int(eid)] = 1 if c > 0 else (-1 if c < 0 else 0)
+        for i, p in enumerate(preds):
+            if p.category_id is None:
+                continue
+            info = cons.get(p.category_id)
+            if info is None:
+                continue
+            dominant, consistency, support = info
+            if support < cfg.min_support or consistency < cfg.min_consistency:
+                continue
+            sign = sign_by_eid.get(p.expense_id, 0)
+            if sign != 0 and sign != dominant:
+                preds[i] = Prediction(
+                    p.expense_id,
+                    None,
+                    0.0,
+                    "unknown",
+                    notes=f"sign guardrail: {p.stage} -> {p.category_id} "
+                    f"violates category sign",
+                )
 
     # ---- zeroshot -------------------------------------------------------
 

@@ -23,58 +23,64 @@ All ship with unit tests; the full suite is green (455 passed, 2 skipped, 2 xfai
 
 ---
 
-## 2. ML feature-set backlog (prioritised)
+## 2. ML feature-set backlog — ✅ shipped
 
-### P0 — IBAN-based merchant identity
-The same merchant often files under several name variants (`REWE`, `REWE
-MARKT`, `REWE-BONUS`) but a stable IBAN. Add an `iban_seen_before` count
-(prior **user-labelled** rows with the same IBAN) computed in the
-`temporal.py` bulk SQL pass and exposed via `_NUMERIC_COLS`. Cheap, highly
-predictive, and bridges the cold-start gap for variable-name vendors that
-`vendor_exact_match` and kNN both miss.
+The full ML backlog landed as a batch (all unit-tested). Summary:
 
-### P0 — Classifier probability calibration
-A RandomForest / LogReg on imbalanced label sets emits over-confident scores
-for rare classes (e.g. 0.95 for a category with two training examples), which
-the `confidence_threshold` then trusts blindly. Wrap the estimator in
-`sklearn.calibration.CalibratedClassifierCV` (config flag
-`classifier.calibrate_probas`) so the cascade's thresholds map to real
-accuracy. Persist a calibration summary in `model_versions`.
+### ✅ IBAN-based merchant identity
+The vendor-exact-match stage now falls back to the label distribution for the
+expense's **IBAN** when the counterparty-name match abstains
+(`vendor_exact_match.use_iban`), bridging merchants that vary their display
+name but keep a stable IBAN. A leak-free `iban_count_before` feature (prior
+rows sharing the IBAN, by date) was also added to the temporal bulk SQL and
+`_NUMERIC_COLS`. Helpers: `categories.iban_label_distribution`.
 
-### P1 — Transaction-sign consistency
-`is_income` exists but isn't used as a guardrail. Compute per-category
-`expected_sign` + `sign_consistency` from the training labels; demote a
-prediction that violates a category's near-100%-consistent sign (a refund
-predicted as `Lebensmittel`). Also fold "Einnahme/Ausgabe" into the zero-shot
-premise.
+### ✅ Classifier probability calibration
+`fit()` wraps the estimator in `CalibratedClassifierCV` (isotonic) once there's
+enough data to cross-validate the calibrator — at least
+`classifier.calibrate_min_train` rows **and** every class ≥ `calibrate_cv`
+members; tiny sets keep the raw estimator. The `FitReport.classifier_type`
+gains a `+calibrated` suffix when engaged.
 
-### P1 — Richer recurrence signals
-`is_likely_recurring` is a single boolean (≥3 prior months at ±10%). Add
-`recurring_months_count` (of last 12), `recurring_is_exact_amount`, and
-`day_of_month_stdev_within_cp` so the model can distinguish a fixed monthly
-subscription from a noisy variable charge, and surface
-cancellation/anomaly detection later.
+### ✅ Transaction-sign consistency guardrail
+`sign_guardrail` (config section) demotes a prediction to abstention when the
+expense's income/expense sign contradicts the chosen category's dominant,
+well-supported training sign (≥ `min_support` labels, ≥ `min_consistency`
+agreement). Helper: `categories.category_sign_consistency`. User labels are
+never policed.
 
-### P2 — Embedding model-swap safety
-Embeddings are keyed by `(expense_id, model_name)`, so swapping
-`embedding_model` silently leaves old vectors orphaned and only re-embeds new
-rows. `load_embeddings` also assumes a uniform `dim` from `rows[0]`. Add a
-startup check that warns when the active model differs from the one with the
-most stored vectors, plus a `retrain --force-reembed` flag that purges stale
-model rows.
+### ✅ Richer recurrence signals
+Added `recurring_months_12` (months of the trailing 12 with a similar-amount
+charge) and `recurring_is_exact_amount` (every prior similar charge identical)
+to the temporal bulk SQL + `_NUMERIC_COLS`, alongside the existing
+`is_likely_recurring`. Lets the model separate a fixed subscription from a
+noisy variable charge.
 
-### P2 — kNN tie / runner-up surfacing
-`_knn_vote_from_sims` returns only the winner; with `agreement_min=4` a 3-2
-split is discarded even though it carries signal. Return the runner-up so the
-cascade and the review queue can show "knn: Groceries (3/5), runner-up
-Household (2/5)" — and so active learning's new margin tiebreak applies to kNN
-rows too.
+### ✅ Embedding model-swap safety
+`embedding_model_inventory()` and `purge_embeddings_except()` plus a
+`train --force-reembed` flag: `train` now warns when the store holds vectors
+from a model other than the configured one and, with the flag, purges the
+stale rows and recomputes every row. `load_embeddings` now skips
+mismatched-dimension rows instead of building a ragged matrix.
 
-### P2 — Active-learning: stratified diversity & feedback loop
-`select_diverse` ignores label balance and can pick 8 diverse-but-all-grocery
-rows. Constrain diversity to under-represented categories first. Separately,
-measure held-out accuracy before/after a labelling batch so the UI can report
-"your last 10 labels improved accuracy by N%".
+### ✅ kNN tie / runner-up surfacing
+`_knn_tally_from_sims` exposes the top **and** runner-up vote; the kNN stage
+now populates `Prediction.runner_up` / `runner_up_confidence`, so the
+active-learning margin tiebreak applies to kNN rows too.
+
+### ✅ Active-learning: stratified diversity & feedback loop
+`select_diverse` biases toward rows whose nearest labelled neighbour is an
+under-covered category (`active_learning.stratified_diversity`,
+`diversity_min_label_per_category`), falling back to plain geometric diversity
+at cold start. `evaluate_label_batch_impact()` re-runs leak-free CV with a
+freshly-labelled batch masked vs. included, reporting the accuracy delta so the
+UI can show "your last N labels moved accuracy by X".
+
+> **Incidental fix:** `predict_batch` passed numpy-`int64` ids to
+> `load_embeddings`, which this sqlite3 build doesn't match in an `IN (...)`
+> clause — the kNN train-vector load silently returned empty, disabling the
+> kNN stage. Now passes plain ints. (Latent on `main`; surfaced while testing
+> the runner-up work.)
 
 ---
 

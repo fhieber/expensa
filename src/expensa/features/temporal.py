@@ -99,10 +99,20 @@ cp_counts AS (
 ),
 -- is_likely_recurring: 1 iff the vendor has charged a similar amount
 -- (within ±10%) in ≥3 distinct prior calendar months.
+-- recurring_months_12: how many of the trailing 12 calendar months had a
+--   similar-amount (±10%) charge to the same vendor -- a strength signal
+--   (12 = every month, a hard subscription; 3 = barely qualifies).
+-- recurring_exact: 1 iff every prior similar-amount charge was the EXACT
+--   same cents (fixed subscription vs noisy variable charge).
 recurring AS (
     SELECT
         e.id,
-        COUNT(DISTINCT strftime('%Y-%m', p.buchungsdatum)) AS n_months
+        COUNT(DISTINCT strftime('%Y-%m', p.buchungsdatum)) AS n_months,
+        COUNT(DISTINCT CASE
+            WHEN julianday(e.buchungsdatum) - julianday(p.buchungsdatum) <= 365
+            THEN strftime('%Y-%m', p.buchungsdatum) END) AS n_months_12,
+        SUM(CASE WHEN ABS(p.betrag_cents) = ABS(e.betrag_cents) THEN 1 ELSE 0 END) AS n_exact,
+        COUNT(*) AS n_similar
     FROM expenses e
     JOIN expenses p
         ON p.counterparty_normalized = e.counterparty_normalized
@@ -111,6 +121,22 @@ recurring AS (
         AND ABS(ABS(p.betrag_cents) - ABS(e.betrag_cents)) <= ABS(e.betrag_cents) * 0.10
     WHERE e.counterparty_normalized IS NOT NULL AND e.counterparty_normalized <> ''
       AND ABS(e.betrag_cents) > 0
+    GROUP BY e.id
+),
+-- iban_count_before: number of prior rows (by date) sharing this row's
+-- IBAN. Transaction-frequency only -- NOT label-conditioned -- so it is
+-- leak-free under cross-validation. Bridges merchants that vary their
+-- counterparty name but keep a stable IBAN (REWE / REWE MARKT / ...).
+iban_counts AS (
+    SELECT
+        e.id,
+        COUNT(*) AS n_iban_before
+    FROM expenses e
+    JOIN expenses p
+        ON p.iban = e.iban
+        AND p.id <> e.id
+        AND p.buchungsdatum < e.buchungsdatum
+    WHERE e.iban IS NOT NULL AND e.iban <> ''
     GROUP BY e.id
 )
 SELECT
@@ -128,10 +154,15 @@ SELECT
         ELSE (s.abs_cents - s.prior_mean)
              / sqrt(s.prior_msq - s.prior_mean * s.prior_mean)
     END AS amount_zscore_within_cp,
-    CASE WHEN COALESCE(r.n_months, 0) >= 3 THEN 1 ELSE 0 END AS is_likely_recurring
+    CASE WHEN COALESCE(r.n_months, 0) >= 3 THEN 1 ELSE 0 END AS is_likely_recurring,
+    COALESCE(r.n_months_12, 0) AS recurring_months_12,
+    CASE WHEN COALESCE(r.n_similar, 0) > 0 AND r.n_exact = r.n_similar
+         THEN 1 ELSE 0 END AS recurring_is_exact_amount,
+    COALESCE(ic.n_iban_before, 0) AS iban_count_before
 FROM same_cp s
 LEFT JOIN cp_counts c ON c.id = s.id
 LEFT JOIN recurring r ON r.id = s.id
+LEFT JOIN iban_counts ic ON ic.id = s.id
 """
 
 
@@ -143,12 +174,15 @@ def compute_temporal_features_bulk(
 
     Returns ``{expense_id: {feature_name: value}}``. Features:
 
-      * ``days_since_prev_same_cp``  (int | None)
-      * ``count_same_cp_30d``        (int)
-      * ``count_same_cp_90d``        (int)
-      * ``count_same_cp_365d``       (int)
-      * ``amount_zscore_within_cp``  (float | None)
-      * ``is_likely_recurring``      (0 | 1)
+      * ``days_since_prev_same_cp``    (int | None)
+      * ``count_same_cp_30d``          (int)
+      * ``count_same_cp_90d``          (int)
+      * ``count_same_cp_365d``         (int)
+      * ``amount_zscore_within_cp``    (float | None)
+      * ``is_likely_recurring``        (0 | 1)
+      * ``recurring_months_12``        (int)  months of last 12 with a similar charge
+      * ``recurring_is_exact_amount``  (0 | 1)  all prior similar charges identical
+      * ``iban_count_before``          (int)  prior rows sharing this IBAN
 
     SQLite's stdlib build doesn't expose ``sqrt`` -- we register it once
     on the connection here. Cheap and idempotent.
@@ -179,6 +213,9 @@ def compute_temporal_features_bulk(
                 else None
             ),
             "is_likely_recurring": int(r["is_likely_recurring"] or 0),
+            "recurring_months_12": int(r["recurring_months_12"] or 0),
+            "recurring_is_exact_amount": int(r["recurring_is_exact_amount"] or 0),
+            "iban_count_before": int(r["iban_count_before"] or 0),
         }
         for r in rows
     }

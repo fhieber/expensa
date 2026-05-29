@@ -169,6 +169,82 @@ def vendor_label_distribution(
     return {int(r["category_id"]): int(r["n"]) for r in rows}
 
 
+def iban_label_distribution(
+    conn: sqlite3.Connection,
+    iban: str,
+    restrict_ids: set[int] | None = None,
+) -> dict[int, int]:
+    """How many user labels each category has received for a given IBAN.
+
+    Mirror of :func:`vendor_label_distribution` but keyed on the
+    expense's IBAN instead of the normalised counterparty name. Used as
+    the IBAN-identity fallback in the vendor-exact-match stage so a
+    merchant that varies its display name but keeps a stable IBAN still
+    gets matched. ``restrict_ids`` keeps cross-validation leak-free.
+    """
+    if not iban:
+        return {}
+    sql = """
+        SELECT l.category_id, COUNT(*) AS n
+        FROM labels l
+        JOIN expenses e ON e.id = l.expense_id
+        WHERE l.source = 'user'
+          AND e.iban = ?
+    """
+    params: list = [iban]
+    if restrict_ids is not None:
+        if not restrict_ids:
+            return {}
+        placeholders = ",".join("?" * len(restrict_ids))
+        sql += f"  AND l.expense_id IN ({placeholders})\n"
+        params.extend(sorted(restrict_ids))
+    sql += "        GROUP BY l.category_id"
+    rows = conn.execute(sql, params).fetchall()
+    return {int(r["category_id"]): int(r["n"]) for r in rows}
+
+
+def category_sign_consistency(
+    conn: sqlite3.Connection, restrict_ids: set[int] | None = None
+) -> dict[int, tuple[int, float, int]]:
+    """Per-category income/expense sign consistency from user labels.
+
+    Returns ``{category_id: (dominant_sign, consistency, support)}`` where
+    ``dominant_sign`` is +1 (income) or -1 (expense), ``consistency`` is
+    the fraction of that category's user-labelled rows matching the
+    dominant sign, and ``support`` is the total user-labelled row count.
+
+    Zero-amount rows are ignored (no meaningful sign). ``restrict_ids``
+    keeps the computation leak-free under cross-validation.
+    """
+    sql = """
+        SELECT l.category_id,
+               SUM(CASE WHEN e.betrag_cents > 0 THEN 1 ELSE 0 END) AS pos,
+               SUM(CASE WHEN e.betrag_cents < 0 THEN 1 ELSE 0 END) AS neg
+        FROM labels l
+        JOIN expenses e ON e.id = l.expense_id
+        WHERE l.source = 'user' AND e.betrag_cents <> 0
+    """
+    params: list = []
+    if restrict_ids is not None:
+        if not restrict_ids:
+            return {}
+        placeholders = ",".join("?" * len(restrict_ids))
+        sql += f"  AND l.expense_id IN ({placeholders})\n"
+        params.extend(sorted(restrict_ids))
+    sql += "        GROUP BY l.category_id"
+    out: dict[int, tuple[int, float, int]] = {}
+    for r in conn.execute(sql, params).fetchall():
+        pos, neg = int(r["pos"]), int(r["neg"])
+        support = pos + neg
+        if support == 0:
+            continue
+        if pos >= neg:
+            out[int(r["category_id"])] = (1, pos / support, support)
+        else:
+            out[int(r["category_id"])] = (-1, neg / support, support)
+    return out
+
+
 def import_categories_from_yaml(conn: sqlite3.Connection, items: list[dict]) -> int:
     """Bulk upsert from a list of {name, description, color} dicts."""
     n = 0

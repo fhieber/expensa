@@ -16,10 +16,25 @@ classifier:
   rf_switch_threshold: 200   # switch to RF once we have this many labels
   confidence_threshold: 0.7  # below this → flagged for review
   retrain_after_n_new_labels: 10
+  # Probability calibration: map over-confident scores back to real
+  # accuracy. Only engages once there's enough data to cross-validate.
+  calibrate_probas: true
+  calibrate_min_train: 50
+  calibrate_cv: 3
+
+# Demote a prediction whose income/expense sign contradicts what the
+# chosen category's user labels overwhelmingly show (e.g. a refund landing
+# in Lebensmittel). Only sign-consistent, well-supported categories are
+# policed; user labels are never touched.
+sign_guardrail:
+  enabled: true
+  min_consistency: 0.95
+  min_support: 4
 
 vendor_exact_match:
   enabled: true
   agreement_min: 0.8         # ≥80% past labels for the vendor must agree
+  use_iban: true             # fall back to IBAN-based identity when the name match abstains
 
 knn:
   enabled: true
@@ -53,6 +68,8 @@ category_similarity:
 active_learning:
   default_batch_size: 10
   default_strategy: uncertainty  # uncertainty | diverse | mixed
+  stratified_diversity: true             # bias diversity sampling toward under-labelled categories
+  diversity_min_label_per_category: 5    # a category is "covered" at this many user labels
 
 # --- Privacy: vendor web lookup is OFF by default ---
 vendor_lookup:
