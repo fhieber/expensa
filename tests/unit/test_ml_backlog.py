@@ -29,7 +29,6 @@ from expensa.features.embeddings import (
     store_embeddings,
 )
 from expensa.features.temporal import compute_temporal_features_bulk
-from expensa.ingestion import ingest_csv
 from expensa.ml.classifier import (
     CategorizationCascade,
     _knn_tally_from_sims,
