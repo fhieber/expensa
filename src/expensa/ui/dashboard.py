@@ -57,16 +57,57 @@ def render() -> None:
 
     n_exp = conn.execute("SELECT COUNT(*) AS n FROM expenses").fetchone()["n"]
     if n_exp == 0:
-        st.info("Import a CSV from the **Data** tab's *Import Data* expander to get started.")
+        _render_empty_state(conn)
         return
 
     since, until = date_preset_row(key_prefix="dashboard")
+    _maybe_low_data_hint(conn)
     savings = tuple(savings_category_names(conn))
     _render_headline_tiles(conn, since, until, savings)
     _render_charts(conn, since, until, savings)
     st.divider()
     _render_records_table(conn, since, until)
     _render_alltime_helpers(conn)
+
+
+def _render_empty_state(conn) -> None:
+    """Onboarding shown when there are no expenses yet.
+
+    A blank dashboard with a one-liner left new users guessing. This walks
+    them through the three concrete first steps and notes whether default
+    categories are already seeded so they know what's left to do.
+    """
+    n_cats = conn.execute("SELECT COUNT(*) AS n FROM categories").fetchone()["n"]
+    st.info("**Welcome to Expensa!** No expenses yet — here's how to get started.")
+    cat_step = (
+        f"✅ **{n_cats} categories** are ready (manage them in the **Categories** tab)."
+        if n_cats
+        else "Add a few **categories** in the *Categories* tab (or seed the German defaults)."
+    )
+    st.markdown(
+        "#### Quick start\n"
+        "1. **Import data** — open the **Data** tab, expand *Import Data*, and "
+        "drop one or more German bank-export CSVs (`;`-separated, comma decimal). "
+        "On the command line: `expensa ingest path/to/export.csv`.\n"
+        f"2. **Categories** — {cat_step}\n"
+        "3. **Label & review** — label a handful of examples in the **Review** tab; "
+        "the model then auto-categorizes the rest and surfaces low-confidence rows "
+        "for you to confirm.\n\n"
+        "Charts and stats appear here automatically once expenses are imported."
+    )
+
+
+def _maybe_low_data_hint(conn) -> None:
+    """A gentle nudge when there are expenses but essentially no labels yet,
+    so the dashboard's categories look empty for an understandable reason."""
+    n_user = conn.execute(
+        "SELECT COUNT(DISTINCT expense_id) AS n FROM labels WHERE source='user'"
+    ).fetchone()["n"]
+    if n_user == 0:
+        st.caption(
+            "ℹ️ No expenses are categorized yet — head to the **Review** tab to "
+            "label a few examples and let the model take over."
+        )
 
 
 def _render_headline_tiles(conn, since, until, savings) -> None:

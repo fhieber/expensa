@@ -3,10 +3,26 @@
 The `main` function is the console-script target declared in pyproject.
 Heavy imports (torch, sentence-transformers, transformers) are deferred
 to inside the commands that need them, so `expensa --help` stays snappy.
+
+Exit codes (so the CLI is scriptable / CI-friendly):
+  * ``0`` -- success.
+  * ``1`` -- an expected error (bad password, invalid backup, a
+    ``ClickException`` such as "no such account"). Click maps these here.
+  * ``2`` -- usage error: missing/invalid arguments, or a precondition the
+    caller can fix (no categories yet, vendor lookup disabled). This is
+    Click's own convention for bad invocation and we reuse it via
+    ``ctx.exit(2)``.
+  * ``3`` -- a refused destructive op that needs ``--force`` (e.g.
+    removing a category that still has labels).
+
+Several read commands accept ``--json`` to emit a single machine-readable
+object on stdout instead of the human table; all human chatter then goes
+to stderr so stdout stays clean for piping.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import subprocess
@@ -223,8 +239,9 @@ def init(ctx: click.Context, name: str | None, with_defaults: bool) -> None:
 # --- status ------------------------------------------------------------------
 
 @cli.command()
+@click.option("--json", "as_json", is_flag=True, help="Emit a JSON object on stdout.")
 @click.pass_context
-def status(ctx: click.Context) -> None:
+def status(ctx: click.Context, as_json: bool) -> None:
     """Show counts: expenses, labeled vs unlabeled, categories."""
     cfg: Config = ctx.obj[_CTX_KEY]["config"]
     conn = _connect(cfg)
@@ -234,6 +251,14 @@ def status(ctx: click.Context) -> None:
             "SELECT COUNT(DISTINCT expense_id) AS n FROM labels WHERE source='user'"
         ).fetchone()["n"]
         n_cat = conn.execute("SELECT COUNT(*) AS n FROM categories").fetchone()["n"]
+        if as_json:
+            click.echo(json.dumps({
+                "expenses": int(n_exp),
+                "user_labeled": int(n_lab),
+                "categories": int(n_cat),
+                "data_dir": str(cfg.data_dir),
+            }))
+            return
         click.echo(f"expenses:     {n_exp}")
         click.echo(f"user-labeled: {n_lab}")
         click.echo(f"categories:   {n_cat}")
@@ -330,15 +355,27 @@ def account() -> None:
 
 
 @account.command("list")
+@click.option("--json", "as_json", is_flag=True, help="Emit a JSON array on stdout.")
 @click.pass_context
-def account_list(ctx: click.Context) -> None:
+def account_list(ctx: click.Context, as_json: bool) -> None:
     """Show every registered account; the active one is marked ``*``."""
     registry: AccountRegistry = ctx.obj[_CTX_KEY]["registry"]
+    active_id = registry.get_active_id()
+    if as_json:
+        click.echo(json.dumps([
+            {
+                "id": a.id,
+                "name": a.name,
+                "data_dir": str(a.data_dir),
+                "active": a.id == active_id,
+            }
+            for a in registry.all()
+        ]))
+        return
     if len(registry) == 0:
         click.echo("(no accounts registered yet)")
         click.echo("Hint: `expensa account add NAME` to create your first.")
         return
-    active_id = registry.get_active_id()
     for a in registry.all():
         marker = "*" if a.id == active_id else " "
         click.echo(f"  {marker} {a.id:<20} {a.name:<24} {a.data_dir}")
@@ -379,18 +416,52 @@ def account_add(
         click.echo(f"  active account is now: {info.id}")
 
 
+def _account_db_summary(info: AccountInfo) -> str:
+    """One-line description of an account's on-disk DB: size + expense
+    count when reachable. Best-effort; never raises."""
+    db = info.db_path
+    if not db.exists():
+        return "no database file on disk"
+    try:
+        size_mb = db.stat().st_size / (1024 * 1024)
+    except OSError:
+        size_mb = 0.0
+    n_exp: int | str = "?"
+    try:
+        c = sqlite3.connect(str(db))
+        try:
+            row = c.execute("SELECT COUNT(*) FROM expenses").fetchone()
+            n_exp = int(row[0]) if row else 0
+        finally:
+            c.close()
+    except sqlite3.Error:
+        # Encrypted or otherwise unreadable without a key -- size still helps.
+        n_exp = "? (encrypted or unreadable)"
+    return f"{size_mb:.1f} MB, {n_exp} expense(s)"
+
+
 @account.command("remove")
 @click.argument("name")
 @click.option("--yes", "yes", is_flag=True, help="Skip the confirmation prompt.")
+@click.option("--dry-run", is_flag=True,
+              help="Show what would be removed and the data left on disk, then exit.")
 @click.pass_context
-def account_remove(ctx: click.Context, name: str, yes: bool) -> None:
+def account_remove(ctx: click.Context, name: str, yes: bool, dry_run: bool) -> None:
     """Drop an account from the registry. **Does not delete files**;
     the path is printed so you can remove it manually if you want."""
     registry: AccountRegistry = ctx.obj[_CTX_KEY]["registry"]
     info = registry.get_by_name_or_id(name)
     if info is None:
         raise click.ClickException(f"no such account: {name!r}")
+    summary = _account_db_summary(info)
+    if dry_run:
+        click.echo(f"would remove account {info.id!r} ({info.name}) from the registry.")
+        click.echo(f"  data dir kept on disk: {info.data_dir}")
+        click.echo(f"  database: {info.db_path}  [{summary}]")
+        click.echo("  (no changes made — dry run)")
+        return
     if not yes:
+        click.echo(f"Account {info.id!r} database: {summary}")
         click.confirm(
             f"Remove account {info.id!r} from the registry? "
             "(The DB on disk will NOT be deleted.)",
@@ -1008,21 +1079,28 @@ def train(ctx: click.Context) -> None:
 @click.option("--threshold", type=float, default=None,
               help="Override classifier confidence threshold.")
 @click.option("--dry-run", is_flag=True, help="Print predictions without persisting them.")
+@click.option("--json", "as_json", is_flag=True,
+              help="Emit a JSON summary (and, with --dry-run, every prediction) on stdout.")
 @click.pass_context
-def predict(ctx: click.Context, threshold: float | None, dry_run: bool) -> None:
+def predict(ctx: click.Context, threshold: float | None, dry_run: bool, as_json: bool) -> None:
     """Auto-categorize unlabeled expenses."""
     cfg: Config = ctx.obj[_CTX_KEY]["config"]
     if threshold is not None:
         cfg.classifier.confidence_threshold = threshold
     conn = _connect(cfg)
+    # With --json, keep stdout clean for the payload: progress chatter -> stderr.
+    def _say(msg: str) -> None:
+        click.echo(msg, err=as_json)
     try:
+        from collections import Counter
+
         from expensa.ml.classifier import CategorizationCascade
         from expensa.storage.categories import add_label
 
-        click.echo(f"loading embedding model `{cfg.embedding_model}`...")
+        _say(f"loading embedding model `{cfg.embedding_model}`...")
         emb = _embedder(cfg)
         cascade = CategorizationCascade(conn, cfg, emb)
-        click.echo("training on user labels...")
+        _say("training on user labels...")
         cascade.fit()  # tolerant if too few labels
         rows = conn.execute(
             """
@@ -1032,23 +1110,67 @@ def predict(ctx: click.Context, threshold: float | None, dry_run: bool) -> None:
         ).fetchall()
         ids = [int(r["id"]) for r in rows]
         if not ids:
-            click.echo("nothing to predict — every expense already has a user label")
+            if as_json:
+                click.echo(json.dumps({"predicted": 0, "persisted": 0, "stages": {},
+                                       "note": "nothing to predict"}))
+            else:
+                click.echo("nothing to predict — every expense already has a user label")
             return
-        click.echo(f"computing embeddings + predicting for {len(ids)} expense(s)...")
-        preds = cascade.predict_batch(ids)
-        from collections import Counter
+        _say(f"computing embeddings + predicting for {len(ids)} expense(s)...")
+        # Progress bar on the cascade pass -- the slow step. Suppressed
+        # under --json so it never lands on stdout.
+        if as_json:
+            preds = cascade.predict_batch(ids)
+        else:
+            with click.progressbar(length=len(ids), label="predicting") as bar:
+                last = {"n": 0}
+
+                def _cb(done: int, total: int) -> None:
+                    bar.update(done - last["n"])
+                    last["n"] = done
+
+                preds = cascade.predict_batch(ids, progress_callback=_cb)
 
         counts = Counter(p.stage for p in preds)
-        click.echo(f"predicted {len(preds)} records: " + ", ".join(f"{k}={v}" for k, v in counts.items()))
+        if not dry_run:
+            n_persisted = 0
+            for p in preds:
+                if p.category_id is not None:
+                    add_label(conn, p.expense_id, p.category_id, "model",
+                              confidence=p.confidence)
+                    n_persisted += 1
+        else:
+            n_persisted = 0
+
+        if as_json:
+            payload = {
+                "predicted": len(preds),
+                "persisted": n_persisted,
+                "dry_run": dry_run,
+                "stages": dict(counts),
+            }
+            if dry_run:
+                payload["predictions"] = [
+                    {"expense_id": p.expense_id, "category_id": p.category_id,
+                     "stage": p.stage, "confidence": round(p.confidence, 4)}
+                    for p in preds
+                ]
+            click.echo(json.dumps(payload))
+            return
+
+        click.echo(
+            f"predicted {len(preds)} records: "
+            + ", ".join(f"{k}={v}" for k, v in counts.items())
+        )
         if dry_run:
             for p in preds[:10]:
-                click.echo(f"  id={p.expense_id} cat={p.category_id} stage={p.stage} conf={p.confidence:.2f}")
+                click.echo(
+                    f"  id={p.expense_id} cat={p.category_id} "
+                    f"stage={p.stage} conf={p.confidence:.2f}"
+                )
+            if len(preds) > 10:
+                click.echo(f"  … and {len(preds) - 10} more (use --json for all)")
             return
-        n_persisted = 0
-        for p in preds:
-            if p.category_id is not None:
-                add_label(conn, p.expense_id, p.category_id, "model", confidence=p.confidence)
-                n_persisted += 1
         click.echo(f"persisted {n_persisted} model labels")
     finally:
         conn.close()
@@ -1062,29 +1184,98 @@ def predict(ctx: click.Context, threshold: float | None, dry_run: bool) -> None:
               help="Also run cumulative + leave-one-out stage ablation.")
 @click.option("--no-zeroshot", is_flag=True,
               help="Skip the slow zero-shot NLI stage during evaluation.")
+@click.option("--json", "as_json", is_flag=True,
+              help="Emit a JSON object with the metrics on stdout (implies --no-ablation "
+                   "unless --ablation is given).")
 @click.pass_context
 def evaluate(
-    ctx: click.Context, folds: int, seed: int, do_ablation: bool, no_zeroshot: bool
+    ctx: click.Context, folds: int, seed: int, do_ablation: bool, no_zeroshot: bool,
+    as_json: bool,
 ) -> None:
     """Cross-validate the cascade on user labels and report quality metrics."""
     cfg: Config = ctx.obj[_CTX_KEY]["config"]
     if no_zeroshot:
         cfg.zeroshot.enabled = False
     conn = _connect(cfg)
+
+    def _say(msg: str) -> None:
+        click.echo(msg, err=as_json)
     try:
         from expensa.ml.evaluation import ablation, cross_validate
         from expensa.storage.categories import list_categories
 
-        click.echo(f"loading embedding model `{cfg.embedding_model}`...")
+        _say(f"loading embedding model `{cfg.embedding_model}`...")
         emb = _embedder(cfg)
-        click.echo(f"cross-validating ({folds} folds)...")
-        result = cross_validate(conn, cfg, emb, n_folds=folds, seed=seed)
+        _say(f"cross-validating ({folds} folds)...")
+        if as_json:
+            result = cross_validate(conn, cfg, emb, n_folds=folds, seed=seed)
+        else:
+            with click.progressbar(length=folds, label="folds") as bar:
+                last = {"n": 0}
+
+                def _fold_cb(done: int, total: int) -> None:
+                    bar.update(done - last["n"])
+                    last["n"] = done
+
+                result = cross_validate(
+                    conn, cfg, emb, n_folds=folds, seed=seed,
+                    progress_callback=_fold_cb,
+                )
 
         if result.n_folds == 0:
-            click.echo(result.notes or "not enough labeled data to evaluate")
+            if as_json:
+                click.echo(json.dumps({
+                    "n_folds": 0,
+                    "note": result.notes or "not enough labeled data to evaluate",
+                }))
+            else:
+                click.echo(result.notes or "not enough labeled data to evaluate")
             return
 
         id_to_name = {c.id: c.name for c in list_categories(conn)}
+
+        if as_json:
+            payload = {
+                "n_labeled": result.n_labeled,
+                "n_folds": result.n_folds,
+                "dropped_singletons": result.dropped_singletons,
+                "accuracy": round(result.accuracy, 6),
+                "accuracy_covered": round(result.accuracy_covered, 6),
+                "coverage": round(result.coverage, 6),
+                "macro_f1": round(result.macro_f1, 6),
+                "weighted_f1": round(result.weighted_f1, 6),
+                "stage_breakdown": [
+                    {"stage": s.stage, "fired": s.n_predicted,
+                     "correct": s.n_correct, "accuracy": round(s.accuracy, 6)}
+                    for s in result.stage_breakdown
+                ],
+                "per_category": [
+                    {"category_id": pc.category_id,
+                     "name": id_to_name.get(pc.category_id, str(pc.category_id)),
+                     "precision": round(pc.precision, 6),
+                     "recall": round(pc.recall, 6),
+                     "f1": round(pc.f1, 6),
+                     "support": pc.support}
+                    for pc in result.per_category
+                ],
+            }
+            # Ablation is opt-in under --json (it roughly doubles runtime).
+            if do_ablation and ctx.get_parameter_source("do_ablation") == click.core.ParameterSource.COMMANDLINE:
+                abl = ablation(conn, cfg, emb, n_folds=folds, seed=seed)
+                payload["ablation"] = {
+                    "full_accuracy": round(abl.full_accuracy, 6),
+                    "cumulative": [
+                        {"stages": label, "accuracy": round(acc, 6), "macro_f1": round(f1, 6)}
+                        for label, acc, f1 in abl.cumulative
+                    ],
+                    "leave_one_out": [
+                        {"dropped": stage, "accuracy": round(acc, 6),
+                         "delta": round(delta, 6)}
+                        for stage, acc, _f1, delta in abl.leave_one_out
+                    ],
+                }
+            click.echo(json.dumps(payload))
+            return
         click.echo(
             f"\nlabels evaluated: {result.n_labeled} · folds: {result.n_folds}"
         )
@@ -1196,10 +1387,30 @@ def vendor_lookup(ctx: click.Context, counterparty: str | None, all_vendors: boo
                     ORDER BY e.counterparty_normalized
                     """
                 ).fetchall()
+                # Total distinct counterparties, so we can report how many
+                # were skipped because they were already cached.
+                total_distinct = conn.execute(
+                    """
+                    SELECT COUNT(*) AS n FROM (
+                        SELECT DISTINCT counterparty_normalized FROM expenses
+                        WHERE counterparty_normalized IS NOT NULL
+                          AND counterparty_normalized <> ''
+                    )
+                    """
+                ).fetchone()["n"]
+                n_to_lookup = len(rows)
+                n_cached = int(total_distinct) - n_to_lookup
                 if not rows:
-                    click.echo("nothing to look up — every counterparty is already cached.")
+                    click.echo(
+                        f"nothing to look up — all {total_distinct} counterparties "
+                        "are already cached."
+                    )
                     return
-                click.echo(f"looking up {len(rows)} vendor(s)...")
+                click.echo(
+                    f"looking up {n_to_lookup} new vendor(s) "
+                    f"({n_cached} already cached)..."
+                )
+                n_done = 0
                 for r in rows:
                     cp = r["counterparty_normalized"]
                     try:
@@ -1207,7 +1418,11 @@ def vendor_lookup(ctx: click.Context, counterparty: str | None, all_vendors: boo
                     except VendorLookupDisabled as e:
                         click.echo(str(e), err=True)
                         ctx.exit(2)
+                    n_done += 1
                     click.echo(f"  {cp:<40} -> {info.industry}")
+                click.echo(
+                    f"looked up {n_done} new, skipped {n_cached} already-cached."
+                )
             else:
                 cp = normalize_counterparty(counterparty)
                 info = lookup_vendor(conn, cp, cfg.vendor_lookup)
@@ -1238,12 +1453,14 @@ def vendor() -> None:
               help="Cap on rows shown. Use 0 for unlimited.")
 @click.option("--snippet-chars", type=int, default=80,
               help="Snippet preview width per row. 0 hides snippets entirely.")
+@click.option("--json", "as_json", is_flag=True, help="Emit a JSON array on stdout.")
 @click.pass_context
 def vendor_list(
     ctx: click.Context,
     industry_filter: str | None,
     limit: int,
     snippet_chars: int,
+    as_json: bool,
 ) -> None:
     """Show every cached vendor with its industry tag and a snippet preview.
 
@@ -1262,6 +1479,23 @@ def vendor_list(
             ORDER BY fetched_at DESC, counterparty_normalized ASC
             """
         ).fetchall()
+        if as_json:
+            needle = (industry_filter or "").lower()
+            items = []
+            for r in rows:
+                ind = normalize_industry(r["industry"]) or ""
+                if needle and needle not in ind.lower():
+                    continue
+                items.append({
+                    "counterparty_normalized": r["counterparty_normalized"],
+                    "industry": ind,
+                    "summary": r["summary"] or "",
+                    "fetched_at": str(r["fetched_at"] or ""),
+                })
+            if limit > 0:
+                items = items[:limit]
+            click.echo(json.dumps(items))
+            return
         if not rows:
             click.echo(
                 "(vendor cache is empty — run `expensa vendor-lookup --all` "
@@ -1414,33 +1648,106 @@ def vendor_clear(
 @cli.command()
 @click.option("--format", "fmt", type=click.Choice(["csv", "parquet"]), default="csv")
 @click.option("--out", "out", type=click.Path(path_type=Path), default=None)
+@click.option("--labels-only", is_flag=True,
+              help="Export just (expense_id, category_id, category, source, "
+                   "confidence) for the latest label per expense — a clean "
+                   "hand-off to another app.")
 @click.pass_context
-def export(ctx: click.Context, fmt: str, out: Path | None) -> None:
+def export(ctx: click.Context, fmt: str, out: Path | None, labels_only: bool) -> None:
     """Export the expenses table (with latest label) to CSV or Parquet."""
     import pandas as pd
 
     cfg: Config = ctx.obj[_CTX_KEY]["config"]
     conn = _connect(cfg)
     try:
-        sql = """
-            SELECT e.*, c.name AS category, ll.label_source, ll.confidence,
-                   n.text AS note
-            FROM expenses e
-            LEFT JOIN latest_label ll ON ll.expense_id = e.id
-            LEFT JOIN categories c ON c.id = ll.category_id
-            LEFT JOIN notes n ON n.expense_id = e.id
-            ORDER BY e.buchungsdatum, e.id
-        """
+        if labels_only:
+            sql = """
+                SELECT ll.expense_id, ll.category_id, c.name AS category,
+                       ll.label_source AS source, ll.confidence
+                FROM latest_label ll
+                LEFT JOIN categories c ON c.id = ll.category_id
+                ORDER BY ll.expense_id
+            """
+            stem = "labels"
+        else:
+            sql = """
+                SELECT e.*, c.name AS category, ll.label_source, ll.confidence,
+                       n.text AS note
+                FROM expenses e
+                LEFT JOIN latest_label ll ON ll.expense_id = e.id
+                LEFT JOIN categories c ON c.id = ll.category_id
+                LEFT JOIN notes n ON n.expense_id = e.id
+                ORDER BY e.buchungsdatum, e.id
+            """
+            stem = "expenses"
         df = pd.read_sql_query(sql, conn)
-        out = out or (cfg.data_dir / "exports" / f"expenses.{fmt}")
+        out = out or (cfg.data_dir / "exports" / f"{stem}.{fmt}")
         out.parent.mkdir(parents=True, exist_ok=True)
         if fmt == "csv":
             df.to_csv(out, index=False, encoding="utf-8-sig")
         else:
-            df.to_parquet(out, index=False)
+            try:
+                df.to_parquet(out, index=False)
+            except ImportError as e:
+                raise click.ClickException(
+                    "parquet export needs a parquet engine. Install one with "
+                    "`pip install pyarrow` (or use --format csv)."
+                ) from e
         click.echo(f"wrote {out}  ({len(df)} rows)")
     finally:
         conn.close()
+
+
+@cli.command()
+@click.argument("backup", type=click.Path(exists=True, path_type=Path))
+@click.option("--keep-safety/--no-safety", default=True,
+              help="Keep a timestamped pre-restore copy of the current DB.")
+@click.option("--yes", "yes", is_flag=True, help="Skip the confirmation prompt.")
+@click.pass_context
+def restore(ctx: click.Context, backup: Path, keep_safety: bool, yes: bool) -> None:
+    """Restore the active account's database from a BACKUP file.
+
+    Mirrors the Settings → Database restore flow. The backup is validated
+    first; an encrypted backup needs its password via ``EXPENSA_DB_PASSWORD``
+    or an interactive prompt. By default a timestamped ``*.pre-restore.*``
+    safety copy of the current DB is kept so you can roll back.
+    """
+    from expensa.storage import crypto
+    from expensa.storage.backup import restore_database, validate_backup
+
+    cfg: Config = ctx.obj[_CTX_KEY]["config"]
+
+    password = None
+    if crypto.looks_encrypted(backup):
+        password = os.environ.get("EXPENSA_DB_PASSWORD")
+        if not password:
+            if sys.stdin.isatty():
+                password = click.prompt("Backup password", hide_input=True)
+            else:
+                raise click.ClickException(
+                    "backup is encrypted: set EXPENSA_DB_PASSWORD or run "
+                    "interactively to be prompted."
+                )
+
+    result = validate_backup(backup, password=password)
+    if not result.ok:
+        raise click.ClickException(
+            "backup is not valid: " + "; ".join(result.errors or ["unknown"])
+        )
+
+    if not yes:
+        click.echo(f"About to overwrite {cfg.db_path}")
+        click.echo(f"  with backup: {backup}")
+        if keep_safety and cfg.db_path.exists():
+            click.echo("  (a timestamped pre-restore safety copy will be kept)")
+        click.confirm("Proceed with restore?", abort=True)
+
+    report = restore_database(
+        cfg.db_path, backup, keep_safety=keep_safety, password=password,
+    )
+    click.echo(f"restored {cfg.db_path} from {backup}")
+    if report.safety_copy:
+        click.echo(f"  pre-restore safety copy: {report.safety_copy}")
 
 
 # --- ui ----------------------------------------------------------------------

@@ -78,40 +78,51 @@ measure held-out accuracy before/after a labelling batch so the UI can report
 
 ---
 
-## 3. UI / UX + CLI backlog (prioritised)
+## 3. UI / UX + CLI backlog
 
-### High
-- **Empty-state onboarding.** A fresh DB shows blank metrics and charts with
-  no next step. Add a dashboard banner pointing to the Data tab / `expense
-  ingest` when `expenses` is empty.
-- **Surface confidence on review cards.** The review tab uses hidden 0.40 /
-  0.70 thresholds but never shows the score; add a colour-coded confidence
-  badge (and the producing stage) per card so users build trust intuition.
-- **Bulk labelling.** Both UI and CLI are one-record-at-a-time. Add
-  multi-select + "assign category to all selected" in the Data/Review tabs and
-  a "label all like this vendor" action.
-- **Ingest error guidance.** Wrong encoding / missing `Betrag` column should
-  produce an actionable message (and a column-preview confirm step in the UI)
-  rather than a terse parse error.
+Most of this section shipped (see ✅). Three items were intentionally
+deferred by the maintainer and remain open at the bottom.
 
-### Medium
-- **`--json` output** for `predict`, `eval`, `status`, `account list`,
-  `vendor list` to make the CLI scriptable; document exit codes (0 success, 1
-  expected error, 2 usage).
-- **`--dry-run` / impact preview parity** for destructive ops (`categories
-  remove`, `account remove`) matching the existing `reset --dry-run`.
-- **Progress bars** for long CLI ops (`label`, `eval`, `predict`,
-  embedding warm-up) via `click.progressbar` — the cascade already accepts a
-  `progress_callback`.
-- **Clickable "To review" metric** that deep-links the Data tab filtered to
-  unlabelled + low-confidence rows.
+### ✅ Shipped
+- **Empty-state onboarding** (`ui/dashboard.py`) — a fresh DB now shows a
+  three-step quick-start (import → categories → label/review) noting whether
+  default categories are already seeded, plus a low-data nudge once expenses
+  exist but nothing is labelled yet.
+- **Ingest error guidance** (`ui/data_tab.py`) — a failing file no longer
+  dumps a traceback or aborts the batch; `_ingest_error_hint` maps the common
+  failures (missing column, bad encoding, bad amount/date) to an actionable
+  remedy and the import continues with the other files.
+- **Model-download feedback** (`ui/settings.py`) — the download status panel
+  spells out that first-download has no byte-progress and maps failures
+  (network / disk / gated-model) to concrete remedies.
+- **`--json` output** for `status`, `account list`, `predict`, `eval`,
+  `vendor list`; chatter is routed to stderr so stdout stays pipe-clean. CLI
+  module docstring now documents the exit-code convention (0/1/2/3).
+- **`--dry-run` / impact preview** for `account remove` (shows the on-disk DB
+  size + expense count that stays behind); `categories remove` already had
+  `--force` + confirm.
+- **Progress bars** for `predict` and `eval` via `click.progressbar`
+  (suppressed under `--json`).
+- **Deep-link from "To review"** — a *Show in Data ↗* button in the header
+  pins the review-queue rows in the Data tab (`review_tab.review_queue_ids`).
+  Streamlit can't switch `st.tabs` programmatically, so it pins + points
+  rather than auto-jumping.
+- **`vendor-lookup --all` skip count** — reports "looked up N new, skipped M
+  already-cached".
+- **`expensa restore <backup>`** CLI mirroring the Settings restore flow
+  (validates first, handles encrypted backups via `EXPENSA_DB_PASSWORD` /
+  prompt, keeps a pre-restore safety copy).
+- **`export --labels-only`** for a clean `(expense_id, category_id, category,
+  source, confidence)` hand-off; parquet export now raises a friendly hint
+  when no engine is installed.
+- **Confidence on review cards** — already present (the review tab shows
+  `🤖 <cat> — NN% via <stage>` plus a runner-up); left as-is.
 
-### Low
-- Keyboard shortcuts in the review tab (Enter = confirm, ← / → = prev / next).
-- Settings search/filter; the page is dense.
-- `expense restore <backup>` CLI to match the Settings restore flow.
-- `export --labels-only` for a clean `(expense_id, category_id, confidence)`
-  hand-off.
+### Deferred (out of scope for this pass)
+- **Bulk labelling** — multi-select + "assign category to all selected" /
+  "label all like this vendor" in the Data/Review tabs.
+- **Keyboard shortcuts** beyond what the review tab already has.
+- **Settings search/filter** for the dense settings page.
 
 ---
 

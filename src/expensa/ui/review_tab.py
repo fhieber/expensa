@@ -79,6 +79,34 @@ def queue_size(conn: sqlite3.Connection) -> int:
     return sum(_queue_counts(conn))
 
 
+def review_queue_ids(conn: sqlite3.Connection) -> list[int]:
+    """Every expense in the review queue: no user label yet, and either no
+    model prediction at all or a model prediction below CONF_MED.
+
+    This is exactly the union of the three queue buckets
+    (``needs_label`` + ``low_conf`` + ``confirm``) surfaced by
+    :func:`_queue_counts`. Used by the dashboard "To review" deep-link to
+    pin these rows in the Data tab.
+    """
+    rows = conn.execute(
+        """
+        SELECT id FROM expenses
+        WHERE id NOT IN (SELECT DISTINCT expense_id FROM labels WHERE source = 'user')
+          AND (
+            id NOT IN (SELECT DISTINCT expense_id FROM labels WHERE source = 'model')
+            OR id IN (
+              SELECT expense_id FROM latest_label
+              WHERE label_source = 'model'
+                AND (confidence IS NULL OR confidence < ?)
+            )
+          )
+        ORDER BY buchungsdatum DESC, id DESC
+        """,
+        (_CONF_MED,),
+    ).fetchall()
+    return [int(r["id"]) for r in rows]
+
+
 def _queue_counts(conn: sqlite3.Connection) -> tuple[int, int, int]:
     """Return ``(needs_label, low_conf, confirm)`` counts.
 
