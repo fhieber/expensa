@@ -114,8 +114,12 @@ def select_uncertain(
     if not candidates:
         return []
     preds = cascade.predict_batch(candidates)
-    # Score = confidence; we want the lowest confidences.
-    preds.sort(key=lambda p: p.confidence)
+    # Most uncertain first: lowest top-1 confidence, then smallest margin
+    # to the runner-up (a 0.55-vs-0.50 call is more informative to label
+    # than a 0.55-vs-0.05 one). ``runner_up_confidence`` is populated by
+    # the classifier stage and is 0.0 elsewhere, so the margin tiebreak
+    # gracefully degrades to plain confidence ordering for other stages.
+    preds.sort(key=lambda p: (p.confidence, p.confidence - p.runner_up_confidence))
     return [p.expense_id for p in preds[:n]]
 
 

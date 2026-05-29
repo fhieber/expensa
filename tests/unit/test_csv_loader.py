@@ -69,6 +69,32 @@ def test_parse_amount_rejects_garbage() -> None:
         _parse_amount("nonsense")
 
 
+def test_parse_amount_with_currency_symbol() -> None:
+    # Some exports append (or prepend) the euro sign to the cell.
+    assert _parse_amount("12,34 €") == Decimal("12.34")
+    assert _parse_amount("€ 12,34") == Decimal("12.34")
+    assert _parse_amount("-1.234,56 €") == Decimal("-1234.56")
+
+
+def test_parse_amount_whitespace_thousands_separator() -> None:
+    # Regular, non-breaking (U+00A0) and narrow (U+202F) spaces used as
+    # thousands separators must not break parsing.
+    assert _parse_amount("1 234,56") == Decimal("1234.56")
+    assert _parse_amount("1 234,56") == Decimal("1234.56")
+    assert _parse_amount("1 234,56") == Decimal("1234.56")
+
+
+def test_parse_amount_leading_plus() -> None:
+    assert _parse_amount("+12,34") == Decimal("12.34")
+    assert _parse_amount("+1.234,56") == Decimal("1234.56")
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "€", "+"])
+def test_parse_amount_blank_is_error(blank: str) -> None:
+    with pytest.raises(CsvParseError):
+        _parse_amount(blank)
+
+
 @pytest.mark.parametrize(
     "raw,expected",
     [

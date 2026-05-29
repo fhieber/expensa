@@ -70,6 +70,15 @@ class CategorySimilarityConfig(BaseModel):
     enabled: bool = True
     min_top1: float = 0.25        # require top-1 cosine >= this
     min_margin: float = 0.03      # require top1 - top2 >= this
+    # Lexical-overlap bonus added on top of the cosine score, per shared
+    # >=4-char token between the expense text and a category's name +
+    # description. ``lexical_weight`` is the per-token bonus and
+    # ``lexical_max`` caps the total so the semantic (cosine) signal still
+    # dominates. Tunable so users with terse, keyword-y bank text can lean
+    # harder on lexical hits. Defaults reproduce the historic hard-coded
+    # 0.10 / 0.30 behaviour.
+    lexical_weight: float = 0.10
+    lexical_max: float = 0.30
     # When True, append the vendor_cache.industry tag (e.g. "supermarket"
     # for REWE) to the expense text before lexical scoring. Helps when
     # the industry tag matches a token in the target category's description.

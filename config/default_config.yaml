@@ -45,6 +45,8 @@ category_similarity:
   enabled: true
   min_top1: 0.25
   min_margin: 0.03
+  lexical_weight: 0.10   # bonus per shared >=4-char token (expense vs category text)
+  lexical_max: 0.30      # cap on the total lexical bonus so cosine still dominates
   use_vendor_industry: true
 
 # --- Active learning ---
