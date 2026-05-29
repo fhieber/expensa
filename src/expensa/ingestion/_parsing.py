@@ -33,11 +33,30 @@ def detect_encoding(path: Path) -> str:
     raise CsvParseError(f"Could not decode {path} with any of {_ENCODINGS}")
 
 
+# Characters some exports sprinkle into amount cells that we strip before
+# parsing: a currency symbol and whitespace used as a thousands separator
+# (regular space, tab, non-breaking space U+00A0, thin space U+2009,
+# narrow no-break space U+202F).
+_AMOUNT_STRIP = str.maketrans("", "", " \t\xa0  €")
+
+
 def parse_german_amount(raw: str) -> Decimal:
-    """German format: '1.234,56' or '-12,34' -> Decimal."""
-    if raw is None or raw == "":
+    """German format: '1.234,56' or '-12,34' -> Decimal.
+
+    Tolerates real-world export noise around the number itself: a currency
+    symbol ('12,34 €'), whitespace thousands separators ('1 234,56',
+    including non-breaking / thin spaces) and an explicit leading plus
+    ('+12,34'). The German convention ('.' = thousands, ',' = decimal) is
+    preserved.
+    """
+    if raw is None:
         raise CsvParseError("empty amount")
-    s = raw.strip().replace(".", "").replace(",", ".")
+    s = raw.strip().translate(_AMOUNT_STRIP)
+    if s.startswith("+"):
+        s = s[1:]
+    if not s:
+        raise CsvParseError("empty amount")
+    s = s.replace(".", "").replace(",", ".")
     try:
         return Decimal(s)
     except InvalidOperation as e:

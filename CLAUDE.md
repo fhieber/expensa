@@ -63,6 +63,32 @@ See the "Proposed feature set per expense" section of `../../.claude/plans/build
 
 (Append new instructions here verbatim with date so context is preserved.)
 
+### 2026-05-29 — Robustness / ML / UI review pass
+
+A review for robustness, ML feature-set, and UI opportunities landed a
+focused first batch (all unit-tested; full suite green: 455 passed) plus a
+backlog doc at `docs/improvement-proposals.md`.
+
+Shipped:
+- Fixed a pre-existing test-isolation failure: a demo test in
+  `test_enrich_secondary.py` reassigned `clf._build_zeroshot_premise`
+  directly (never restored), leaking into and failing
+  `test_zeroshot_premise_includes_industry_and_summary` in full-suite
+  runs. Now patched via `monkeypatch.setattr`.
+- `parse_german_amount` tolerates a currency symbol, whitespace thousands
+  separators (incl. NBSP / thin space), and a leading `+`.
+- `day_of_month` is now an actual classifier feature (it was computed in
+  `basic_calendar_features` but dropped before `_NUMERIC_COLS`).
+- Category-similarity lexical bonus is configurable via
+  `category_similarity.lexical_weight` / `lexical_max` (defaults reproduce
+  the old hard-coded 0.10 / 0.30).
+- Active-learning uncertainty sampling breaks ties by runner-up margin.
+
+Top backlog items (see the doc for the full list): IBAN-based merchant
+identity feature, classifier probability calibration, sign-consistency
+guardrail, richer recurrence signals; empty-state onboarding + confidence
+badges + bulk labelling in the UI; and `--json` / `--dry-run` CLI parity.
+
 ### 2026-05-25 — Per-account database encryption (SQLCipher)
 
 Accounts can be encrypted at rest with AES-256 via SQLCipher.

@@ -62,6 +62,7 @@ _NUMERIC_COLS = (
     "year",
     "month",
     "quarter",
+    "day_of_month",
     "day_of_week",
     "is_weekend",
     "is_month_end",
@@ -262,11 +263,14 @@ class CategorizationCascade:
                 t for t in re.findall(r"[\wäöüß]+", expense_text.lower())
                 if len(t) >= 4
             }
+            per_token = self.cfg.category_similarity.lexical_weight
+            cap = self.cfg.category_similarity.lexical_max
             for cid_int, cat_tokens in cat_token_sets.items():
                 overlap = tokens & cat_tokens
-                # 0.10 per hit, capped at 0.30 so semantic always matters too.
+                # `lexical_weight` per hit, capped at `lexical_max` so the
+                # semantic (cosine) signal always still matters.
                 if overlap:
-                    bonus_per_cat[cid_int] = min(0.30, 0.10 * len(overlap))
+                    bonus_per_cat[cid_int] = min(cap, per_token * len(overlap))
 
         combined: dict[int, float] = {
             cid: embed_per_cat[cid] + bonus_per_cat.get(cid, 0.0)
