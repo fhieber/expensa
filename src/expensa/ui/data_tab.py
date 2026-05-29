@@ -281,6 +281,36 @@ def render() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _ingest_error_hint(exc: Exception) -> str:
+    """Translate a raw ingest exception into an actionable, user-facing hint.
+
+    The bank-export parser raises ``CsvParseError`` with a terse message
+    (missing column, bad amount/date, undecodable bytes); we map the common
+    shapes to a remedy so a non-technical user knows what to fix.
+    """
+    msg = str(exc)
+    low = msg.lower()
+    if "header" in low or "missing required column" in low:
+        return (
+            f"{msg}. This doesn't look like a German bank export — it must be "
+            "`;`-separated with a header row containing Buchungsdatum, "
+            "Betrag (€) and Verwendungszweck."
+        )
+    if "decode" in low or "encoding" in low or "codec" in low:
+        return (
+            f"{msg}. The file's text encoding couldn't be read — re-export it "
+            "as UTF-8 or Windows-1252 (CP1252)."
+        )
+    if "amount" in low or "betrag" in low:
+        return (
+            f"{msg}. An amount cell couldn't be parsed — amounts must use the "
+            "German format (e.g. `1.234,56`)."
+        )
+    if "date" in low or "datum" in low:
+        return f"{msg}. A date cell couldn't be parsed (expected `DD.MM.YYYY`)."
+    return f"{msg}. Make sure this is a German bank-export CSV."
+
+
 def _render_import_expander(conn) -> None:
     with st.expander("Import Data", expanded=False):
         st.caption(
@@ -320,6 +350,7 @@ def _render_import_expander(conn) -> None:
         if ingest_clicked and (files or enrich_files):
             emb = None if skip_embed else get_embedder()
             new_ids: list[int] = []
+            errors: list[str] = []
             with st.status("Importing…", expanded=True) as status:
                 progress = st.progress(0.0, text="starting…")
                 for f in files:
@@ -342,7 +373,15 @@ def _render_import_expander(conn) -> None:
                             text=f"{fname}: {phase_label} {done}/{total}",
                         )
 
-                    r = ingest_csv(conn, p, embedder=emb, progress_callback=_cb)
+                    # One bad file shouldn't abort the whole batch or dump a
+                    # raw traceback into the UI. Catch parse/format errors,
+                    # record an actionable message, and keep going.
+                    try:
+                        r = ingest_csv(conn, p, embedder=emb, progress_callback=_cb)
+                    except Exception as e:  # noqa: BLE001 — surface to the user
+                        errors.append(f"{f.name}: {_ingest_error_hint(e)}")
+                        status.write(f"⚠️ {f.name}: import failed — {e}")
+                        continue
                     new_ids.extend(r.new_ids)
                     status.write(
                         f"{f.name}: parsed={r.parsed} · new={r.inserted} · "
@@ -350,14 +389,18 @@ def _render_import_expander(conn) -> None:
                     )
                 _run_ui_enrichment(conn, enrich_files, emb, status)
                 progress.empty()
+                state = "error" if errors and not new_ids else "complete"
                 status.update(
-                    label=f"Imported {len(new_ids)} new row(s).",
-                    state="complete",
+                    label=f"Imported {len(new_ids)} new row(s)."
+                    + (f"  {len(errors)} file(s) failed." if errors else ""),
+                    state=state,
                 )
+            for err in errors:
+                st.error(err)
             if new_ids:
                 st.session_state["data_pinned_ids"] = new_ids
                 st.rerun()
-            elif files:
+            elif files and not errors:
                 st.info("Nothing new — all records were duplicates.")
 
 

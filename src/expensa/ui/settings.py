@@ -201,11 +201,40 @@ def _model_table_and_picker(
         if st.button(dl_label, key=f"model_dl_{cfg_key}", use_container_width=True):
             with st.status(f"Downloading {picked}...", expanded=True) as status:
                 role = "embedding" if cfg_key == "embedding_model" else "zeroshot"
+                status.write(
+                    "Fetching weights from Hugging Face — this can take a few "
+                    "minutes on first download and shows no byte-level progress."
+                )
                 try:
                     trigger_download(picked, role=role)
                     status.update(label=f"Downloaded {picked}", state="complete")
                 except Exception as e:
-                    status.update(label=f"Download failed: {e}", state="error")
+                    # Map the most common failures to actionable remedies so the
+                    # user isn't left with a bare stack-trace string.
+                    msg = str(e)
+                    hint = (
+                        "Check your network connection and that the model id is "
+                        "correct."
+                    )
+                    low = msg.lower()
+                    if "connect" in low or "timeout" in low or "offline" in low:
+                        hint = (
+                            "Looks like a network problem — confirm this machine "
+                            "can reach huggingface.co (proxy / firewall?)."
+                        )
+                    elif "space" in low or "disk" in low or "no space" in low:
+                        hint = (
+                            "Looks like a disk-space problem — free up space in "
+                            "the Hugging Face cache (~/.cache/huggingface)."
+                        )
+                    elif "401" in msg or "403" in msg or "token" in low or "gated" in low:
+                        hint = (
+                            "The model may be gated/private — accept its license "
+                            "on huggingface.co and set HF_TOKEN, or pick another "
+                            "model."
+                        )
+                    status.write(f"**{hint}**")
+                    status.update(label=f"Download failed: {msg}", state="error")
             st.rerun()
     with act_cols[1]:
         if st.button(

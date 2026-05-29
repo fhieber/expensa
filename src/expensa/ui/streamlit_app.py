@@ -381,6 +381,20 @@ def _render_header() -> None:
                 help="Expenses needing a user label or a mid-confidence "
                      "confirmation. See the Review tab.",
             )
+            # Deep-link: pin the review-queue rows in the Data tab so the
+            # user can inspect/bulk-edit them there. Streamlit can't switch
+            # st.tabs programmatically, so we pin + point rather than jump.
+            if n_review and st.button(
+                "Show in Data ↗", key="hdr_show_review_in_data",
+                help="Pin these rows in the Data tab for inspection.",
+            ):
+                ids = review_tab.review_queue_ids(conn)
+                if ids:
+                    st.session_state["data_pinned_ids"] = ids
+                    st.toast(
+                        f"Pinned {len(ids)} to-review row(s) in the Data tab.",
+                        icon="📌",
+                    )
         with c5:
             st.metric("Categories", n_cat)
         with c6:

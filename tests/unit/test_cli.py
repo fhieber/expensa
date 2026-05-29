@@ -734,3 +734,132 @@ def test_clean_whitespace_cli_reports_changes(
     r_again = runner.invoke(cli, ["clean-whitespace"], env=_runner_env(tmp_path))
     assert r_again.exit_code == 0, r_again.output
     assert "updated 0 row" in r_again.output
+
+
+# ── UI/CLI backlog: --json output, dry-run parity, restore, labels-only ──
+
+
+def test_status_json(tmp_path: Path, fixtures_dir: Path) -> None:
+    import json
+
+    runner = CliRunner()
+    runner.invoke(cli, ["init", "Personal"], env=_runner_env(tmp_path))
+    runner.invoke(
+        cli, ["ingest", "--no-embed", str(fixtures_dir / "sample_de.csv")],
+        env=_runner_env(tmp_path),
+    )
+    r = runner.invoke(cli, ["status", "--json"], env=_runner_env(tmp_path))
+    assert r.exit_code == 0, r.output
+    payload = json.loads(r.output)
+    assert payload["expenses"] == 50
+    assert "categories" in payload and "data_dir" in payload
+
+
+def test_account_list_json(tmp_path: Path) -> None:
+    import json
+
+    runner = CliRunner()
+    runner.invoke(cli, ["init", "Personal"], env=_runner_env(tmp_path))
+    r = runner.invoke(cli, ["account", "list", "--json"], env=_runner_env(tmp_path))
+    assert r.exit_code == 0, r.output
+    arr = json.loads(r.output)
+    assert isinstance(arr, list) and len(arr) == 1
+    assert arr[0]["active"] is True
+    assert arr[0]["name"] == "Personal"
+
+
+def test_predict_json(tmp_path: Path, fixtures_dir: Path) -> None:
+    import json
+    import sqlite3
+
+    runner = CliRunner()
+    runner.invoke(cli, ["init", "Personal"], env=_runner_env(tmp_path))
+    runner.invoke(
+        cli, ["ingest", "--no-embed", str(fixtures_dir / "sample_de.csv")],
+        env=_runner_env(tmp_path),
+    )
+    conn = sqlite3.connect(str(_db(tmp_path)))
+    conn.execute("INSERT INTO labels(expense_id, category_id, source) VALUES (1, 1, 'user')")
+    conn.execute("INSERT INTO labels(expense_id, category_id, source) VALUES (2, 1, 'user')")
+    conn.commit()
+    conn.close()
+    with patch("expensa.cli._embedder", return_value=HashEmbedder(dim=64)):
+        r = runner.invoke(cli, ["predict", "--json", "--dry-run"], env=_runner_env(tmp_path))
+    assert r.exit_code == 0, r.output
+    # Progress chatter is routed to stderr; the JSON payload is the final
+    # stdout line. (CliRunner folds both streams into .output, so parse the
+    # last non-empty line and separately confirm chatter went to stderr.)
+    last_line = [ln for ln in r.output.splitlines() if ln.strip()][-1]
+    payload = json.loads(last_line)
+    assert payload["dry_run"] is True
+    assert "stages" in payload and "predictions" in payload
+    assert payload["persisted"] == 0
+    assert "loading embedding model" in r.stderr
+
+
+def test_account_remove_dry_run_keeps_account(tmp_path: Path) -> None:
+    runner = CliRunner()
+    runner.invoke(cli, ["init", "Personal"], env=_runner_env(tmp_path))
+    r = runner.invoke(
+        cli, ["account", "remove", "Personal", "--dry-run"], env=_runner_env(tmp_path),
+    )
+    assert r.exit_code == 0, r.output
+    assert "would remove" in r.output
+    assert "dry run" in r.output
+    # Account is still registered.
+    r2 = runner.invoke(cli, ["account", "list"], env=_runner_env(tmp_path))
+    assert "personal" in r2.output
+
+
+def test_export_labels_only(tmp_path: Path, fixtures_dir: Path) -> None:
+    import sqlite3
+
+    runner = CliRunner()
+    runner.invoke(cli, ["init", "Personal"], env=_runner_env(tmp_path))
+    runner.invoke(
+        cli, ["ingest", "--no-embed", str(fixtures_dir / "sample_de.csv")],
+        env=_runner_env(tmp_path),
+    )
+    conn = sqlite3.connect(str(_db(tmp_path)))
+    conn.execute("INSERT INTO labels(expense_id, category_id, source) VALUES (1, 1, 'user')")
+    conn.commit()
+    conn.close()
+    out = tmp_path / "labels.csv"
+    r = runner.invoke(
+        cli, ["export", "--labels-only", "--out", str(out)], env=_runner_env(tmp_path),
+    )
+    assert r.exit_code == 0, r.output
+    assert out.exists()
+    text = out.read_text(encoding="utf-8-sig")
+    header = text.splitlines()[0]
+    assert "expense_id" in header and "category_id" in header
+    # labels-only must NOT carry full expense columns like buchungsdatum.
+    assert "buchungsdatum" not in header
+
+
+def test_restore_roundtrip(tmp_path: Path, fixtures_dir: Path) -> None:
+    import sqlite3
+
+    runner = CliRunner()
+    runner.invoke(cli, ["init", "Personal"], env=_runner_env(tmp_path))
+    runner.invoke(
+        cli, ["ingest", "--no-embed", str(fixtures_dir / "sample_de.csv")],
+        env=_runner_env(tmp_path),
+    )
+    # Make a backup copy of the populated DB, then wipe expenses and restore.
+    db = _db(tmp_path)
+    backup = tmp_path / "backup.sqlite"
+    import shutil
+    shutil.copy2(db, backup)
+    conn = sqlite3.connect(str(db))
+    conn.execute("DELETE FROM expenses")
+    conn.commit()
+    conn.close()
+    r = runner.invoke(
+        cli, ["restore", str(backup), "--yes", "--no-safety"], env=_runner_env(tmp_path),
+    )
+    assert r.exit_code == 0, r.output
+    assert "restored" in r.output
+    # Expenses are back.
+    r2 = runner.invoke(cli, ["status"], env=_runner_env(tmp_path))
+    assert "expenses:     50" in r2.output
