@@ -15,7 +15,18 @@ import numpy as np
 import pandas as pd
 
 from expensa.features.embeddings import Embedder, load_embeddings, store_embeddings
-from expensa.features.numeric import log_abs_amount
+from expensa.features.numeric import (
+    UMSATZTYP_BUCKETS,
+    amount_ends_99,
+    cyclical,
+    digit_ratio,
+    has_cents,
+    is_small_verification,
+    log_abs_amount,
+    text_length,
+    token_count,
+    umsatztyp_bucket,
+)
 from expensa.features.temporal import (
     basic_calendar_features,
     compute_temporal_features_bulk,
@@ -26,6 +37,7 @@ _BASE_COLUMNS = [
     "buchungsdatum",
     "betrag_cents",
     "iban",
+    "glaeubiger_id",
     "counterparty",
     "counterparty_normalized",
     "verwendungszweck_normalized",
@@ -110,6 +122,15 @@ def add_temporal_recurrence(conn: sqlite3.Connection, df: pd.DataFrame) -> pd.Da
     df["iban_count_before"] = [
         int(feats.get(eid, {}).get("iban_count_before", 0)) for eid in df.index
     ]
+    df["glaeubiger_count_before"] = [
+        int(feats.get(eid, {}).get("glaeubiger_count_before", 0)) for eid in df.index
+    ]
+    df["is_recurring_stable_key"] = [
+        int(feats.get(eid, {}).get("is_recurring_stable_key", 0)) for eid in df.index
+    ]
+    df["amount_zscore_global"] = [
+        feats.get(eid, {}).get("amount_zscore_global") for eid in df.index
+    ]
     return df
 
 
@@ -120,6 +141,58 @@ def add_log_amount(df: pd.DataFrame) -> pd.DataFrame:
     df["log_abs_amount"] = df["betrag_cents"].apply(
         lambda c: log_abs_amount(Decimal(c) / Decimal(100))
     )
+    return df
+
+
+def add_amount_pattern_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Cheap integer-cents amount-shape flags (item 7)."""
+    if df.empty:
+        return df
+    df = df.copy()
+    cents = df["betrag_cents"].astype("int64")
+    df["has_cents"] = cents.apply(has_cents)
+    df["is_small_verification"] = cents.apply(is_small_verification)
+    df["amount_ends_99"] = cents.apply(amount_ends_99)
+    return df
+
+
+def add_umsatztyp_features(df: pd.DataFrame) -> pd.DataFrame:
+    """One-hot the folded umsatztyp bucket into a stable set of columns
+    (item 4). ``umsatztyp_<bucket>`` is 1 for the matching bucket, 0 else."""
+    if df.empty:
+        return df
+    df = df.copy()
+    buckets = df["umsatztyp"].apply(umsatztyp_bucket)
+    for b in UMSATZTYP_BUCKETS:
+        df[f"umsatztyp_{b}"] = (buckets == b).astype("int64")
+    return df
+
+
+def add_text_shape_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Structural features over the normalised purpose text (item 8)."""
+    if df.empty:
+        return df
+    df = df.copy()
+    vz = df["verwendungszweck_normalized"]
+    df["vz_length"] = vz.apply(text_length)
+    df["vz_token_count"] = vz.apply(token_count)
+    df["vz_digit_ratio"] = vz.apply(digit_ratio)
+    return df
+
+
+def add_cyclical_calendar_features(df: pd.DataFrame) -> pd.DataFrame:
+    """(sin, cos) encodings of month / day-of-week / day-of-month so a
+    linear model sees the true circular distance (item 2). Requires the
+    raw calendar columns from :func:`add_calendar_features`."""
+    if df.empty:
+        return df
+    df = df.copy()
+    for col, period in (("month", 12.0), ("day_of_week", 7.0), ("day_of_month", 31.0)):
+        if col not in df.columns:
+            continue
+        pairs = df[col].apply(lambda v, p=period: cyclical(float(v), p))
+        df[f"{col}_sin"] = [s for s, _ in pairs]
+        df[f"{col}_cos"] = [c for _, c in pairs]
     return df
 
 
@@ -159,8 +232,12 @@ def build_full_features(
     (useful for cheap reports / visualizations)."""
     df = base_dataframe(conn, expense_ids)
     df = add_calendar_features(df)
+    df = add_cyclical_calendar_features(df)
     df = add_temporal_recurrence(conn, df)
     df = add_log_amount(df)
+    df = add_amount_pattern_features(df)
+    df = add_umsatztyp_features(df)
+    df = add_text_shape_features(df)
     if embedder is None:
         return df, None
     df, matrix = attach_embeddings(conn, embedder, df)

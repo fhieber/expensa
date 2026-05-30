@@ -63,6 +63,40 @@ See the "Proposed feature set per expense" section of `../../.claude/plans/build
 
 (Append new instructions here verbatim with date so context is preserved.)
 
+### 2026-05-30 — Feature-engineering batch
+
+Added a batch of new computed features (all unit-tested; full unit suite
+green: 405 passed). Lands on top of the merged ML/UI/dashboard work.
+
+- **Restored `week`** to `_NUMERIC_COLS` — it was computed by
+  `basic_calendar_features` but dropped before the model (same bug class
+  as the earlier `day_of_month` fix).
+- **Cyclical calendar encodings** — `month`/`day_of_week`/`day_of_month`
+  now also enter as `(sin, cos)` pairs so linear models see true circular
+  distance. Raw integers stay for trees.
+- **`umsatztyp` one-hot** — the German transaction-type field (previously
+  stored/displayed but never modelled) is folded to a fixed vocabulary
+  (`umsatztyp_bucket`, `UMSATZTYP_BUCKETS`) and one-hot encoded. Strong
+  signal: Dauerauftrag→rent/subs, Gehalt→income, Bargeld→cash.
+- **Gläubiger-ID (SEPA creditor id) identity** — added as a stage-1
+  `vendor_exact_match` fallback (tried *before* IBAN) via
+  `glaeubiger_label_distribution`, plus a leak-free
+  `glaeubiger_count_before` frequency feature and an
+  `is_recurring_stable_key` recurrence flag keyed on creditor-id/IBAN
+  (catches subscriptions whose display name drifts). Config:
+  `vendor_exact_match.use_glaeubiger`.
+- **Global amount z-score** (`amount_zscore_global`) — backstop for
+  `amount_zscore_within_cp`, which is NULL until a vendor has ≥2 prior
+  charges; the global z exists from the 3rd row. Leak-free (prior rows
+  only).
+- **Amount-pattern flags** — `has_cents`, `is_small_verification`
+  (≈€0–1 card-probe), `amount_ends_99` (retail pricing).
+- **Text-shape features** — `vz_length`, `vz_token_count`,
+  `vz_digit_ratio` over the normalised purpose text.
+
+The classifier numeric block grew 23 → 48 columns. All new label-keyed
+helpers honour the `restrict_ids` CV-leak guard.
+
 ### 2026-05-29 — Robustness / ML / UI review pass
 
 A review for robustness, ML feature-set, and UI opportunities landed a

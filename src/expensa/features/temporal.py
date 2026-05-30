@@ -39,7 +39,27 @@ def basic_calendar_features(d: date) -> dict[str, int]:
 
 
 _BULK_FEATURES_SQL = """
-WITH same_cp AS (
+WITH global_amt AS (
+    -- Running mean / mean-of-squares / count of ABS(betrag_cents) over all
+    -- STRICTLY PRIOR rows (any vendor), ordered chronologically. Gives a
+    -- global amount z-score that exists from the 3rd row onward -- a
+    -- backstop for `amount_zscore_within_cp`, which is NULL until a vendor
+    -- has >=2 prior charges (so first-time / rare vendors have no signal).
+    -- Leak-free: only prior rows feed each row's statistics.
+    SELECT
+        e.id,
+        ABS(e.betrag_cents) AS g_abs,
+        AVG(ABS(e.betrag_cents)) OVER w_g AS g_mean,
+        AVG(CAST(ABS(e.betrag_cents) AS REAL) * ABS(e.betrag_cents))
+            OVER w_g AS g_msq,
+        COUNT(*) OVER w_g AS g_n
+    FROM expenses e
+    WINDOW w_g AS (
+        ORDER BY e.buchungsdatum, e.id
+        ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+    )
+),
+same_cp AS (
     -- Per row, capture:
     --   * the most recent prior buchungsdatum to the same vendor
     --     (for days_since_prev_same_cp)
@@ -138,6 +158,53 @@ iban_counts AS (
         AND p.buchungsdatum < e.buchungsdatum
     WHERE e.iban IS NOT NULL AND e.iban <> ''
     GROUP BY e.id
+),
+-- glaeubiger_count_before: number of prior rows (by date) sharing this
+-- row's SEPA creditor id (Gläubiger-ID). The creditor id is a stable,
+-- globally-unique merchant identifier that survives BOTH name and IBAN
+-- variation, so it catches recurring direct-debit merchants the other
+-- two keys miss. Leak-free (frequency only).
+glaeubiger_counts AS (
+    SELECT
+        e.id,
+        COUNT(*) AS n_gid_before
+    FROM expenses e
+    JOIN expenses p
+        ON p.glaeubiger_id = e.glaeubiger_id
+        AND p.id <> e.id
+        AND p.buchungsdatum < e.buchungsdatum
+    WHERE e.glaeubiger_id IS NOT NULL AND e.glaeubiger_id <> ''
+    GROUP BY e.id
+),
+-- recurring_stable_key: like `recurring` above but partitioned on the
+-- most STABLE merchant key available -- the Gläubiger-ID when present,
+-- else the IBAN -- instead of the (drifting) counterparty name. Catches
+-- subscriptions whose display name changes between exports but whose
+-- creditor id / IBAN is constant. ``stable_key`` is built per row and a
+-- self-join matches rows sharing it.
+stable_keyed AS (
+    SELECT e.id,
+           CASE WHEN e.glaeubiger_id IS NOT NULL AND e.glaeubiger_id <> ''
+                THEN 'g:' || e.glaeubiger_id
+                WHEN e.iban IS NOT NULL AND e.iban <> ''
+                THEN 'i:' || e.iban
+                ELSE NULL END AS sk,
+           e.buchungsdatum AS bd,
+           ABS(e.betrag_cents) AS abs_cents
+    FROM expenses e
+),
+recurring_stable AS (
+    SELECT
+        e.id,
+        COUNT(DISTINCT strftime('%Y-%m', p.bd)) AS n_months_stable
+    FROM stable_keyed e
+    JOIN stable_keyed p
+        ON p.sk = e.sk
+        AND p.id <> e.id
+        AND p.bd < e.bd
+        AND ABS(p.abs_cents - e.abs_cents) <= e.abs_cents * 0.10
+    WHERE e.sk IS NOT NULL AND e.abs_cents > 0
+    GROUP BY e.id
 )
 SELECT
     s.id,
@@ -154,15 +221,26 @@ SELECT
         ELSE (s.abs_cents - s.prior_mean)
              / sqrt(s.prior_msq - s.prior_mean * s.prior_mean)
     END AS amount_zscore_within_cp,
+    CASE
+        WHEN g.g_n IS NULL OR g.g_n < 2 THEN NULL
+        WHEN g.g_msq - g.g_mean * g.g_mean <= 0 THEN 0.0
+        ELSE (g.g_abs - g.g_mean) / sqrt(g.g_msq - g.g_mean * g.g_mean)
+    END AS amount_zscore_global,
     CASE WHEN COALESCE(r.n_months, 0) >= 3 THEN 1 ELSE 0 END AS is_likely_recurring,
     COALESCE(r.n_months_12, 0) AS recurring_months_12,
     CASE WHEN COALESCE(r.n_similar, 0) > 0 AND r.n_exact = r.n_similar
          THEN 1 ELSE 0 END AS recurring_is_exact_amount,
-    COALESCE(ic.n_iban_before, 0) AS iban_count_before
+    COALESCE(ic.n_iban_before, 0) AS iban_count_before,
+    COALESCE(gc.n_gid_before, 0) AS glaeubiger_count_before,
+    CASE WHEN COALESCE(rs.n_months_stable, 0) >= 3 THEN 1 ELSE 0 END
+        AS is_recurring_stable_key
 FROM same_cp s
+LEFT JOIN global_amt g ON g.id = s.id
 LEFT JOIN cp_counts c ON c.id = s.id
 LEFT JOIN recurring r ON r.id = s.id
 LEFT JOIN iban_counts ic ON ic.id = s.id
+LEFT JOIN glaeubiger_counts gc ON gc.id = s.id
+LEFT JOIN recurring_stable rs ON rs.id = s.id
 """
 
 
@@ -179,10 +257,13 @@ def compute_temporal_features_bulk(
       * ``count_same_cp_90d``          (int)
       * ``count_same_cp_365d``         (int)
       * ``amount_zscore_within_cp``    (float | None)
+      * ``amount_zscore_global``       (float | None)  z vs all prior rows
       * ``is_likely_recurring``        (0 | 1)
       * ``recurring_months_12``        (int)  months of last 12 with a similar charge
       * ``recurring_is_exact_amount``  (0 | 1)  all prior similar charges identical
       * ``iban_count_before``          (int)  prior rows sharing this IBAN
+      * ``glaeubiger_count_before``    (int)  prior rows sharing this creditor id
+      * ``is_recurring_stable_key``    (0 | 1)  recurrence keyed on Gläubiger-ID/IBAN
 
     SQLite's stdlib build doesn't expose ``sqrt`` -- we register it once
     on the connection here. Cheap and idempotent.
@@ -212,10 +293,17 @@ def compute_temporal_features_bulk(
                 if r["amount_zscore_within_cp"] is not None
                 else None
             ),
+            "amount_zscore_global": (
+                float(r["amount_zscore_global"])
+                if r["amount_zscore_global"] is not None
+                else None
+            ),
             "is_likely_recurring": int(r["is_likely_recurring"] or 0),
             "recurring_months_12": int(r["recurring_months_12"] or 0),
             "recurring_is_exact_amount": int(r["recurring_is_exact_amount"] or 0),
             "iban_count_before": int(r["iban_count_before"] or 0),
+            "glaeubiger_count_before": int(r["glaeubiger_count_before"] or 0),
+            "is_recurring_stable_key": int(r["is_recurring_stable_key"] or 0),
         }
         for r in rows
     }
