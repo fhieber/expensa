@@ -8,7 +8,7 @@ predicted categories show up in dashboards even before the user reviews them.
 from __future__ import annotations
 
 import sqlite3
-from datetime import date
+from datetime import date, timedelta
 
 import pandas as pd
 
@@ -549,3 +549,364 @@ def daily_by_category(
     if not df.empty:
         df["d"] = pd.to_datetime(df["d"]).dt.date
     return df
+
+
+# ---------------------------------------------------------------------------
+# Dashboard statistics: period comparison, spend pace, fixed-vs-variable,
+# upcoming recurring charges, and the auto-categorization mix.
+# ---------------------------------------------------------------------------
+
+
+def _previous_period(
+    since: date | None, until: date | None
+) -> tuple[date | None, date | None]:
+    """Given the currently-selected ``[since, until]`` window, return the
+    immediately-preceding window of the same length.
+
+    For ``(2026-03-01, 2026-03-31)`` (31 days inclusive) the prior window
+    is ``(2026-01-29, 2026-02-28)``. Returns ``(None, None)`` when the
+    range is open-ended (All-time) -- there's no well-defined "previous
+    period" to compare against.
+    """
+    if since is None or until is None:
+        return None, None
+    span = (until - since).days + 1  # inclusive day count
+    prev_until = since - timedelta(days=1)
+    prev_since = prev_until - timedelta(days=span - 1)
+    return prev_since, prev_until
+
+
+def period_totals(
+    conn: sqlite3.Connection,
+    since: date | None = None,
+    until: date | None = None,
+    exclude_internal: bool = True,
+    savings_categories: tuple[str, ...] = DEFAULT_SAVINGS_CATEGORIES,
+) -> dict[str, float]:
+    """Income / expenses / net / savings_rate aggregated over a window.
+
+    Same neutral-flow handling as :func:`monthly_income_vs_expense`
+    (internal transfers + savings categories excluded) but collapsed to a
+    single set of scalars instead of a per-month frame -- used by the
+    period-over-period delta tiles. ``savings_rate`` is ``None`` when there
+    was no income in the window.
+    """
+    extra, params = _date_filter_clause("e.buchungsdatum", since, until)
+    internal = (
+        " AND COALESCE(e.iban_is_known_self, 0) = 0" if exclude_internal else ""
+    )
+    savings_sql, savings_params = _savings_clause(savings_categories)
+    sql = f"""
+        SELECT
+            SUM(CASE WHEN e.is_income = 1 THEN e.betrag_cents ELSE 0 END) / 100.0
+                AS income,
+            SUM(CASE WHEN e.is_income = 0 THEN ABS(e.betrag_cents) ELSE 0 END) / 100.0
+                AS expenses
+        FROM expenses e
+        {JOIN_LATEST_LABEL}
+        WHERE 1=1 {extra} {internal} {savings_sql}
+    """
+    row = conn.execute(sql, params + savings_params).fetchone()
+    income = float(row["income"] or 0.0)
+    expenses = float(row["expenses"] or 0.0)
+    net = income - expenses
+    savings_rate = (net / income) if income > 0 else None
+    return {
+        "income": income,
+        "expenses": expenses,
+        "net": net,
+        "savings_rate": savings_rate,
+    }
+
+
+def category_period_comparison(
+    conn: sqlite3.Connection,
+    since: date | None = None,
+    until: date | None = None,
+    exclude_internal: bool = True,
+    savings_categories: tuple[str, ...] = DEFAULT_SAVINGS_CATEGORIES,
+) -> pd.DataFrame:
+    """Per-category expense totals for the current window vs the previous
+    same-length window, with the delta.
+
+    Returns columns ``name``, ``current``, ``previous``, ``delta``
+    (= current − previous), ``pct`` (delta / previous, ``None`` when the
+    category had no prior spend). Expense rows only; sorted DESC by the
+    absolute delta so the biggest movers (up or down) come first. Empty
+    frame when the range is open-ended (no previous period).
+    """
+    cols = ["name", "current", "previous", "delta", "pct"]
+    prev_since, prev_until = _previous_period(since, until)
+    if prev_since is None:
+        return pd.DataFrame(columns=cols)
+
+    def _totals(s: date, u: date) -> dict[str, float]:
+        extra, params = _date_filter_clause("e.buchungsdatum", s, u)
+        internal = (
+            " AND COALESCE(e.iban_is_known_self, 0) = 0" if exclude_internal else ""
+        )
+        savings_sql, savings_params = _savings_clause(savings_categories)
+        sql = f"""
+            SELECT COALESCE(c.name, '(unkategorisiert)') AS name,
+                   SUM(ABS(e.betrag_cents)) / 100.0 AS amount
+            FROM expenses e
+            {JOIN_LATEST_LABEL}
+            WHERE e.is_income = 0 {extra} {internal} {savings_sql}
+            GROUP BY name
+        """
+        return {
+            r["name"]: float(r["amount"] or 0.0)
+            for r in conn.execute(sql, params + savings_params).fetchall()
+        }
+
+    cur = _totals(since, until)
+    prev = _totals(prev_since, prev_until)
+    names = set(cur) | set(prev)
+    if not names:
+        return pd.DataFrame(columns=cols)
+    out: list[dict] = []
+    for name in names:
+        c = cur.get(name, 0.0)
+        p = prev.get(name, 0.0)
+        out.append({
+            "name": name,
+            "current": c,
+            "previous": p,
+            "delta": c - p,
+            "pct": ((c - p) / p) if p > 0 else None,
+        })
+    df = pd.DataFrame(out)
+    df = df.reindex(
+        df["delta"].abs().sort_values(ascending=False).index
+    ).reset_index(drop=True)
+    return df[cols]
+
+
+def month_to_date_pace(
+    conn: sqlite3.Connection,
+    today: date | None = None,
+    trailing_months: int = 6,
+    exclude_internal: bool = True,
+    savings_categories: tuple[str, ...] = DEFAULT_SAVINGS_CATEGORIES,
+) -> dict[str, float | int | None]:
+    """Spend run-rate for the current calendar month.
+
+    Returns a dict with:
+      * ``spent``        -- expense total so far this calendar month.
+      * ``days_elapsed`` -- days of the month counted (1-based, includes today).
+      * ``days_in_month``-- length of the current month.
+      * ``projected``    -- linear extrapolation ``spent / elapsed * days_in_month``.
+      * ``baseline``     -- mean full-month expense over the prior
+        ``trailing_months`` complete months (``None`` if no history).
+
+    Pure arithmetic, no model. ``today`` is injectable for tests.
+    """
+    today = today or date.today()
+    first_of_month = today.replace(day=1)
+    # Length of the current month.
+    if today.month == 12:
+        next_month_first = date(today.year + 1, 1, 1)
+    else:
+        next_month_first = date(today.year, today.month + 1, 1)
+    days_in_month = (next_month_first - first_of_month).days
+    days_elapsed = (today - first_of_month).days + 1
+
+    internal = (
+        " AND COALESCE(e.iban_is_known_self, 0) = 0" if exclude_internal else ""
+    )
+    savings_sql, savings_params = _savings_clause(savings_categories)
+
+    # Spend so far this month.
+    spent_row = conn.execute(
+        f"""
+        SELECT SUM(ABS(e.betrag_cents)) / 100.0 AS spent
+        FROM expenses e
+        {JOIN_LATEST_LABEL}
+        WHERE e.is_income = 0 AND e.buchungsdatum >= ? AND e.buchungsdatum <= ?
+          {internal} {savings_sql}
+        """,
+        [first_of_month.isoformat(), today.isoformat()] + savings_params,
+    ).fetchone()
+    spent = float(spent_row["spent"] or 0.0)
+    projected = (spent / days_elapsed * days_in_month) if days_elapsed else 0.0
+
+    # Baseline: mean spend over the prior N complete calendar months.
+    baseline_row = conn.execute(
+        f"""
+        SELECT AVG(monthly) AS baseline FROM (
+            SELECT strftime('%Y-%m', e.buchungsdatum) AS ym,
+                   SUM(ABS(e.betrag_cents)) / 100.0 AS monthly
+            FROM expenses e
+            {JOIN_LATEST_LABEL}
+            WHERE e.is_income = 0 AND e.buchungsdatum < ?
+              {internal} {savings_sql}
+            GROUP BY ym
+            ORDER BY ym DESC
+            LIMIT ?
+        )
+        """,
+        [first_of_month.isoformat()] + savings_params + [trailing_months],
+    ).fetchone()
+    baseline = baseline_row["baseline"]
+    return {
+        "spent": spent,
+        "days_elapsed": days_elapsed,
+        "days_in_month": days_in_month,
+        "projected": projected,
+        "baseline": float(baseline) if baseline is not None else None,
+    }
+
+
+def fixed_vs_variable(
+    conn: sqlite3.Connection,
+    min_charges: int = 3,
+) -> dict[str, float]:
+    """Split estimated monthly spend into committed (recurring) vs
+    discretionary, built on :func:`recurring_subscriptions`.
+
+    A vendor with a detected cadence contributes ``annualised / 12`` to
+    the ``fixed`` monthly figure. Everything else (non-recurring vendors,
+    plus recurring vendors' irregular extra charges are NOT separated --
+    we attribute the recurring vendor's whole typical charge to fixed)
+    contributes to ``variable``, estimated from the mean monthly spend of
+    the trailing observable history.
+
+    Returns ``fixed_monthly``, ``variable_monthly``, ``total_monthly``,
+    ``fixed_share`` (0..1, ``None`` when there's no spend).
+    """
+    rec = recurring_subscriptions(conn, min_charges=min_charges)
+    fixed_monthly = (
+        float((rec["annualised"] / 12.0).sum()) if not rec.empty else 0.0
+    )
+
+    # Mean total monthly expense across observed months (all-time), as the
+    # whole-spend baseline we subtract the fixed portion from.
+    row = conn.execute(
+        f"""
+        SELECT AVG(monthly) AS mean_monthly FROM (
+            SELECT strftime('%Y-%m', e.buchungsdatum) AS ym,
+                   SUM(ABS(e.betrag_cents)) / 100.0 AS monthly
+            FROM expenses e
+            {JOIN_LATEST_LABEL}
+            WHERE e.is_income = 0
+              AND COALESCE(e.iban_is_known_self, 0) = 0
+            GROUP BY ym
+        )
+        """
+    ).fetchone()
+    total_monthly = float(row["mean_monthly"] or 0.0)
+    # Fixed can't exceed the observed total (cadence estimate noise); clamp.
+    fixed_monthly = min(fixed_monthly, total_monthly)
+    variable_monthly = max(total_monthly - fixed_monthly, 0.0)
+    fixed_share = (fixed_monthly / total_monthly) if total_monthly > 0 else None
+    return {
+        "fixed_monthly": fixed_monthly,
+        "variable_monthly": variable_monthly,
+        "total_monthly": total_monthly,
+        "fixed_share": fixed_share,
+    }
+
+
+def upcoming_recurring(
+    conn: sqlite3.Connection,
+    horizon_days: int = 30,
+    today: date | None = None,
+    min_charges: int = 3,
+) -> pd.DataFrame:
+    """Project the next charge date for each recurring vendor and return
+    those expected within ``horizon_days``.
+
+    Built on :func:`recurring_subscriptions`: the next charge is
+    ``last_seen + median_gap`` (median gap derived from
+    ``charges_per_year``). A vendor whose projected date already slipped
+    past today (we missed the window) is rolled forward in cadence steps
+    to the next future date, so a slightly-overdue subscription still
+    shows up rather than vanishing.
+
+    Returns columns ``name``, ``cadence``, ``expected_date``,
+    ``typical_amount``, ``days_until``. Sorted ASC by ``expected_date``.
+    """
+    cols = ["name", "cadence", "expected_date", "typical_amount", "days_until"]
+    today = today or date.today()
+    rec = recurring_subscriptions(conn, min_charges=min_charges)
+    if rec.empty:
+        return pd.DataFrame(columns=cols)
+    horizon = today + timedelta(days=horizon_days)
+    out: list[dict] = []
+    for _, r in rec.iterrows():
+        cpy = float(r["charges_per_year"])
+        if cpy <= 0:
+            continue
+        gap = 365.25 / cpy
+        last_seen = r["last_seen"]
+        if hasattr(last_seen, "date"):
+            last_seen = last_seen.date()
+        expected = last_seen + timedelta(days=round(gap))
+        # Roll a missed/overdue projection forward to the next future date
+        # so overdue-but-still-active subscriptions remain visible.
+        while expected < today:
+            expected = expected + timedelta(days=round(gap))
+        if expected <= horizon:
+            out.append({
+                "name": r["name"],
+                "cadence": r["cadence"],
+                "expected_date": expected,
+                "typical_amount": float(r["typical_amount"]),
+                "days_until": (expected - today).days,
+            })
+    if not out:
+        return pd.DataFrame(columns=cols)
+    df = pd.DataFrame(out).sort_values("expected_date").reset_index(drop=True)
+    return df[cols]
+
+
+def categorization_mix(
+    conn: sqlite3.Connection,
+    confirm_low: float = 0.40,
+    confirm_med: float = 0.70,
+) -> dict[str, int]:
+    """Breakdown of how every expense is currently categorized.
+
+    Buckets (disjoint, cover all expenses):
+      * ``user``        -- has a user label (ground truth).
+      * ``high``        -- latest label is a model prediction ≥ ``confirm_med``.
+      * ``medium``      -- model prediction in ``[confirm_low, confirm_med)``.
+      * ``low``         -- model prediction < ``confirm_low``.
+      * ``uncategorized`` -- no label at all.
+
+    Thresholds mirror ``review_tab._CONF_LOW`` / ``_CONF_MED`` so the mix
+    lines up with the Review queue. Returns counts plus ``total``.
+    """
+    total = conn.execute("SELECT COUNT(*) AS n FROM expenses").fetchone()["n"]
+    user = conn.execute(
+        "SELECT COUNT(DISTINCT expense_id) AS n FROM labels WHERE source='user'"
+    ).fetchone()["n"]
+    # Model-bucketed counts over rows WITHOUT a user label (latest label is
+    # a model prediction).
+    rows = conn.execute(
+        """
+        SELECT
+            SUM(CASE WHEN confidence >= ? THEN 1 ELSE 0 END) AS high,
+            SUM(CASE WHEN confidence >= ? AND confidence < ? THEN 1 ELSE 0 END) AS medium,
+            SUM(CASE WHEN confidence IS NULL OR confidence < ? THEN 1 ELSE 0 END) AS low
+        FROM latest_label
+        WHERE label_source = 'model'
+          AND expense_id NOT IN (
+            SELECT DISTINCT expense_id FROM labels WHERE source = 'user'
+          )
+        """,
+        (confirm_med, confirm_low, confirm_med, confirm_low),
+    ).fetchone()
+    high = int(rows["high"] or 0)
+    medium = int(rows["medium"] or 0)
+    low = int(rows["low"] or 0)
+    user = int(user)
+    uncategorized = int(total) - user - high - medium - low
+    return {
+        "total": int(total),
+        "user": user,
+        "high": high,
+        "medium": medium,
+        "low": low,
+        "uncategorized": max(uncategorized, 0),
+    }

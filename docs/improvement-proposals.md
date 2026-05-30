@@ -164,3 +164,29 @@ in this change set.
 - `store_embeddings` uses `INSERT OR REPLACE` on the `(expense_id,
   model_name)` PK, so concurrent lazy embedding is idempotent.
 - `accounts.yaml` is written atomically (tmp file + `os.replace`).
+
+---
+
+## 5. Dashboard statistics & forecasts — ✅ shipped
+
+New `viz/data.py` helpers + dashboard wiring, all unit-tested:
+
+- **Period-over-period deltas** on the headline tiles — income / expenses /
+  savings-rate vs the immediately-preceding same-length window
+  (`period_totals`, `_previous_period`). Expense delta colour is inverted
+  (rising spend is "bad").
+- **Top movers** expander — biggest per-category spend changes vs the previous
+  period (`category_period_comparison`).
+- **Month-to-date pace tile** — spend so far this month, linearly projected to
+  month-end, with a Δ vs the trailing-6-month average (`month_to_date_pace`).
+- **Fixed vs. variable tile** — estimated committed (recurring) monthly spend
+  and its share, built on the existing cadence detector (`fixed_vs_variable`).
+- **Upcoming recurring charges** expander — next-30-day forecast projected from
+  each recurring vendor's cadence (`upcoming_recurring`).
+- **Auto-categorization mix tile** — user / high / medium / low / uncategorized
+  breakdown, thresholds aligned with the Review queue (`categorization_mix`).
+
+Backlog ideas not taken in this pass (still open): cash-flow / running-balance
+trend line, weekday & day-of-month spending profiles, new-merchant list,
+subscription-cancellation (lapse) detection, and unusually-LOW / duplicate-
+charge anomaly variants.

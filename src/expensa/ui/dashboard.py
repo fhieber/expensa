@@ -23,14 +23,20 @@ from expensa.utils.colors import readable_text_color
 from expensa.viz import (
     anomalies,
     bar_spend_by_category,
+    categorization_mix,
+    category_period_comparison,
+    fixed_vs_variable,
     income_vs_expense_chart,
+    month_to_date_pace,
     monthly_flow_by_category,
     monthly_income_vs_expense,
+    period_totals,
     recurring_subscriptions,
     savings_flow,
     spend_by_category,
     stacked_monthly_by_category,
     stacked_weekly_by_category,
+    upcoming_recurring,
     weekly_by_category,
 )
 
@@ -64,6 +70,9 @@ def render() -> None:
     _maybe_low_data_hint(conn)
     savings = tuple(savings_category_names(conn))
     _render_headline_tiles(conn, since, until, savings)
+    _render_insight_tiles(conn, savings)
+    _render_top_movers(conn, since, until, savings)
+    _render_upcoming_recurring(conn)
     _render_charts(conn, since, until, savings)
     st.divider()
     _render_records_table(conn, since, until)
@@ -110,6 +119,180 @@ def _maybe_low_data_hint(conn) -> None:
         )
 
 
+def _prev_since(since, until):
+    """Start of the window immediately preceding ``[since, until]``."""
+    from expensa.viz.data import _previous_period
+
+    return _previous_period(since, until)[0]
+
+
+def _prev_until(since, until):
+    """End of the window immediately preceding ``[since, until]``."""
+    from expensa.viz.data import _previous_period
+
+    return _previous_period(since, until)[1]
+
+
+def _render_insight_tiles(conn, savings) -> None:
+    """Three always-all-time insight tiles below the headline row:
+    month-to-date spend pace, fixed-vs-variable split, and the
+    auto-categorization mix. These are deliberately NOT date-range scoped
+    -- they answer "where do I stand right now / overall", which is
+    independent of the chart date picker."""
+    pace = month_to_date_pace(conn, savings_categories=savings)
+    fv = fixed_vs_variable(conn)
+    mix = categorization_mix(conn)
+
+    with st.container(border=True):
+        cols = st.columns(3)
+
+        # ── Month-to-date pace ──
+        with cols[0]:
+            proj_delta = None
+            if pace["baseline"] is not None:
+                proj_delta = de_eur(pace["projected"] - pace["baseline"])
+            st.metric(
+                "This month (projected)",
+                de_eur(pace["projected"]),
+                delta=proj_delta,
+                delta_color="inverse",
+                help=(
+                    f"Spent {de_eur(pace['spent'])} in the first "
+                    f"{pace['days_elapsed']} of {pace['days_in_month']} days; "
+                    "linearly extrapolated to month-end. "
+                    + (
+                        f"Δ vs trailing-6-month average ({de_eur(pace['baseline'])})."
+                        if pace["baseline"] is not None
+                        else "No prior months yet for a baseline."
+                    )
+                ),
+            )
+
+        # ── Fixed vs variable ──
+        with cols[1]:
+            if fv["fixed_share"] is not None:
+                share_pct = fv["fixed_share"] * 100
+                st.metric(
+                    "Committed / month",
+                    de_eur(fv["fixed_monthly"]),
+                    help=(
+                        f"Estimated recurring commitments (subscriptions, rent, "
+                        f"insurance) — {share_pct:.0f}% of your ~"
+                        f"{de_eur(fv['total_monthly'])} average monthly spend. "
+                        f"Discretionary: ~{de_eur(fv['variable_monthly'])}/mo."
+                    ),
+                )
+                st.caption(
+                    f"🔁 {share_pct:.0f}% fixed · "
+                    f"🛒 {100 - share_pct:.0f}% discretionary"
+                )
+            else:
+                st.metric("Committed / month", "—",
+                          help="Not enough history to detect recurring vendors yet.")
+
+        # ── Categorization mix ──
+        with cols[2]:
+            total = mix["total"] or 1
+            auto_pct = (mix["user"] + mix["high"]) / total * 100
+            st.metric(
+                "Auto-categorized",
+                f"{auto_pct:.0f}%",
+                help=(
+                    f"{mix['user']} user-labeled · {mix['high']} high-confidence "
+                    f"model · {mix['medium']} to confirm · {mix['low']} low "
+                    f"confidence · {mix['uncategorized']} uncategorized "
+                    f"(of {mix['total']})."
+                ),
+            )
+            need_review = mix["medium"] + mix["low"] + mix["uncategorized"]
+            if need_review:
+                st.caption(
+                    f"📋 {need_review} need review — see the **Review** tab."
+                )
+            else:
+                st.caption("✅ Everything is categorized.")
+
+
+def _render_top_movers(conn, since, until, savings) -> None:
+    """Biggest per-category spend changes vs the previous same-length
+    window. Skipped for All-time (no previous period to compare)."""
+    if since is None or until is None:
+        return
+    movers = category_period_comparison(
+        conn, since=since, until=until, savings_categories=savings
+    )
+    if movers.empty:
+        return
+    # Only surface categories that actually moved.
+    movers = movers[movers["delta"].abs() >= 0.005]
+    if movers.empty:
+        return
+    with st.expander("Top movers vs previous period", expanded=False):
+        st.caption(
+            "Per-category spend change against the immediately-preceding "
+            "window of the same length. ▲ = spending more, ▼ = less."
+        )
+        top = movers.head(8).copy()
+        top["direction"] = top["delta"].map(lambda d: "▲" if d > 0 else "▼")
+        top["pct_str"] = top["pct"].map(
+            lambda p: f"{p * 100:+.0f}%" if p is not None else "new"
+        )
+        display = pd.DataFrame({
+            "": top["direction"],
+            "Category": top["name"],
+            "Now": top["current"],
+            "Before": top["previous"],
+            "Change": top["delta"],
+            "%": top["pct_str"],
+        })
+        st.dataframe(
+            display,
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "Now": st.column_config.NumberColumn("Now (€)", format="%.2f"),
+                "Before": st.column_config.NumberColumn("Before (€)", format="%.2f"),
+                "Change": st.column_config.NumberColumn("Change (€)", format="%+.2f"),
+            },
+        )
+
+
+def _render_upcoming_recurring(conn) -> None:
+    """Forecast of recurring charges expected in the next 30 days, from
+    the cadence detector. All-time history; not date-range scoped."""
+    upcoming = upcoming_recurring(conn, horizon_days=30)
+    if upcoming.empty:
+        return
+    total = float(upcoming["typical_amount"].sum())
+    with st.expander(
+        f"Upcoming recurring charges (next 30 days) — ~{de_eur(total)}",
+        expanded=False,
+    ):
+        st.caption(
+            "Projected from each recurring vendor's detected cadence "
+            "(last seen + typical gap). Amounts are the vendor's typical "
+            "charge — actuals may vary for variable-amount vendors."
+        )
+        st.dataframe(
+            upcoming,
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "name": st.column_config.TextColumn("Vendor"),
+                "cadence": st.column_config.TextColumn("Cadence"),
+                "expected_date": st.column_config.DateColumn(
+                    "Expected", format="DD.MM.YYYY"
+                ),
+                "typical_amount": st.column_config.NumberColumn(
+                    "Typical (€)", format="%.2f"
+                ),
+                "days_until": st.column_config.NumberColumn(
+                    "In days", format="%d"
+                ),
+            },
+        )
+
+
 def _render_headline_tiles(conn, since, until, savings) -> None:
     """Savings rate / income / expenses / to-savings tiles + caption.
     Wrapped in a bordered container so it reads as one grouped unit."""
@@ -128,13 +311,38 @@ def _render_headline_tiles(conn, since, until, savings) -> None:
         dot = "🟢" if pct >= 20 else ("🔴" if pct < 0 else "🟡")
         sr_value = f"{dot} {pct:.0f}%"
     else:
+        pct = None
         sr_value = "—"
+
+    # Period-over-period deltas: compare this window to the immediately
+    # preceding window of the same length. Only meaningful for a bounded
+    # range (All-time has no "previous period"), so the deltas are None
+    # there and st.metric simply omits them.
+    prev = period_totals(
+        conn, since=_prev_since(since, until), until=_prev_until(since, until),
+        savings_categories=savings,
+    ) if since is not None and until is not None else None
+
+    def _money_delta(curr: float, key: str) -> str | None:
+        if not prev:
+            return None
+        base = prev[key]
+        return de_eur(curr - base) if base else None
+
+    sr_delta = None
+    if prev and prev["savings_rate"] is not None and pct is not None:
+        sr_delta = f"{pct - prev['savings_rate'] * 100:+.0f} pp"
 
     with st.container(border=True):
         sr_cols = st.columns(4)
-        sr_cols[0].metric("Savings rate", sr_value)
-        sr_cols[1].metric("Income", de_eur(total_income))
-        sr_cols[2].metric("Expenses", de_eur(total_exp))
+        # Savings rate: higher is better (default delta colour).
+        sr_cols[0].metric("Savings rate", sr_value, delta=sr_delta)
+        sr_cols[1].metric("Income", de_eur(total_income),
+                          delta=_money_delta(total_income, "income"))
+        # Expenses: rising spend is "bad", so invert the delta colour.
+        sr_cols[2].metric("Expenses", de_eur(total_exp),
+                          delta=_money_delta(total_exp, "expenses"),
+                          delta_color="inverse")
         sav_label = ", ".join(savings) if savings else "your savings categories"
         sr_cols[3].metric(
             "💰 To savings (net)",
