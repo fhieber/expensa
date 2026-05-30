@@ -61,6 +61,11 @@ class VendorExactMatchConfig(BaseModel):
     # same ``agreement_min`` threshold. Bridges the cold-start gap for
     # variable-name vendors that name matching and kNN both miss.
     use_iban: bool = True
+    # SEPA creditor-id (Gläubiger-ID) fallback, tried BEFORE the IBAN when
+    # the name match abstains. The creditor id is globally unique and
+    # stable across both name and IBAN changes, so it's the strongest
+    # identity key for recurring direct-debit merchants.
+    use_glaeubiger: bool = True
 
 
 class KnnConfig(BaseModel):
