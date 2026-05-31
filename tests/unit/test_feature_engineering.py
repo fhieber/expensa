@@ -34,7 +34,6 @@ from expensa.storage.categories import (
     upsert_category,
 )
 
-
 # ── Amount-pattern flags ──────────────────────────────────────────────
 
 
