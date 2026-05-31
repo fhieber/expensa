@@ -50,14 +50,15 @@ def _seed_labels(conn: sqlite3.Connection) -> None:
     transport = upsert_category(conn, "Transport")
 
     seeds = [
-        ("rewe markt", food),
-        ("edeka sued", food),
-        ("aldi sued", food),
-        ("vermieter schmidt", rent),
-        ("spotify", streaming),
-        ("netflix international", streaming),
-        ("db bahn", transport),
-        ("tankstelle aral", transport),
+        ("markt alpha", food),
+        ("markt beta", food),
+        ("markt gamma", food),
+        ("vermieter", rent),
+        ("videodienst", streaming),
+        ("abo dienst", streaming),
+        ("nahverkehr", transport),
+        ("fernverkehr", transport),
+        ("tankstelle alpha", transport),
     ]
     for cp, cid in seeds:
         row = conn.execute(
@@ -67,7 +68,7 @@ def _seed_labels(conn: sqlite3.Connection) -> None:
         if row is not None:
             add_label(conn, int(row["id"]), cid, "user")
     arbeitgeber = conn.execute(
-        "SELECT id FROM expenses WHERE zahlungspflichtiger='Arbeitgeber AG' LIMIT 1"
+        "SELECT id FROM expenses WHERE zahlungspflichtiger='Arbeitgeber GmbH' LIMIT 1"
     ).fetchone()
     if arbeitgeber is not None:
         add_label(conn, int(arbeitgeber["id"]), income, "user")
@@ -107,16 +108,16 @@ def _full_pipeline(
     ]
     preds = cascade.predict_batch(unlabeled)
     assert len(preds) == len(unlabeled)
-    # At least the recurring REWE/Edeka rows should be hit by vendor_exact_match.
-    rewe_pred = next(
+    # At least the recurring supermarket rows should be hit by vendor_exact_match.
+    market_pred = next(
         (p for p in preds
          if conn.execute(
             "SELECT counterparty_normalized FROM expenses WHERE id=?", (p.expense_id,)
-        ).fetchone()["counterparty_normalized"] == "rewe markt"),
+        ).fetchone()["counterparty_normalized"] == "markt alpha"),
         None,
     )
-    assert rewe_pred is not None
-    assert rewe_pred.stage == "vendor_exact_match"
+    assert market_pred is not None
+    assert market_pred.stage == "vendor_exact_match"
 
     # Active learning still has work to surface.
     candidates = pick_candidates(conn, cfg, embedder, cascade, n=5, strategy="uncertainty")
