@@ -25,6 +25,7 @@ from expensa.features.embeddings import Embedder, load_embeddings
 from expensa.features.pipeline import build_full_features
 from expensa.storage.categories import (
     category_sign_consistency,
+    glaeubiger_label_distribution,
     iban_label_distribution,
     labeled_ids_with_categories,
     vendor_label_distribution,
@@ -53,29 +54,63 @@ class FitReport:
 
 
 _NUMERIC_COLS = (
+    # ── binary flags ──
     "is_income",
     "is_round",
     "iban_is_foreign",
     "iban_is_known_self",
     "has_glaeubiger_id",
     "mandatsreferenz_present",
+    # ── amount-shape flags ──
+    "has_cents",
+    "is_small_verification",
+    "amount_ends_99",
+    # ── recurrence / identity-frequency ──
     "is_likely_recurring",
     "recurring_months_12",
     "recurring_is_exact_amount",
+    "is_recurring_stable_key",
     "iban_count_before",
+    "glaeubiger_count_before",
+    # ── amount magnitude ──
     "log_abs_amount",
+    # ── calendar (raw; trees use these) ──
     "year",
     "month",
     "quarter",
+    "week",
     "day_of_month",
     "day_of_week",
     "is_weekend",
     "is_month_end",
+    # ── calendar (cyclical; linear models use these) ──
+    "month_sin",
+    "month_cos",
+    "day_of_week_sin",
+    "day_of_week_cos",
+    "day_of_month_sin",
+    "day_of_month_cos",
+    # ── same-vendor temporal ──
     "days_since_prev_same_cp",
     "count_same_cp_30d",
     "count_same_cp_90d",
     "count_same_cp_365d",
     "amount_zscore_within_cp",
+    "amount_zscore_global",
+    # ── text shape ──
+    "vz_length",
+    "vz_token_count",
+    "vz_digit_ratio",
+    # ── umsatztyp one-hot ──
+    "umsatztyp_lastschrift",
+    "umsatztyp_dauerauftrag",
+    "umsatztyp_ueberweisung",
+    "umsatztyp_gehalt",
+    "umsatztyp_karte",
+    "umsatztyp_bargeld",
+    "umsatztyp_gutschrift",
+    "umsatztyp_entgelt",
+    "umsatztyp_other",
 )
 
 
@@ -113,19 +148,30 @@ def _vendor_exact_match(
     agreement_min: float,
     restrict_ids: set[int] | None = None,
     iban: str | None = None,
+    glaeubiger_id: str | None = None,
 ) -> tuple[int, float] | None:
-    """Majority user-label for a vendor.
+    """Majority user-label for a vendor, by increasingly-stable identity key.
 
-    Tries the normalised counterparty name first; if that abstains (no
-    labels for the name, or below ``agreement_min``) and an ``iban`` is
-    given, falls back to the label distribution for that IBAN. The IBAN
-    fallback bridges merchants that vary their display name across exports
-    but keep a stable IBAN.
+    Tries the normalised counterparty name first; if that abstains, falls
+    back to the SEPA creditor id (Gläubiger-ID) when given, then to the
+    IBAN. The creditor id is the strongest key for recurring direct-debit
+    merchants -- globally unique and stable across both name and IBAN
+    changes -- so it's tried before the IBAN. Each key reuses the same
+    ``agreement_min`` threshold and ``restrict_ids`` CV guard.
     """
     if counterparty_normalized:
         hit = _agree(
             vendor_label_distribution(
                 conn, counterparty_normalized, restrict_ids=restrict_ids
+            ),
+            agreement_min,
+        )
+        if hit is not None:
+            return hit
+    if glaeubiger_id:
+        hit = _agree(
+            glaeubiger_label_distribution(
+                conn, glaeubiger_id, restrict_ids=restrict_ids
             ),
             agreement_min,
         )
@@ -592,6 +638,11 @@ class CategorizationCascade:
                     iban=(
                         str(row.get("iban") or "")
                         if self.cfg.vendor_exact_match.use_iban
+                        else None
+                    ),
+                    glaeubiger_id=(
+                        str(row.get("glaeubiger_id") or "")
+                        if self.cfg.vendor_exact_match.use_glaeubiger
                         else None
                     ),
                 )

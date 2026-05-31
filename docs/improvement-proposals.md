@@ -190,3 +190,42 @@ Backlog ideas not taken in this pass (still open): cash-flow / running-balance
 trend line, weekday & day-of-month spending profiles, new-merchant list,
 subscription-cancellation (lapse) detection, and unusually-LOW / duplicate-
 charge anomaly variants.
+
+---
+
+## 6. Feature-engineering batch — ✅ shipped
+
+A batch of new computed features + two latent-bug fixes (all unit-tested in
+`tests/unit/test_feature_engineering.py`). The classifier numeric block grew
+from 23 to 48 columns.
+
+### Bug fixes
+- **`week` restored** to `_NUMERIC_COLS` — computed by
+  `basic_calendar_features` but dropped before the model (same class as the
+  earlier `day_of_month` fix).
+
+### New features
+- **Cyclical calendar encodings** (`month`/`day_of_week`/`day_of_month` as
+  `(sin, cos)`) so linear models see the true wrap-around distance; raw
+  integers retained for trees (`numeric.cyclical`, `add_cyclical_calendar_features`).
+- **`umsatztyp` one-hot** — the German transaction-type field, previously
+  unused by the model, folded to a fixed vocabulary (`umsatztyp_bucket`,
+  `UMSATZTYP_BUCKETS`) and one-hot encoded. Among the most predictive signals
+  (Dauerauftrag→rent/subs, Gehalt→income, Bargeld→cash).
+- **Gläubiger-ID (SEPA creditor id) merchant identity** — a stage-1
+  `vendor_exact_match` fallback tried *before* the IBAN
+  (`glaeubiger_label_distribution`, `vendor_exact_match.use_glaeubiger`), plus
+  a leak-free `glaeubiger_count_before` frequency feature and an
+  `is_recurring_stable_key` recurrence flag keyed on the creditor-id/IBAN
+  (catches subscriptions whose display name drifts between exports).
+- **Global amount z-score** (`amount_zscore_global`) — backstop for
+  `amount_zscore_within_cp` (NULL until a vendor has ≥2 prior charges); the
+  global z exists from the 3rd row, prior-rows-only so it stays leak-free.
+- **Amount-pattern flags** — `has_cents`, `is_small_verification`
+  (≈€0–1 card-verification / fraud-probe), `amount_ends_99` (retail pricing).
+- **Text-shape features** — `vz_length`, `vz_token_count`, `vz_digit_ratio`.
+
+### Not taken this pass
+- Salary/payday detection (`is_likely_salary`) — deferred.
+- Folding `umsatztyp` / industry into `combined_text` for the embedder —
+  needs an A/B via the Quality tab (can add noise); deferred.

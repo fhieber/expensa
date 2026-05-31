@@ -34,6 +34,7 @@ sign_guardrail:
 vendor_exact_match:
   enabled: true
   agreement_min: 0.8         # ≥80% past labels for the vendor must agree
+  use_glaeubiger: true       # fall back to SEPA creditor-id identity (tried before IBAN)
   use_iban: true             # fall back to IBAN-based identity when the name match abstains
 
 knn:

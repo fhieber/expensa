@@ -203,6 +203,40 @@ def iban_label_distribution(
     return {int(r["category_id"]): int(r["n"]) for r in rows}
 
 
+def glaeubiger_label_distribution(
+    conn: sqlite3.Connection,
+    glaeubiger_id: str,
+    restrict_ids: set[int] | None = None,
+) -> dict[int, int]:
+    """How many user labels each category has received for a SEPA creditor id.
+
+    Mirror of :func:`vendor_label_distribution` / :func:`iban_label_distribution`
+    keyed on ``glaeubiger_id``. The creditor id is a stable, globally-unique
+    merchant identifier that survives both name and IBAN variation, so it's
+    the strongest identity key for recurring direct-debit merchants.
+    ``restrict_ids`` keeps cross-validation leak-free.
+    """
+    if not glaeubiger_id:
+        return {}
+    sql = """
+        SELECT l.category_id, COUNT(*) AS n
+        FROM labels l
+        JOIN expenses e ON e.id = l.expense_id
+        WHERE l.source = 'user'
+          AND e.glaeubiger_id = ?
+    """
+    params: list = [glaeubiger_id]
+    if restrict_ids is not None:
+        if not restrict_ids:
+            return {}
+        placeholders = ",".join("?" * len(restrict_ids))
+        sql += f"  AND l.expense_id IN ({placeholders})\n"
+        params.extend(sorted(restrict_ids))
+    sql += "        GROUP BY l.category_id"
+    rows = conn.execute(sql, params).fetchall()
+    return {int(r["category_id"]): int(r["n"]) for r in rows}
+
+
 def category_sign_consistency(
     conn: sqlite3.Connection, restrict_ids: set[int] | None = None
 ) -> dict[int, tuple[int, float, int]]:
