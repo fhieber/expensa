@@ -297,6 +297,105 @@ def test_build_pdf_produces_pdf_bytes(
     assert "Test_Account" in fname  # space -> underscore by the sanitiser
 
 
+def test_build_html_is_self_contained_and_has_sections(
+    tmp_db: sqlite3.Connection, fixtures_dir: Path, tmp_path: Path
+) -> None:
+    """The HTML report needs no optional extras (plotly is core), is a
+    single self-contained document (plotly.js inlined), and carries the
+    same sections as the PDF."""
+    from expensa.ml.eval_report import (
+        ReportContext,
+        build_html,
+        default_html_filename,
+    )
+
+    ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
+    cat_ids = _seed_labels(tmp_db)
+    cfg = _cfg(tmp_path)
+    embedder = HashEmbedder(dim=64)
+    result = cross_validate(tmp_db, cfg, embedder, n_folds=2, seed=0)
+    abl = ablation(tmp_db, cfg, embedder, n_folds=2, seed=0)
+
+    id_to_name = {v: k.capitalize() for k, v in cat_ids.items()}
+    ctx = ReportContext(
+        account_name="Test Account",
+        embedding_model="hash-test",
+        n_folds=result.n_folds,
+        seed=0,
+        include_zeroshot=False,
+        category_id_to_name=id_to_name,
+        cascade_settings={
+            "vendor_exact_match": cfg.vendor_exact_match.model_dump(),
+            "knn": cfg.knn.model_dump(),
+            "classifier": cfg.classifier.model_dump(),
+            "category_similarity": cfg.category_similarity.model_dump(),
+            "zeroshot": cfg.zeroshot.model_dump(),
+        },
+        zeroshot_model="moritz/test-nli",
+        device="cpu",
+        duration_seconds=142.0,  # -> "2m 22s"
+    )
+    html = build_html(result, abl, ctx)
+
+    assert html.lstrip().lower().startswith("<!doctype html>")
+    assert html.rstrip().endswith("</html>")
+    # plotly.js inlined -> self-contained, no CDN / external <script src>.
+    assert "Plotly" in html
+    assert "<script src=" not in html
+    # Section headers present (mirrors the PDF layout).
+    for heading in (
+        "Cascade quality report",
+        "Per-stage contribution",
+        "Per-category metrics",
+        "Confusion matrix",
+        "Stage ablation",
+        "Appendix",
+    ):
+        assert heading in html
+    # Runtime + appendix values rendered.
+    assert "2m 22s" in html
+    assert "moritz/test-nli" in html
+    assert "hash-test" in html
+
+    fname = default_html_filename("Test Account")
+    assert fname.endswith(".html")
+    assert "Test_Account" in fname
+
+
+def test_build_html_escapes_category_names(
+    tmp_db: sqlite3.Connection, fixtures_dir: Path, tmp_path: Path
+) -> None:
+    """Category names flow into the HTML verbatim, so a name containing
+    angle brackets must be escaped -- otherwise it could break the
+    document (or smuggle markup) in the per-category / confusion tables."""
+    from expensa.ml.eval_report import ReportContext, build_html
+
+    ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
+    cat_ids = _seed_labels(tmp_db)
+    cfg = _cfg(tmp_path)
+    embedder = HashEmbedder(dim=64)
+    result = cross_validate(tmp_db, cfg, embedder, n_folds=2, seed=0)
+
+    # Inject a hostile category display name.
+    evil = "<script>x</script> & Co"
+    id_to_name = {v: (evil if k == "food" else k) for k, v in cat_ids.items()}
+    ctx = ReportContext(
+        account_name="A<b>cct",
+        embedding_model="hash-test",
+        n_folds=result.n_folds,
+        seed=0,
+        include_zeroshot=False,
+        category_id_to_name=id_to_name,
+    )
+    html = build_html(result, None, ctx)
+    # The raw tag must not appear; its escaped form must.
+    assert "<script>x</script>" not in html
+    assert "&lt;script&gt;x&lt;/script&gt;" in html
+    # Account name in the header is escaped too.
+    assert "A<b>cct" not in html
+    assert "A&lt;b&gt;cct" in html
+
+
 def test_format_duration_picks_smallest_unit() -> None:
     """The PDF header + eval-tab caption + status bar all share this
     formatter. Pin its contract so the displayed string stays short."""

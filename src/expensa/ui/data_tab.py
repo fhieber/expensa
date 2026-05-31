@@ -953,108 +953,6 @@ def _render_caption(counts: dict) -> None:
     )
 
 
-def _counts_from_grid_state(
-    key: str,
-    cat_id_by_name: dict[str, int],
-    df: pd.DataFrame | None = None,
-) -> dict:
-    """Read AgGrid's just-written grid_state out of session_state and
-    derive the counts used by the top action bar -- before the grid
-    itself renders this turn.
-
-    On the first render after a tab switch or page load the grid_state
-    isn't in session_state yet (AgGrid posts back after it mounts), so
-    `_top_counts` would otherwise read all zeros. Pass the Python-side
-    `df` as a fallback so the top bar at least shows total row count +
-    total amount immediately.
-    """
-    out = {"n_pending": 0, "n_selected": 0, "n_rows": 0,
-           "total_amount": 0.0, "selected_amount": 0.0,
-           "can_promote": False, "can_inspect": False, "sel_single_eid": None}
-
-    def _seed_from_df() -> None:
-        # Fallback when grid_state hasn't arrived: take the row count
-        # and signed total from the SQL-filter view. Pending and
-        # selected stay zero because both require user interaction
-        # with AgGrid.
-        if df is None or df.empty:
-            return
-        out["n_rows"] = len(df)
-        try:
-            out["total_amount"] = float(df["betrag_€"].sum())
-        except (KeyError, ValueError):
-            pass
-
-    raw = st.session_state.get(key)
-    if not isinstance(raw, dict):
-        _seed_from_df()
-        return out
-    nodes = raw.get("nodes") or []
-    if not isinstance(nodes, list) or not nodes:
-        _seed_from_df()
-        return out
-    out["n_rows"] = len(nodes)
-    sel_eids: list[int] = []
-    n_pending = 0
-    total_amount = 0.0
-    selected_amount = 0.0
-    for node in nodes:
-        if not isinstance(node, dict):
-            continue
-        d = node.get("data") or {}
-        try:
-            eid = int(d.get("id"))
-        except (TypeError, ValueError):
-            continue
-        # Sum the signed amount across every visible row, and again
-        # restricted to selected rows so the caption can show a
-        # subtotal when the user has a selection. AgGrid column-
-        # filters aren't reflected here -- this is the SQL-filter
-        # view, same scope as `n_rows`.
-        try:
-            amt = float(d.get("betrag_€") or 0)
-        except (TypeError, ValueError):
-            amt = 0.0
-        total_amount += amt
-        if node.get("isSelected") is True:
-            sel_eids.append(eid)
-            selected_amount += amt
-        cat = str(d.get("category") or "").strip()
-        orig = str(d.get("_orig_category") or "").strip()
-        orig_norm = "" if orig == "(unkategorisiert)" else orig
-        if cat != orig_norm:
-            if (cat == "" and orig_norm != "") or cat in cat_id_by_name:
-                n_pending += 1
-    out["n_pending"] = n_pending
-    out["n_selected"] = len(sel_eids)
-    out["total_amount"] = total_amount
-    out["selected_amount"] = selected_amount
-    if sel_eids:
-        sel_set = set(sel_eids)
-        ok = True
-        for node in nodes:
-            if not isinstance(node, dict):
-                continue
-            d = node.get("data") or {}
-            try:
-                eid_n = int(d.get("id"))
-            except (TypeError, ValueError):
-                continue
-            if eid_n not in sel_set:
-                continue
-            orig = str(d.get("_orig_category") or "").strip()
-            orig_norm = "" if orig == "(unkategorisiert)" else orig
-            cat = str(d.get("category") or "").strip()
-            if not (cat or orig_norm):
-                ok = False
-                break
-        out["can_promote"] = ok
-    out["can_inspect"] = out["n_selected"] == 1
-    if out["can_inspect"]:
-        out["sel_single_eid"] = sel_eids[0]
-    return out
-
-
 def _render_top_action_bar_and_grid_and_actions(
     conn, cfg, df, edits, grid_options, aggrid_key,
     cat_id_by_name, cat_name_by_id,
@@ -1067,11 +965,15 @@ def _render_top_action_bar_and_grid_and_actions(
     st.session_state["data_extended_top_toggle"] = _master_ext
     st.session_state["data_extended_bot_toggle"] = _master_ext
 
-    _top_counts = _counts_from_grid_state(aggrid_key, cat_id_by_name, df=df)
-    save_top_clicked, revert_top_clicked, auto_label_top_clicked, \
-        promote_top_clicked, see_details_top_clicked = \
-        _render_action_buttons("top", _top_counts)
-    _render_caption(_top_counts)
+    # The top action bar + caption render into this reserved slot AFTER
+    # the grid (see the fill below) so they read the *same* fresh
+    # selection / pending counts the grid just returned. Previously the
+    # top bar was rendered here, before the grid, off AgGrid's
+    # prior-render session_state -- which left it one interaction stale:
+    # a freshly-selected row didn't enable Auto Label / Promote until
+    # the next rerun. The bottom bar never had the bug because it always
+    # rendered after the grid off `response`.
+    top_bar_slot = st.container()
 
     response = AgGrid(
         df,
@@ -1153,6 +1055,15 @@ def _render_top_action_bar_and_grid_and_actions(
         "can_inspect": can_inspect,
         "sel_single_eid": sel_single_eid,
     }
+
+    # Fill the top slot now that we have the fresh counts -- identical
+    # source of truth as the bottom bar, so both enable/disable in
+    # lockstep with the current selection.
+    with top_bar_slot:
+        save_top_clicked, revert_top_clicked, auto_label_top_clicked, \
+            promote_top_clicked, see_details_top_clicked = \
+            _render_action_buttons("top", _current_counts)
+        _render_caption(_current_counts)
 
     _render_caption(_current_counts)
     save_bot_clicked, revert_bot_clicked, auto_label_bot_clicked, \

@@ -105,9 +105,31 @@ levels (Q3, Q4, Q5, Q6) should be selectable; we'd default to Q4_K_M.
 
 ## 4. Cascade integration
 
-Insert a new stage `llm` between `category_similarity` and `zeroshot`
-(or replacing `zeroshot` entirely when both are enabled — TBD via the
-Quality tab ablation). New `STAGE_ORDER`:
+> **Reconciled with the post-batched-predict codebase (2026-05-31).** The
+> earlier draft of this section showed a per-row inline hook. That no longer
+> matches `classifier.predict_batch`, which since the perf pass runs a
+> **two-pass deferred-batch** design. The LLM stage must mirror that shape.
+
+### How `predict_batch` actually works now
+
+`predict_batch` no longer calls the slow fallback per row. It:
+
+1. **Pass 1** — walks every row through stages 1–4 (vendor_exact_match →
+   knn → classifier → category_similarity). A row still `low_conf` after
+   stage 4 has its premise pushed onto a pending list
+   (`zs_pending = [(out_idx, eid, premise)]`) and the loop `continue`s —
+   **no model call yet**. Results are written into a pre-sized
+   `out: list[Prediction | None]` by `out_idx`, so input order is
+   preserved regardless of which pass fills a slot.
+2. **Pass 2** — drains `zs_pending` in `cfg.zeroshot.batch_size` chunks
+   through `_zeroshot_predict_batch`, writing results back by `out_idx`.
+
+So the LLM stage is **not** an inline `if` in the row loop — it's a
+deferred third pass with its own pending list.
+
+### New `STAGE_ORDER`
+
+`evaluation.py`:
 
 ```python
 STAGE_ORDER = (
@@ -115,19 +137,74 @@ STAGE_ORDER = (
     "knn",
     "classifier",
     "category_similarity",
-    "llm",         # ← new
+    "llm",         # ← new, before zeroshot
     "zeroshot",
 )
 ```
 
-Gating: same `low_conf` check the current zeroshot uses
-(`top_conf < cfg.zeroshot.use_when_confidence_below`). When `llm` is
-enabled, prefer it over `zeroshot`; keep `zeroshot` as the final
-abstention backstop only if the LLM also fails to produce a parseable
-prediction.
+**Critical, easy-to-miss:** `_apply_stage_mask` in `evaluation.py`
+hard-codes each stage's `.enabled` flag (it does **not** loop over
+`STAGE_ORDER`). Without an explicit
 
-The Quality tab ablation will rank the new stage for the user once
-they run it — no manual ranking needed.
+```python
+masked.local_llm.enabled = "llm" in enabled
+```
+
+line there, the ablation's cumulative + leave-one-out runs would
+silently never toggle the LLM stage — it'd look like the stage doesn't
+matter. `_stage_enabled` reads via `getattr(cfg, stage)` and works
+generically, **but** note the config section is `local_llm` while the
+stage name is `llm`, so `_stage_enabled` needs a name→attr alias (or
+name the config section `llm` to match). The `Prediction.stage`
+docstring also gains `'llm'`.
+
+### Gating + pass ordering
+
+Same `low_conf` condition the zeroshot pass uses
+(`top_conf < cfg.zeroshot.use_when_confidence_below`, or `True` when the
+classifier is disabled/absent). Recommended ordering so the
+"zeroshot as backstop" behaviour works without re-queuing gymnastics:
+
+1. In Pass 1, route a `low_conf` row to `llm_pending` when
+   `local_llm.enabled`; only fall through to `zs_pending` in the same
+   row when `local_llm.replaces_zeroshot is False`.
+2. Run the **LLM drain pass before the zeroshot drain pass**. Collect
+   rows where the LLM returned `(None, 0.0)` (bad/again-unparseable JSON)
+   into `zs_pending` *then*, so zeroshot only ever sees the LLM's
+   genuine misses. This avoids a second walk over already-answered rows.
+
+```python
+# Pass 1 (inside the row loop, replacing the current zeroshot branch):
+if low_conf and self.cfg.local_llm.enabled:
+    llm_pending.append((i, eid, row_text, vendor_ctx))
+    if self.cfg.local_llm.replaces_zeroshot:
+        continue
+if low_conf and self.cfg.zeroshot.enabled:
+    zs_pending.append((i, eid, premise))
+    continue
+
+# Between Pass 1 and the existing zeroshot drain:
+for (out_idx, eid, conf) , (cid, c) in _drain_llm(llm_pending):
+    if cid is not None:
+        out[out_idx] = Prediction(eid, cid, c, "llm")
+    elif self.cfg.zeroshot.enabled:
+        zs_pending.append((out_idx, eid, _premise_for(eid)))  # backstop
+    else:
+        out[out_idx] = Prediction(eid, None, 0.0, "unknown")
+```
+
+The Quality tab ablation ranks the new stage automatically once it's in
+`STAGE_ORDER` **and** `_apply_stage_mask` — no manual wiring in the UI.
+
+### Note on "batching"
+
+`llama-cpp-python` has **no true batched inference** for chat
+completions — `classify_batch` just iterates while keeping the model
+resident in RAM/VRAM. The value of the deferred pass here is (a) one
+model load per `predict_batch`, (b) a clean place to tick the progress
+callback per row, and (c) a natural spot for the per-text cache (§9).
+Don't expect the throughput multiplier that zeroshot's real
+`batch_size` gives.
 
 ---
 
@@ -149,7 +226,7 @@ class LocalLLMClassifier:
     """Lazy-loaded GGUF wrapper. Per-process singleton (the model is
     multi-GB, opening twice is a memory disaster)."""
 
-    def __init__(self, model_path: Path, n_ctx: int = 4096, n_gpu_layers: int = 0):
+    def __init__(self, model_path: Path, n_ctx: int = 4096, n_gpu_layers: int = -1):
         from llama_cpp import Llama
         self._llm = Llama(model_path=str(model_path), n_ctx=n_ctx,
                           n_gpu_layers=n_gpu_layers, verbose=False)
@@ -193,29 +270,22 @@ class LocalLLMConfig(BaseModel):
     enabled: bool = False               # off by default
     model_path: str = ""                # absolute path to .gguf
     n_ctx: int = 4096
-    n_gpu_layers: int = 0               # 0 = pure CPU; -1 = offload all
+    # -1 offloads all layers to the GPU. The maintainer's box has an
+    # RTX 5090, so -1 is the sensible default here; CPU-only installs
+    # should set 0.
+    n_gpu_layers: int = -1
     max_tokens: int = 40
-    temperature: float = 0.0
-    # Where in the cascade: replace zeroshot (default) or run as a
-    # separate stage between category_similarity and zeroshot.
+    temperature: float = 0.0            # 0.0 keeps results deterministic
+    # Replace zeroshot for the abstention bucket (default), or run as an
+    # independent stage with zeroshot still active behind it.
     replaces_zeroshot: bool = True
 ```
 
-### Cascade hook (in `classifier.py predict_batch`)
-
-```python
-# Stage 4.5: local LLM (between category_similarity and zeroshot)
-if self.cfg.local_llm.enabled and low_conf and not _ll_predicted:
-    cid, conf = self._llm_classifier.classify(
-        text=row.get("combined_text") or "",
-        vendor_context=_build_vendor_ctx(eid, vendor_industry, vendor_summary),
-        categories=cats,
-    )
-    if cid is not None:
-        out.append(Prediction(eid, cid, conf, "llm"))
-        if self.cfg.local_llm.replaces_zeroshot:
-            continue
-```
+> The cascade hook is no longer an inline per-row call — see §4 for the
+> deferred-batch integration (`llm_pending` drained between Pass 1 and
+> the zeroshot drain). The `LocalLLMClassifier` exposes
+> `classify_batch(items) -> list[(cid, conf)]` rather than a single-row
+> `classify`, matching how the zeroshot path was refactored.
 
 ---
 
@@ -256,7 +326,7 @@ charts automatically include it.
   predictions (no actual GGUF load in unit tests — the dep is optional
   and a 4 GB download is not appropriate for CI).
 - **Integration / smoke:** marked `@pytest.mark.slow`, skipped unless
-  the env var `EXPENSE_LLM_GGUF_PATH` points at a real GGUF on disk.
+  the env var `EXPENSA_LLM_GGUF_PATH` points at a real GGUF on disk.
 - **Determinism gate:** assert two consecutive calls with
   `temperature=0` produce identical outputs.
 - **Failure modes:** test that a malformed LLM response (non-JSON,
