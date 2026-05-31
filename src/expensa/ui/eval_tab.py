@@ -20,8 +20,10 @@ import streamlit as st
 from expensa.ml import eval_cache
 from expensa.ml.eval_report import (
     ReportContext,
+    build_html,
     build_pdf,
     default_filename,
+    default_html_filename,
     format_duration,
 )
 from expensa.ml.evaluation import (
@@ -326,48 +328,20 @@ def _render_results(result, abl, id_to_name: dict[int, str]) -> None:
 
     _render_misclassifications(result, id_to_name)
 
-    _render_pdf_export(result, abl, id_to_name)
+    _render_report_export(result, abl, id_to_name)
 
 
-def _render_pdf_export(result, abl, id_to_name: dict[int, str]) -> None:
-    """Bottom-of-tab "Export as PDF" affordance.
+def _build_report_context(result, id_to_name: dict[int, str]) -> ReportContext:
+    """Assemble the ReportContext shared by the PDF and HTML exports.
 
-    Builds the report lazily on click so the kaleido / reportlab
-    imports (and the per-figure PNG rendering) only fire when the
-    user actually wants the file. Missing-deps surface as an inline
-    error rather than crashing the tab.
+    Snapshots the *effective* cascade config at run time (mirrors
+    ``_run()``'s eval_cfg): if zero-shot was excluded for the run, the
+    appendix reflects that rather than the on-disk default.
     """
-    st.divider()
-    # Small breathing room so the button isn't hugging the divider line
-    # above -- with the column row going edge-to-edge, the primary
-    # button's top border was reading as part of the divider.
-    st.write("")
     cfg = get_config()
     account = get_active_account()
     meta = st.session_state.get(_RUN_META_KEY) or {}
-    col_btn, col_hint = st.columns([1, 3], vertical_alignment="center")
-    with col_btn:
-        build_clicked = st.button(
-            "📄 Build PDF report",
-            key="eval_build_pdf",
-            help="Generate a single-file PDF with the headline metrics, "
-                 "per-stage chart, confusion matrix, per-category table, "
-                 "ablation charts and the top misclassifications.",
-        )
-    with col_hint:
-        st.caption(
-            "All charts are rendered as embedded PNGs (via kaleido). "
-            "PDF generation needs the `report-export` extras "
-            "(`pip install reportlab kaleido`)."
-        )
 
-    if not build_clicked:
-        return
-
-    # Build the cascade-settings snapshot from the *effective* config
-    # at run time (mirrors _run()'s eval_cfg). If include_zeroshot was
-    # off we set zeroshot.enabled=False here too so the appendix shows
-    # the same effective config the cascade actually saw.
     include_zs = bool(meta.get("include_zeroshot", cfg.zeroshot.enabled))
     eff_cfg = cfg.model_copy(deep=True)
     if not include_zs:
@@ -383,7 +357,7 @@ def _render_pdf_export(result, abl, id_to_name: dict[int, str]) -> None:
     duration_seconds = (
         float(runtime_val) if isinstance(runtime_val, (int, float)) else None
     )
-    ctx = ReportContext(
+    return ReportContext(
         account_name=account.name,
         embedding_model=cfg.embedding_model,
         n_folds=result.n_folds,
@@ -395,23 +369,78 @@ def _render_pdf_export(result, abl, id_to_name: dict[int, str]) -> None:
         device=cfg.device,
         duration_seconds=duration_seconds,
     )
-    try:
-        with st.spinner("Rendering report (charts → PNG → PDF)…"):
-            pdf_bytes = build_pdf(result, abl, ctx)
-    except RuntimeError as e:
-        st.error(str(e))
-        return
-    except Exception as e:  # noqa: BLE001
-        st.error(f"PDF build failed: {e}")
-        return
 
-    st.download_button(
-        "⬇ Download PDF",
-        data=pdf_bytes,
-        file_name=default_filename(account.name),
-        mime="application/pdf",
-        key="eval_download_pdf",
-    )
+
+def _render_report_export(result, abl, id_to_name: dict[int, str]) -> None:
+    """Bottom-of-tab report export — PDF and self-contained HTML.
+
+    Both build lazily on click. The PDF path needs the optional
+    `report-export` extras (reportlab + kaleido) and surfaces a clear
+    inline error when they're missing; the HTML path is dependency-free
+    (plotly is core) and keeps the charts interactive.
+    """
+    account = get_active_account()
+    st.divider()
+    # Breathing room so the buttons aren't hugging the divider line.
+    st.write("")
+    col_pdf, col_html, col_hint = st.columns([1, 1, 2], vertical_alignment="center")
+
+    with col_pdf:
+        pdf_clicked = st.button(
+            "📄 Build PDF report",
+            key="eval_build_pdf",
+            help="Single-file PDF: metrics, per-stage chart, confusion "
+                 "matrix, per-category + misclassification tables, ablation "
+                 "charts and the cascade-settings appendix.",
+        )
+    with col_html:
+        html_clicked = st.button(
+            "🌐 Build HTML report",
+            key="eval_build_html",
+            help="Self-contained HTML with the same content but "
+                 "interactive charts. No extra dependencies.",
+        )
+    with col_hint:
+        st.caption(
+            "PDF embeds static chart PNGs (needs the `report-export` extras: "
+            "`pip install reportlab kaleido`). HTML inlines interactive "
+            "Plotly charts and works with the base install."
+        )
+
+    if pdf_clicked:
+        ctx = _build_report_context(result, id_to_name)
+        try:
+            with st.spinner("Rendering PDF (charts → PNG → PDF)…"):
+                pdf_bytes = build_pdf(result, abl, ctx)
+        except RuntimeError as e:
+            st.error(str(e))
+            return
+        except Exception as e:  # noqa: BLE001
+            st.error(f"PDF build failed: {e}")
+            return
+        st.download_button(
+            "⬇ Download PDF",
+            data=pdf_bytes,
+            file_name=default_filename(account.name),
+            mime="application/pdf",
+            key="eval_download_pdf",
+        )
+
+    if html_clicked:
+        ctx = _build_report_context(result, id_to_name)
+        try:
+            with st.spinner("Rendering HTML…"):
+                html_text = build_html(result, abl, ctx)
+        except Exception as e:  # noqa: BLE001
+            st.error(f"HTML build failed: {e}")
+            return
+        st.download_button(
+            "⬇ Download HTML",
+            data=html_text.encode("utf-8"),
+            file_name=default_html_filename(account.name),
+            mime="text/html",
+            key="eval_download_html",
+        )
 
 
 def _render_misclassifications(result, id_to_name: dict[int, str]) -> None:

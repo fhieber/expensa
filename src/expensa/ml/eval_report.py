@@ -453,15 +453,312 @@ def _append_kv_table(story: list, rows: list[list[str]], colors, cm: float) -> N
 
 
 def default_filename(account_name: str) -> str:
-    """Produce a filesystem-safe filename for the download_button."""
+    """Produce a filesystem-safe filename for the PDF download_button."""
+    return _default_filename(account_name, "pdf")
+
+
+def default_html_filename(account_name: str) -> str:
+    """Produce a filesystem-safe filename for the HTML download_button."""
+    return _default_filename(account_name, "html")
+
+
+def _default_filename(account_name: str, ext: str) -> str:
     safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in account_name).strip("_")
     ts = datetime.now().strftime("%Y%m%d-%H%M")
-    return f"cascade-quality_{safe or 'account'}_{ts}.pdf"
+    return f"cascade-quality_{safe or 'account'}_{ts}.{ext}"
+
+
+# ---------------------------------------------------------------------------
+# HTML report
+# ---------------------------------------------------------------------------
+#
+# Unlike the PDF path, this needs no optional extras: plotly is a core
+# dependency and charts render to inline <div>s (interactive, not flat
+# PNGs). plotly.js is embedded once so the file is fully self-contained
+# and works offline / when emailed.
+
+
+def _esc(v: object) -> str:
+    """HTML-escape any value for safe interpolation into the template."""
+    import html as _html
+
+    return _html.escape(str(v), quote=True)
+
+
+def _html_kv_table(rows: list[tuple[str, str]], *, mono: bool = False) -> str:
+    """Two-column Setting/Value table. ``mono`` renders cells in a
+    monospace font (used for the config appendix)."""
+    cls = " class='mono'" if mono else ""
+    body = "".join(
+        f"<tr><th scope='row'>{_esc(k)}</th><td{cls}>{_esc(val)}</td></tr>"
+        for k, val in rows
+    )
+    return f"<table class='kv'><tbody>{body}</tbody></table>"
+
+
+def build_html(
+    result: EvalResult,
+    ablation: AblationResult | None,
+    ctx: ReportContext,
+) -> str:
+    """Render the eval result + ablation into a single self-contained
+    HTML document and return it as a string.
+
+    Mirrors :func:`build_pdf` section-for-section so the two exports
+    are interchangeable, but keeps the charts interactive and needs no
+    reportlab / kaleido. plotly.js is inlined once at the top.
+    """
+    import plotly.io as pio
+    from plotly.offline import get_plotlyjs
+
+    def fig_div(fig) -> str:
+        # plotly.js is embedded once in <head>; per-figure divs reference it.
+        return pio.to_html(
+            fig, include_plotlyjs=False, full_html=False,
+            default_width="100%", default_height="460px",
+            config={"displaylogo": False},
+        )
+
+    parts: list[str] = []
+
+    # ─── Header ───────────────────────────────────────────────────────
+    gen = datetime.now().strftime("%Y-%m-%d %H:%M")
+    header_bits = [f"Account: <b>{_esc(ctx.account_name)}</b>", f"Generated: {gen}"]
+    if ctx.duration_seconds is not None:
+        header_bits.append(f"Runtime: <b>{_esc(format_duration(ctx.duration_seconds))}</b>")
+    parts.append("<header>")
+    parts.append("<h1>Cascade quality report</h1>")
+    parts.append(f"<p class='subtle'>{' &middot; '.join(header_bits)}</p>")
+    parts.append(
+        f"<p class='small'>Embedding model: <code>{_esc(ctx.embedding_model)}</code></p>"
+    )
+    parts.append(
+        f"<p class='small'>{result.n_folds}-fold stratified cross-validation "
+        f"&middot; seed {ctx.seed} &middot; zero-shot stage "
+        f"{'INCLUDED' if ctx.include_zeroshot else 'excluded'}.</p>"
+    )
+    if result.dropped_singletons:
+        parts.append(
+            f"<p class='small'>{result.dropped_singletons} label(s) excluded "
+            "(their category had fewer than two examples).</p>"
+        )
+    parts.append("</header>")
+
+    # ─── Headline metrics ─────────────────────────────────────────────
+    cov = "—" if result.accuracy_covered != result.accuracy_covered else f"{result.accuracy_covered:.1%}"
+    metrics = [
+        ("Accuracy", f"{result.accuracy:.1%}"),
+        ("Accuracy (covered)", cov),
+        ("Coverage", f"{result.coverage:.1%}"),
+        ("Macro-F1", f"{result.macro_f1:.3f}"),
+        ("Weighted-F1", f"{result.weighted_f1:.3f}"),
+        ("Labels evaluated", str(result.n_labeled)),
+    ]
+    cards = "".join(
+        f"<div class='card'><div class='card-val'>{_esc(v)}</div>"
+        f"<div class='card-lbl'>{_esc(k)}</div></div>"
+        for k, v in metrics
+    )
+    parts.append(f"<section class='metrics'>{cards}</section>")
+
+    # ─── Per-stage contribution ───────────────────────────────────────
+    if result.stage_breakdown:
+        parts.append("<section><h2>Per-stage contribution</h2>")
+        parts.append(fig_div(stage_breakdown_bar(result.stage_breakdown)))
+        parts.append("</section>")
+
+    # ─── Per-category metrics ─────────────────────────────────────────
+    if result.per_category:
+        rows = "".join(
+            "<tr>"
+            f"<td>{_esc(ctx.category_id_to_name.get(pc.category_id, pc.category_id))}</td>"
+            f"<td class='num'>{pc.precision:.3f}</td>"
+            f"<td class='num'>{pc.recall:.3f}</td>"
+            f"<td class='num'>{pc.f1:.3f}</td>"
+            f"<td class='num'>{pc.support}</td>"
+            "</tr>"
+            for pc in sorted(result.per_category, key=lambda p: -p.f1)
+        )
+        parts.append(
+            "<section><h2>Per-category metrics</h2>"
+            "<table class='grid'><thead><tr>"
+            "<th>Category</th><th>Precision</th><th>Recall</th>"
+            "<th>F1</th><th>Support</th></tr></thead>"
+            f"<tbody>{rows}</tbody></table></section>"
+        )
+
+    # ─── Confusion matrix ─────────────────────────────────────────────
+    if result.confusion_labels:
+        names = [ctx.category_id_to_name.get(cid, str(cid)) for cid in result.confusion_labels]
+        parts.append("<section><h2>Confusion matrix</h2>")
+        parts.append(
+            "<p class='small'>Rows = true category; columns = predicted "
+            "category. Diagonal cells are correct predictions.</p>"
+        )
+        parts.append(fig_div(confusion_matrix_heatmap(result.confusion, names)))
+        parts.append("</section>")
+
+    # ─── Ablation ─────────────────────────────────────────────────────
+    if ablation is not None and (ablation.cumulative or ablation.leave_one_out):
+        parts.append("<section><h2>Stage ablation</h2>")
+        parts.append(
+            f"<p class='small'>Full-cascade baseline: accuracy "
+            f"{ablation.full_accuracy:.1%}, macro-F1 {ablation.full_macro_f1:.3f}.</p>"
+        )
+        if ablation.cumulative:
+            parts.append("<h3>Cumulative — stages enabled in pipeline order</h3>")
+            parts.append(fig_div(ablation_cumulative_curve(ablation.cumulative)))
+        if ablation.leave_one_out:
+            parts.append("<h3>Leave-one-out — Δ vs. full cascade</h3>")
+            parts.append(fig_div(ablation_leave_one_out_bar(ablation.leave_one_out)))
+        parts.append("</section>")
+
+    # ─── Misclassifications ───────────────────────────────────────────
+    wrong = [r for r in result.records if not r[4]]
+    if wrong:
+        bucket: dict[tuple[int, int | None, str], int] = {}
+        for _eid, true_cid, pred_cid, stage, _ok in wrong:
+            bucket[(true_cid, pred_cid, stage)] = bucket.get((true_cid, pred_cid, stage), 0) + 1
+        rows = "".join(
+            "<tr>"
+            f"<td>{_esc(ctx.category_id_to_name.get(true_cid, true_cid))}</td>"
+            f"<td>{'—' if pred_cid is None else _esc(ctx.category_id_to_name.get(pred_cid, pred_cid))}</td>"
+            f"<td>{_esc(stage)}</td>"
+            f"<td class='num'>{n}</td>"
+            "</tr>"
+            for (true_cid, pred_cid, stage), n in sorted(
+                bucket.items(), key=lambda kv: -kv[1]
+            )[:50]
+        )
+        parts.append(
+            f"<section><h2>Misclassifications ({len(wrong)})</h2>"
+            "<p class='small'>Up to 50 most-confused rows, grouped by "
+            "(true → predicted). Stage shows which cascade stage produced "
+            "the wrong answer.</p>"
+            "<table class='grid'><thead><tr><th>True</th><th>Predicted</th>"
+            "<th>Stage</th><th>Count</th></tr></thead>"
+            f"<tbody>{rows}</tbody></table></section>"
+        )
+
+    # ─── Appendix: cascade settings ───────────────────────────────────
+    if ctx.cascade_settings or ctx.zeroshot_model or ctx.device:
+        parts.append(_html_settings_appendix(ctx, ctx.include_zeroshot))
+
+    body = "\n".join(parts)
+    title = f"Cascade quality — {_esc(ctx.account_name)}"
+    return (
+        "<!doctype html>\n<html lang='en'><head><meta charset='utf-8'>"
+        f"<title>{title}</title>"
+        f"<style>{_HTML_CSS}</style>"
+        f"<script>{get_plotlyjs()}</script>"
+        f"</head><body><main>{body}</main></body></html>"
+    )
+
+
+def _html_settings_appendix(ctx: ReportContext, include_zeroshot: bool) -> str:
+    """Mirror the PDF cascade-settings appendix as HTML tables."""
+    parts: list[str] = ["<section class='appendix'>"]
+    parts.append("<h2>Appendix — cascade settings used for this run</h2>")
+    parts.append(
+        "<p class='small'>The resolved configuration values that produced "
+        "the metrics above. Tweak them under <b>Settings → Categorization "
+        "Cascade</b> (or <code>~/.expensa/config.yaml</code>) and re-run "
+        "the Quality tab to A/B the impact.</p>"
+    )
+
+    # Models / device block.
+    if ctx.embedding_model or ctx.zeroshot_model or ctx.device:
+        mrows: list[tuple[str, str]] = []
+        if ctx.embedding_model:
+            mrows.append(("embedding_model", ctx.embedding_model))
+        if ctx.zeroshot_model:
+            mrows.append(("zeroshot_model", ctx.zeroshot_model))
+        if ctx.device:
+            mrows.append(("device", ctx.device))
+        mrows.append(("seed", str(ctx.seed)))
+        mrows.append(("n_folds", str(ctx.n_folds)))
+        mrows.append(("zeroshot stage included", "yes" if include_zeroshot else "no"))
+        if ctx.duration_seconds is not None:
+            mrows.append(("runtime", format_duration(ctx.duration_seconds)))
+        parts.append("<h3>Models &amp; device</h3>")
+        parts.append(_html_kv_table(mrows, mono=True))
+
+    # Per-stage tables in pipeline order.
+    cs = ctx.cascade_settings or {}
+    for stage_key, stage_title in _APPENDIX_STAGE_ORDER:
+        stage_cfg = cs.get(stage_key)
+        if not isinstance(stage_cfg, dict):
+            continue
+        was_active = not (
+            (stage_key == "zeroshot" and not include_zeroshot)
+            or ("enabled" in stage_cfg and not stage_cfg["enabled"])
+        )
+        suffix = "" if was_active else " <span class='muted'>(disabled for this run)</span>"
+        parts.append(f"<h3>{_esc(stage_title)}{suffix}</h3>")
+        parts.append(
+            _html_kv_table(
+                [(k, _format_setting_value(v)) for k, v in stage_cfg.items()],
+                mono=True,
+            )
+        )
+
+    parts.append("</section>")
+    return "".join(parts)
+
+
+_HTML_CSS = """
+:root { color-scheme: light dark; }
+* { box-sizing: border-box; }
+body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
+  Roboto, Helvetica, Arial, sans-serif; line-height: 1.45; color: #1a1a1a;
+  background: #fff; }
+main { max-width: 980px; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
+h1 { font-size: 1.7rem; margin: 0 0 .5rem; }
+h2 { font-size: 1.25rem; margin: 2rem 0 .75rem; border-bottom: 2px solid #eee;
+  padding-bottom: .3rem; }
+h3 { font-size: 1.02rem; margin: 1.2rem 0 .4rem; }
+p.subtle { color: #444; margin: .2rem 0; }
+p.small { color: #666; font-size: .85rem; margin: .2rem 0 .6rem; }
+code { background: #f3f3f3; padding: .05rem .3rem; border-radius: 3px;
+  font-size: .85em; }
+section.metrics { display: grid; grid-template-columns: repeat(auto-fit,
+  minmax(150px, 1fr)); gap: .6rem; margin: 1rem 0 1.5rem; }
+.card { border: 1px solid #e4e4e4; border-radius: 8px; padding: .8rem 1rem;
+  background: #fafafa; }
+.card-val { font-size: 1.5rem; font-weight: 650; }
+.card-lbl { color: #666; font-size: .8rem; margin-top: .15rem; }
+table { border-collapse: collapse; width: 100%; margin: .4rem 0 1rem;
+  font-size: .88rem; }
+table.grid th, table.grid td { border: 1px solid #e0e0e0; padding: .35rem .6rem;
+  text-align: left; }
+table.grid thead th { background: #f3f3f3; }
+table.grid tbody tr:nth-child(even) { background: #fafafa; }
+td.num { text-align: right; font-variant-numeric: tabular-nums; }
+table.kv { max-width: 640px; }
+table.kv th { text-align: left; font-weight: 600; padding: .25rem .6rem;
+  width: 14rem; vertical-align: top; }
+table.kv td { padding: .25rem .6rem; }
+table.kv td.mono, table.kv th { font-family: ui-monospace, SFMono-Regular,
+  Menlo, Consolas, monospace; }
+.muted { color: #999; font-weight: 400; font-size: .85em; }
+@media (prefers-color-scheme: dark) {
+  body { background: #16181c; color: #e6e6e6; }
+  h2 { border-bottom-color: #2a2d33; }
+  .card { background: #1e2127; border-color: #2a2d33; }
+  .card-lbl, p.small, p.subtle { color: #a0a4ad; }
+  code { background: #23262d; }
+  table.grid th, table.grid td { border-color: #2a2d33; }
+  table.grid thead th { background: #23262d; }
+  table.grid tbody tr:nth-child(even) { background: #1b1e24; }
+}
+"""
 
 
 __all__: Iterable[str] = (
     "ReportContext",
     "build_pdf",
+    "build_html",
     "default_filename",
+    "default_html_filename",
     "format_duration",
 )
