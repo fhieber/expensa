@@ -52,20 +52,30 @@ def date_preset_row(
     return resolve_range(preset)
 
 
+def render_chart(fig, *, key: str) -> None:
+    """Render a Plotly figure inline (no surrounding container).
+
+    The figure lives under a section/tab label that already acts as its
+    title, so we suppress the in-chart title to avoid double-rendering and
+    trim the top margin to remove the reserved gap above the chart.
+    (`title=None` would render as the literal string "undefined" in some
+    Plotly/Streamlit version combos.)
+    """
+    fig.update_layout(
+        title_text="",
+        margin={"t": 20, "b": 20, "l": 0, "r": 0},
+    )
+    st.plotly_chart(fig, width="stretch", key=key)
+
+
 def chart_expander(label: str, fig, *, expanded: bool, key: str) -> None:
     """Wrap a Plotly figure in an ``st.expander`` and render it.
 
-    The expander label IS the chart title, so we suppress the in-chart
-    title to avoid double-rendering. Trimming the top margin removes the
-    reserved gap above the chart. (`title=None` would render as the
-    literal string "undefined" in some Plotly/Streamlit version combos.)
+    The expander label IS the chart title; title suppression + margin
+    handling live in :func:`render_chart`.
     """
     with st.expander(label, expanded=expanded):
-        fig.update_layout(
-            title_text="",
-            margin={"t": 20, "b": 20, "l": 0, "r": 0},
-        )
-        st.plotly_chart(fig, width="stretch", key=key)
+        render_chart(fig, key=key)
 
 
 def de_eur(v: float) -> str:

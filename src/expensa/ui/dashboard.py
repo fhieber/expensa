@@ -1,14 +1,18 @@
 """Dashboard tab: headline stats, charts, records table.
 
-Order of sections, top to bottom:
-  1. Date-range preset radio (default: "Past 90 days").
-  2. Headline tiles -- savings rate / income / expenses / to-savings,
-     in a bordered container.
-  3. Collapsible per-category charts (Summe Ausgaben + Monatlicher
-     Saldo expanded by default).
-  4. Records table (read-only; category cells coloured with the
-     user-chosen colour from the Categories tab).
-  5. All-time helper expanders -- recurring vendors + anomalies.
+The layout is organised into scope-based zones. One rule drives it:
+**everything above the date picker is date-independent; everything below
+reflects the selected range.**
+
+  Zone A · "Right now" (date-INDEPENDENT) -- month-to-date pace,
+           committed/month, auto-categorization mix.
+  ── date-range preset radio (default: "Past 90 days") ──
+  Zone B · Period summary (scoped) -- savings rate / income / expenses /
+           to-savings, in a bordered container.
+  Zone C · Trends (scoped) -- per-category charts in an st.tabs switcher.
+  Zone D · Detail (scoped) -- "what changed" top movers + records table.
+  Zone E · Insights & alerts (all-time) -- upcoming recurring, recurring
+           vendors, unusual amounts, grouped under st.tabs.
 """
 
 from __future__ import annotations
@@ -17,7 +21,7 @@ import pandas as pd
 import streamlit as st
 
 from expensa.storage.categories import list_categories, savings_category_names
-from expensa.ui._components import chart_expander, date_preset_row, de_eur
+from expensa.ui._components import date_preset_row, de_eur, render_chart
 from expensa.ui._shared import get_conn
 from expensa.utils.colors import readable_text_color
 from expensa.viz import (
@@ -66,17 +70,32 @@ def render() -> None:
         _render_empty_state(conn)
         return
 
-    since, until = date_preset_row(key_prefix="dashboard")
-    _maybe_low_data_hint(conn)
     savings = tuple(savings_category_names(conn))
-    _render_headline_tiles(conn, since, until, savings)
-    _render_insight_tiles(conn, savings)
-    _render_top_movers(conn, since, until, savings)
-    _render_upcoming_recurring(conn)
-    _render_charts(conn, since, until, savings)
+
+    # ── Zone A · Right now (date-independent) ──
+    _maybe_low_data_hint(conn)
+    _render_status_now(conn, savings)
+
     st.divider()
+
+    # ── Date picker · scopes everything below ──
+    since, until = date_preset_row(key_prefix="dashboard")
+    st.caption("📅 The sections below reflect the selected date range.")
+
+    # ── Zone B · Period summary (scoped) ──
+    _render_headline_tiles(conn, since, until, savings)
+
+    # ── Zone C · Trends (scoped) ──
+    _render_charts(conn, since, until, savings)
+
+    # ── Zone D · Detail (scoped) ──
+    _render_top_movers(conn, since, until, savings)
     _render_records_table(conn, since, until)
-    _render_alltime_helpers(conn)
+
+    st.divider()
+
+    # ── Zone E · Insights & alerts (all-time) ──
+    _render_insights_alerts(conn)
 
 
 def _render_empty_state(conn) -> None:
@@ -133,12 +152,11 @@ def _prev_until(since, until):
     return _previous_period(since, until)[1]
 
 
-def _render_insight_tiles(conn, savings) -> None:
-    """Three always-all-time insight tiles below the headline row:
-    month-to-date spend pace, fixed-vs-variable split, and the
-    auto-categorization mix. These are deliberately NOT date-range scoped
-    -- they answer "where do I stand right now / overall", which is
-    independent of the chart date picker."""
+def _render_status_now(conn, savings) -> None:
+    """Zone A: three date-independent "right now" tiles — month-to-date
+    spend pace, fixed-vs-variable split, and the auto-categorization mix.
+    These sit ABOVE the date picker precisely because they answer "where
+    do I stand right now / overall", independent of the selected range."""
     pace = month_to_date_pace(conn, savings_categories=savings)
     fv = fixed_vs_variable(conn)
     mix = categorization_mix(conn)
@@ -257,40 +275,41 @@ def _render_top_movers(conn, since, until, savings) -> None:
         )
 
 
-def _render_upcoming_recurring(conn) -> None:
+def _tab_upcoming_recurring(conn) -> None:
     """Forecast of recurring charges expected in the next 30 days, from
     the cadence detector. All-time history; not date-range scoped."""
     upcoming = upcoming_recurring(conn, horizon_days=30)
     if upcoming.empty:
+        st.info(
+            "No recurring charges projected in the next 30 days — the "
+            "cadence detector needs vendors with ≥3 charges to forecast."
+        )
         return
     total = float(upcoming["typical_amount"].sum())
-    with st.expander(
-        f"Upcoming recurring charges (next 30 days) — ~{de_eur(total)}",
-        expanded=False,
-    ):
-        st.caption(
-            "Projected from each recurring vendor's detected cadence "
-            "(last seen + typical gap). Amounts are the vendor's typical "
-            "charge — actuals may vary for variable-amount vendors."
-        )
-        st.dataframe(
-            upcoming,
-            hide_index=True,
-            width="stretch",
-            column_config={
-                "name": st.column_config.TextColumn("Vendor"),
-                "cadence": st.column_config.TextColumn("Cadence"),
-                "expected_date": st.column_config.DateColumn(
-                    "Expected", format="DD.MM.YYYY"
-                ),
-                "typical_amount": st.column_config.NumberColumn(
-                    "Typical (€)", format="%.2f"
-                ),
-                "days_until": st.column_config.NumberColumn(
-                    "In days", format="%d"
-                ),
-            },
-        )
+    st.caption(
+        f"~{de_eur(total)} expected in the next 30 days. Projected from each "
+        "recurring vendor's detected cadence (last seen + typical gap). "
+        "Amounts are the vendor's typical charge — actuals may vary for "
+        "variable-amount vendors."
+    )
+    st.dataframe(
+        upcoming,
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "name": st.column_config.TextColumn("Vendor"),
+            "cadence": st.column_config.TextColumn("Cadence"),
+            "expected_date": st.column_config.DateColumn(
+                "Expected", format="DD.MM.YYYY"
+            ),
+            "typical_amount": st.column_config.NumberColumn(
+                "Typical (€)", format="%.2f"
+            ),
+            "days_until": st.column_config.NumberColumn(
+                "In days", format="%d"
+            ),
+        },
+    )
 
 
 def _render_headline_tiles(conn, since, until, savings) -> None:
@@ -366,8 +385,7 @@ def _render_headline_tiles(conn, since, until, savings) -> None:
                 "treat transfers to your own accounts as neutral here."
             )
         st.caption(
-            "Reflects the currently selected date range above. "
-            "🟢 ≥20% · 🟡 0–20% · 🔴 negative. " + savings_note
+            "Savings rate: 🟢 ≥20% · 🟡 0–20% · 🔴 negative. " + savings_note
         )
 
     # Stash the ivex_df under session_state so the Income-vs-Expense chart
@@ -377,55 +395,56 @@ def _render_headline_tiles(conn, since, until, savings) -> None:
 
 
 def _render_charts(conn, since, until, savings) -> None:
-    """Collapsible per-category charts. Savings categories pre-hidden where
-    shown inline (the monthly-saldo chart drops them upstream)."""
+    """Zone C: per-category trend charts in an st.tabs switcher (one chart
+    visible at a time). Savings categories are pre-hidden where shown
+    inline (the monthly-saldo chart drops them upstream)."""
     dash_cats = list_categories(conn)
     color_map: dict[str, str] = {c.name: c.color for c in dash_cats}
     color_map["(unkategorisiert)"] = "#bbbbbb"
 
-    chart_expander(
-        "Summe Ausgaben nach Kategorie",
-        bar_spend_by_category(
-            spend_by_category(conn, since=since, until=until),
-            color_map=color_map,
-            hidden_categories=savings,
-        ),
-        expanded=True,
-        key="dashboard_bar_chart",
+    by_cat, monthly, weekly, ivex = st.tabs(
+        ["By category", "Monthly balance", "Weekly", "Income vs expenses"]
     )
-    chart_expander(
-        "Wöchentliche Ausgaben nach Kategorie",
-        stacked_weekly_by_category(
-            weekly_by_category(conn, since=since, until=until),
-            color_map=color_map,
-            hidden_categories=savings,
-        ),
-        expanded=False,
-        key="dashboard_weekly_chart",
-    )
-    chart_expander(
-        "Monatlicher Saldo je Kategorie",
-        stacked_monthly_by_category(
-            monthly_flow_by_category(
-                conn, since=since, until=until, savings_categories=savings
+
+    with by_cat:
+        render_chart(
+            bar_spend_by_category(
+                spend_by_category(conn, since=since, until=until),
+                color_map=color_map,
+                hidden_categories=savings,
             ),
-            color_map=color_map,
-        ),
-        expanded=True,
-        key="dashboard_trend_chart",
-    )
-    ivex_df = st.session_state.get("_dashboard_ivex_df")
-    if ivex_df is None:
-        # Defensive: should always be populated by _render_headline_tiles.
-        ivex_df = monthly_income_vs_expense(
-            conn, since=since, until=until, savings_categories=savings
+            key="dashboard_bar_chart",
         )
-    chart_expander(
-        "Einkommen vs Ausgaben (monatlich)",
-        income_vs_expense_chart(ivex_df),
-        expanded=False,
-        key="dashboard_ivex_chart",
-    )
+    with monthly:
+        render_chart(
+            stacked_monthly_by_category(
+                monthly_flow_by_category(
+                    conn, since=since, until=until, savings_categories=savings
+                ),
+                color_map=color_map,
+            ),
+            key="dashboard_trend_chart",
+        )
+    with weekly:
+        render_chart(
+            stacked_weekly_by_category(
+                weekly_by_category(conn, since=since, until=until),
+                color_map=color_map,
+                hidden_categories=savings,
+            ),
+            key="dashboard_weekly_chart",
+        )
+    with ivex:
+        ivex_df = st.session_state.get("_dashboard_ivex_df")
+        if ivex_df is None:
+            # Defensive: should always be populated by _render_headline_tiles.
+            ivex_df = monthly_income_vs_expense(
+                conn, since=since, until=until, savings_categories=savings
+            )
+        render_chart(
+            income_vs_expense_chart(ivex_df),
+            key="dashboard_ivex_chart",
+        )
 
 
 def _render_records_table(conn, since, until) -> None:
@@ -499,88 +518,108 @@ def _render_records_table(conn, since, until) -> None:
     )
 
 
-def _render_alltime_helpers(conn) -> None:
-    """Recurring vendors + Unusual amounts. Both intentionally use the
-    full data history and live below the records table because their
-    semantics differ from the date-range-scoped section above."""
-    with st.expander("Recurring expenses (all-time)", expanded=False):
-        st.caption(
-            "Vendors with a detectable cadence (weekly / bi-weekly / "
-            "monthly / quarterly / semi-annual / annual). Cadence is "
-            "inferred from the median day-gap between charges; "
-            "annualised cost = typical amount × charges/year. Sorted "
-            "DESC by annualised cost."
-        )
-        recurring_df = recurring_subscriptions(conn)
-        if recurring_df.empty:
-            st.info(
-                "No vendors with ≥3 charges yet -- ingest more data "
-                "so the cadence detector has gaps to measure."
-            )
-        else:
-            st.dataframe(
-                recurring_df,
-                hide_index=True,
-                width="stretch",
-                column_config={
-                    "name": st.column_config.TextColumn("Vendor"),
-                    "cadence": st.column_config.TextColumn("Cadence"),
-                    "last_seen": st.column_config.DateColumn(
-                        "Last seen", format="DD.MM.YYYY"
-                    ),
-                    "typical_amount": st.column_config.NumberColumn(
-                        "Typical (€)", format="%.2f"
-                    ),
-                    "charges_per_year": st.column_config.NumberColumn(
-                        "Charges/yr", format="%.1f"
-                    ),
-                    "annualised": st.column_config.NumberColumn(
-                        "Annualised (€)", format="%.2f"
-                    ),
-                    "n_charges": st.column_config.NumberColumn(
-                        "Seen", format="%d"
-                    ),
-                },
-            )
+def _render_insights_alerts(conn) -> None:
+    """Zone E: all-time forward-looking / detective views, grouped under
+    one st.tabs block. These intentionally use the full data history and
+    ignore the date picker because their semantics differ from the
+    date-range-scoped sections above."""
+    st.subheader("Insights & alerts")
+    st.caption(
+        "These use your full transaction history, independent of the date "
+        "range selected above."
+    )
+    upcoming_tab, recurring_tab, unusual_tab = st.tabs(
+        ["Upcoming (30d)", "Recurring", "Unusual amounts"]
+    )
+    with upcoming_tab:
+        _tab_upcoming_recurring(conn)
+    with recurring_tab:
+        _tab_recurring_subscriptions(conn)
+    with unusual_tab:
+        _tab_unusual_amounts(conn)
 
-    with st.expander("Unusual amounts (all-time)", expanded=False):
-        st.caption(
-            "Rows whose amount is more than 2σ above the vendor's "
-            "historical average. Surfaces price hikes, double-charges "
-            "and suspected fraud. Baseline statistics use the vendor's "
-            "full history."
+
+def _tab_recurring_subscriptions(conn) -> None:
+    """Vendors with a detectable charging cadence, annualised."""
+    st.caption(
+        "Vendors with a detectable cadence (weekly / bi-weekly / "
+        "monthly / quarterly / semi-annual / annual). Cadence is "
+        "inferred from the median day-gap between charges; "
+        "annualised cost = typical amount × charges/year. Sorted "
+        "DESC by annualised cost."
+    )
+    recurring_df = recurring_subscriptions(conn)
+    if recurring_df.empty:
+        st.info(
+            "No vendors with ≥3 charges yet -- ingest more data "
+            "so the cadence detector has gaps to measure."
         )
-        anom_df = anomalies(conn)
-        if anom_df.empty:
-            st.info(
-                "No anomalies above z=2 in this view. Either every "
-                "expense is in line with its vendor's typical amount, "
-                "or there's not enough history yet — vendors need "
-                "≥3 prior records to score."
-            )
-        else:
-            display = anom_df.drop(columns=["id", "n_history"])
-            st.dataframe(
-                display,
-                hide_index=True,
-                width="stretch",
-                column_config={
-                    "date": st.column_config.DateColumn(
-                        "Date", format="DD.MM.YYYY"
-                    ),
-                    "counterparty": st.column_config.TextColumn("Vendor"),
-                    "category": st.column_config.TextColumn("Category"),
-                    "amount": st.column_config.NumberColumn(
-                        "Amount (€)", format="%.2f"
-                    ),
-                    "typical": st.column_config.NumberColumn(
-                        "Typical (€)", format="%.2f"
-                    ),
-                    "vs_typical": st.column_config.NumberColumn(
-                        "× typical", format="%.1fx"
-                    ),
-                    "zscore": st.column_config.NumberColumn(
-                        "z", format="%.1f"
-                    ),
-                },
-            )
+        return
+    st.dataframe(
+        recurring_df,
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "name": st.column_config.TextColumn("Vendor"),
+            "cadence": st.column_config.TextColumn("Cadence"),
+            "last_seen": st.column_config.DateColumn(
+                "Last seen", format="DD.MM.YYYY"
+            ),
+            "typical_amount": st.column_config.NumberColumn(
+                "Typical (€)", format="%.2f"
+            ),
+            "charges_per_year": st.column_config.NumberColumn(
+                "Charges/yr", format="%.1f"
+            ),
+            "annualised": st.column_config.NumberColumn(
+                "Annualised (€)", format="%.2f"
+            ),
+            "n_charges": st.column_config.NumberColumn(
+                "Seen", format="%d"
+            ),
+        },
+    )
+
+
+def _tab_unusual_amounts(conn) -> None:
+    """Expenses more than 2σ above their vendor's historical average."""
+    st.caption(
+        "Rows whose amount is more than 2σ above the vendor's "
+        "historical average. Surfaces price hikes, double-charges "
+        "and suspected fraud. Baseline statistics use the vendor's "
+        "full history."
+    )
+    anom_df = anomalies(conn)
+    if anom_df.empty:
+        st.info(
+            "No anomalies above z=2 in this view. Either every "
+            "expense is in line with its vendor's typical amount, "
+            "or there's not enough history yet — vendors need "
+            "≥3 prior records to score."
+        )
+        return
+    display = anom_df.drop(columns=["id", "n_history"])
+    st.dataframe(
+        display,
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "date": st.column_config.DateColumn(
+                "Date", format="DD.MM.YYYY"
+            ),
+            "counterparty": st.column_config.TextColumn("Vendor"),
+            "category": st.column_config.TextColumn("Category"),
+            "amount": st.column_config.NumberColumn(
+                "Amount (€)", format="%.2f"
+            ),
+            "typical": st.column_config.NumberColumn(
+                "Typical (€)", format="%.2f"
+            ),
+            "vs_typical": st.column_config.NumberColumn(
+                "× typical", format="%.1fx"
+            ),
+            "zscore": st.column_config.NumberColumn(
+                "z", format="%.1f"
+            ),
+        },
+    )
