@@ -71,6 +71,81 @@ def test_recurring_subscriptions_min_charges_floor(
     assert n_at_3 >= n_at_99
 
 
+def _top_recurring_cpn(conn: sqlite3.Connection) -> str:
+    """counterparty_normalized of the vendor with the most charges."""
+    return conn.execute(
+        "SELECT counterparty_normalized AS c FROM expenses "
+        "WHERE counterparty_normalized <> '' "
+        "GROUP BY counterparty_normalized HAVING COUNT(*) >= 3 "
+        "ORDER BY COUNT(*) DESC LIMIT 1"
+    ).fetchone()["c"]
+
+
+def test_recurring_subscriptions_excludes_own_iban_transfers(
+    tmp_db: sqlite3.Connection, fixtures_dir: Path
+) -> None:
+    """A recurring transfer to one of the user's own IBANs (a monthly
+    savings sweep) must NOT be counted as a subscription -- that was
+    inflating the 'committed / month' tile. Flagging a recurring
+    vendor's rows internal drops it; ``exclude_internal=False`` brings
+    it back."""
+    ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
+    before_n = len(recurring_subscriptions(tmp_db, min_charges=3))
+    cpn = _top_recurring_cpn(tmp_db)
+    tmp_db.execute(
+        "UPDATE expenses SET iban_is_known_self = 1 "
+        "WHERE counterparty_normalized = ?",
+        (cpn,),
+    )
+    assert len(recurring_subscriptions(tmp_db, min_charges=3)) == before_n - 1
+    # Disabling the exclusion restores the vendor.
+    assert len(
+        recurring_subscriptions(tmp_db, min_charges=3, exclude_internal=False)
+    ) == before_n
+
+
+def test_recurring_subscriptions_excludes_savings_category(
+    tmp_db: sqlite3.Connection, fixtures_dir: Path
+) -> None:
+    """Rows labelled with a savings category are dropped by default
+    (``DEFAULT_SAVINGS_CATEGORIES == ('Sparen',)``); passing an empty
+    tuple disables the filter."""
+    ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
+    before_n = len(recurring_subscriptions(tmp_db, min_charges=3))
+    cpn = _top_recurring_cpn(tmp_db)
+    sparen = upsert_category(tmp_db, "Sparen")
+    for r in tmp_db.execute(
+        "SELECT id FROM expenses WHERE counterparty_normalized = ?", (cpn,)
+    ).fetchall():
+        add_label(tmp_db, int(r["id"]), sparen, "user")
+    # Default savings filter drops the Sparen-labelled vendor.
+    assert len(recurring_subscriptions(tmp_db, min_charges=3)) == before_n - 1
+    # No savings filter -> it's back.
+    assert len(
+        recurring_subscriptions(tmp_db, min_charges=3, savings_categories=())
+    ) == before_n
+
+
+def test_fixed_vs_variable_excludes_savings_sweep(
+    tmp_db: sqlite3.Connection, fixtures_dir: Path
+) -> None:
+    """The committed-per-month figure must shrink once a recurring
+    own-IBAN sweep is flagged internal -- the headline bug the user
+    reported (committed read ~100% because the savings sweep counted)."""
+    from expensa.viz import fixed_vs_variable
+
+    ingest_csv(tmp_db, fixtures_dir / "sample_de.csv")
+    cpn = _top_recurring_cpn(tmp_db)
+    fixed_before = fixed_vs_variable(tmp_db)["fixed_monthly"]
+    tmp_db.execute(
+        "UPDATE expenses SET iban_is_known_self = 1 "
+        "WHERE counterparty_normalized = ?",
+        (cpn,),
+    )
+    fixed_after = fixed_vs_variable(tmp_db)["fixed_monthly"]
+    assert fixed_after < fixed_before
+
+
 def test_weekly_by_category_groups_by_iso_week(
     tmp_db: sqlite3.Connection, fixtures_dir: Path
 ) -> None:

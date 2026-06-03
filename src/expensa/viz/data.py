@@ -223,6 +223,8 @@ def recurring_subscriptions(
     since: date | None = None,
     until: date | None = None,
     min_charges: int = 3,
+    exclude_internal: bool = True,
+    savings_categories: tuple[str, ...] = DEFAULT_SAVINGS_CATEGORIES,
 ) -> pd.DataFrame:
     """Vendors that show a consistent **cadence** (weekly / bi-weekly /
     monthly / quarterly / semi-annual / annual) over their transaction
@@ -230,26 +232,37 @@ def recurring_subscriptions(
     consecutive charges; ``charges_per_year`` falls out of that, and
     ``annualised = typical_amount * charges_per_year``.
 
+    Transfers to the user's own accounts are excluded the same way the
+    rest of the dashboard excludes them, so a regular monthly savings
+    transfer isn't mistaken for a "subscription":
+    ``iban_is_known_self = 1`` rows (``exclude_internal``) and rows
+    labelled with one of ``savings_categories`` are dropped.
+
     Returns one row per vendor with at least ``min_charges`` transactions,
     sorted DESC by annualised cost.
 
     Columns: ``name``, ``cadence``, ``last_seen``, ``typical_amount``,
     ``charges_per_year``, ``annualised``, ``n_charges``.
     """
-    extra, params = _date_filter_clause("buchungsdatum", since, until)
+    extra, date_params = _date_filter_clause("e.buchungsdatum", since, until)
+    internal = (
+        " AND COALESCE(e.iban_is_known_self, 0) = 0" if exclude_internal else ""
+    )
+    savings_sql, savings_params = _savings_clause(savings_categories)
     sql = f"""
-        SELECT counterparty_normalized AS cpn,
-               counterparty AS name,
-               buchungsdatum AS d,
-               ABS(betrag_cents) / 100.0 AS amount
-        FROM expenses
-        WHERE counterparty_normalized IS NOT NULL
-          AND counterparty_normalized <> ''
-          AND is_income = 0
-          {extra}
-        ORDER BY counterparty_normalized, buchungsdatum
+        SELECT e.counterparty_normalized AS cpn,
+               e.counterparty AS name,
+               e.buchungsdatum AS d,
+               ABS(e.betrag_cents) / 100.0 AS amount
+        FROM expenses e
+        {JOIN_LATEST_LABEL}
+        WHERE e.counterparty_normalized IS NOT NULL
+          AND e.counterparty_normalized <> ''
+          AND e.is_income = 0
+          {internal} {savings_sql} {extra}
+        ORDER BY e.counterparty_normalized, e.buchungsdatum
     """
-    rows = conn.execute(sql, params).fetchall()
+    rows = conn.execute(sql, savings_params + date_params).fetchall()
     if not rows:
         return pd.DataFrame(
             columns=["name", "cadence", "last_seen", "typical_amount",
@@ -760,6 +773,7 @@ def month_to_date_pace(
 def fixed_vs_variable(
     conn: sqlite3.Connection,
     min_charges: int = 3,
+    savings_categories: tuple[str, ...] = DEFAULT_SAVINGS_CATEGORIES,
 ) -> dict[str, float]:
     """Split estimated monthly spend into committed (recurring) vs
     discretionary, built on :func:`recurring_subscriptions`.
@@ -771,16 +785,26 @@ def fixed_vs_variable(
     contributes to ``variable``, estimated from the mean monthly spend of
     the trailing observable history.
 
+    Both halves exclude the same internal/savings flows (own-IBAN
+    transfers + ``savings_categories``) so a regular savings transfer
+    doesn't masquerade as a committed cost and blow up the "committed /
+    month" figure — the bug that made this read ~100% committed for
+    users who sweep most of their income to their own accounts.
+
     Returns ``fixed_monthly``, ``variable_monthly``, ``total_monthly``,
     ``fixed_share`` (0..1, ``None`` when there's no spend).
     """
-    rec = recurring_subscriptions(conn, min_charges=min_charges)
+    rec = recurring_subscriptions(
+        conn, min_charges=min_charges, savings_categories=savings_categories
+    )
     fixed_monthly = (
         float((rec["annualised"] / 12.0).sum()) if not rec.empty else 0.0
     )
 
     # Mean total monthly expense across observed months (all-time), as the
-    # whole-spend baseline we subtract the fixed portion from.
+    # whole-spend baseline we subtract the fixed portion from. Excludes the
+    # same internal/savings flows as the recurring side above.
+    savings_sql, savings_params = _savings_clause(savings_categories)
     row = conn.execute(
         f"""
         SELECT AVG(monthly) AS mean_monthly FROM (
@@ -790,9 +814,11 @@ def fixed_vs_variable(
             {JOIN_LATEST_LABEL}
             WHERE e.is_income = 0
               AND COALESCE(e.iban_is_known_self, 0) = 0
+              {savings_sql}
             GROUP BY ym
         )
-        """
+        """,
+        savings_params,
     ).fetchone()
     total_monthly = float(row["mean_monthly"] or 0.0)
     # Fixed can't exceed the observed total (cadence estimate noise); clamp.

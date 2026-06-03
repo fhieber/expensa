@@ -165,7 +165,7 @@ def _render_status_now(conn, savings) -> None:
     These sit ABOVE the date picker precisely because they answer "where
     do I stand right now / overall", independent of the selected range."""
     pace = month_to_date_pace(conn, savings_categories=savings)
-    fv = fixed_vs_variable(conn)
+    fv = fixed_vs_variable(conn, savings_categories=savings)
     mix = categorization_mix(conn)
 
     with st.container(border=True):
@@ -275,8 +275,24 @@ def _render_top_movers(conn, since, until, savings) -> None:
         "Change": top["delta"],
         "%": top["pct_str"],
     })
+
+    # Colour the direction arrow + % cells by the sign of the change:
+    # red = spending MORE (bad), green = spending LESS (good). Keyed on
+    # the numeric "Change" column so "new" / rounded-to-0% strings still
+    # get the right colour; the numeric columns keep their NumberColumn
+    # formatting untouched (we don't style them).
+    def _sign_style(row: pd.Series) -> list[str]:
+        delta = row["Change"]
+        css = (
+            "color: #d9534f; font-weight: 600" if delta > 0
+            else "color: #2e7d32; font-weight: 600" if delta < 0
+            else ""
+        )
+        return [css if col in ("", "%") else "" for col in display.columns]
+
+    styled = display.style.apply(_sign_style, axis=1)
     st.dataframe(
-        display,
+        styled,
         hide_index=True,
         width="stretch",
         column_config={
