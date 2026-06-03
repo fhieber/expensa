@@ -67,11 +67,9 @@ def render() -> None:
     # ── Zone B · Period summary (scoped) ──
     _render_headline_tiles(conn, since, until, savings)
 
-    # ── Zone C · Trends (scoped) ──
+    # ── Zone C · Trends (scoped) -- per-category charts + top movers,
+    #    all under one st.tabs switcher. ──
     _render_charts(conn, since, until, savings)
-
-    # ── Zone D · Detail (scoped) ──
-    _render_top_movers(conn, since, until, savings)
 
 
 def _render_view_in_data_link() -> None:
@@ -242,46 +240,51 @@ def _render_status_now(conn, savings) -> None:
 
 def _render_top_movers(conn, since, until, savings) -> None:
     """Biggest per-category spend changes vs the previous same-length
-    window. Skipped for All-time (no previous period to compare)."""
+    window. Rendered as the "Top movers" tab inside the Trends switcher,
+    so it always shows *something* (a caption + an info note when there's
+    nothing to compare) rather than vanishing like the old expander did."""
+    st.caption(
+        "Per-category spend change against the immediately-preceding "
+        "window of the same length. ▲ = spending more, ▼ = less."
+    )
     if since is None or until is None:
+        st.info(
+            "Pick a bounded date range (not *All-time*) to compare against "
+            "the previous period."
+        )
         return
     movers = category_period_comparison(
         conn, since=since, until=until, savings_categories=savings
     )
-    if movers.empty:
-        return
     # Only surface categories that actually moved.
-    movers = movers[movers["delta"].abs() >= 0.005]
+    if not movers.empty:
+        movers = movers[movers["delta"].abs() >= 0.005]
     if movers.empty:
+        st.info("No category moved meaningfully versus the previous period.")
         return
-    with st.expander("Top movers vs previous period", expanded=False):
-        st.caption(
-            "Per-category spend change against the immediately-preceding "
-            "window of the same length. ▲ = spending more, ▼ = less."
-        )
-        top = movers.head(8).copy()
-        top["direction"] = top["delta"].map(lambda d: "▲" if d > 0 else "▼")
-        top["pct_str"] = top["pct"].map(
-            lambda p: f"{p * 100:+.0f}%" if p is not None else "new"
-        )
-        display = pd.DataFrame({
-            "": top["direction"],
-            "Category": top["name"],
-            "Now": top["current"],
-            "Before": top["previous"],
-            "Change": top["delta"],
-            "%": top["pct_str"],
-        })
-        st.dataframe(
-            display,
-            hide_index=True,
-            width="stretch",
-            column_config={
-                "Now": st.column_config.NumberColumn("Now (€)", format="%.2f"),
-                "Before": st.column_config.NumberColumn("Before (€)", format="%.2f"),
-                "Change": st.column_config.NumberColumn("Change (€)", format="%+.2f"),
-            },
-        )
+    top = movers.head(8).copy()
+    top["direction"] = top["delta"].map(lambda d: "▲" if d > 0 else "▼")
+    top["pct_str"] = top["pct"].map(
+        lambda p: f"{p * 100:+.0f}%" if p is not None else "new"
+    )
+    display = pd.DataFrame({
+        "": top["direction"],
+        "Category": top["name"],
+        "Now": top["current"],
+        "Before": top["previous"],
+        "Change": top["delta"],
+        "%": top["pct_str"],
+    })
+    st.dataframe(
+        display,
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "Now": st.column_config.NumberColumn("Now (€)", format="%.2f"),
+            "Before": st.column_config.NumberColumn("Before (€)", format="%.2f"),
+            "Change": st.column_config.NumberColumn("Change (€)", format="%+.2f"),
+        },
+    )
 
 
 def _render_headline_tiles(conn, since, until, savings) -> None:
@@ -374,8 +377,9 @@ def _render_charts(conn, since, until, savings) -> None:
     color_map: dict[str, str] = {c.name: c.color for c in dash_cats}
     color_map["(unkategorisiert)"] = "#bbbbbb"
 
-    by_cat, monthly, weekly, ivex = st.tabs(
-        ["By category", "Monthly balance", "Weekly", "Income vs expenses"]
+    by_cat, monthly, weekly, ivex, movers = st.tabs(
+        ["By category", "Monthly balance", "Weekly", "Income vs expenses",
+         "Top movers"]
     )
 
     with by_cat:
@@ -417,3 +421,5 @@ def _render_charts(conn, since, until, savings) -> None:
             income_vs_expense_chart(ivex_df),
             key="dashboard_ivex_chart",
         )
+    with movers:
+        _render_top_movers(conn, since, until, savings)
