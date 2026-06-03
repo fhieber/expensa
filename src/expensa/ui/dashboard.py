@@ -24,6 +24,7 @@ import streamlit as st
 from expensa.storage.categories import list_categories, savings_category_names
 from expensa.ui._components import date_preset_row, de_eur, render_chart
 from expensa.ui._shared import get_conn
+from expensa.utils.colors import readable_text_color
 from expensa.viz import (
     bar_spend_by_category,
     categorization_mix,
@@ -264,43 +265,51 @@ def _render_top_movers(conn, since, until, savings) -> None:
         return
     top = movers.head(8).copy()
     top["direction"] = top["delta"].map(lambda d: "▲" if d > 0 else "▼")
-    top["pct_str"] = top["pct"].map(
-        lambda p: f"{p * 100:+.0f}%" if p is not None else "new"
-    )
     display = pd.DataFrame({
         "": top["direction"],
         "Category": top["name"],
-        "Now": top["current"],
-        "Before": top["previous"],
-        "Change": top["delta"],
-        "%": top["pct_str"],
+        "Now (€)": top["current"],
+        "Before (€)": top["previous"],
+        "Change (€)": top["delta"],
+        # Numeric so the column sorts by magnitude, not lexically
+        # ("+9%" used to sort after "+100%"). New categories (no prior
+        # spend, pct is None) become NaN and render as "new" below.
+        "Δ %": pd.to_numeric(top["pct"], errors="coerce") * 100,
     })
 
-    # Colour the direction arrow + % cells by the sign of the change:
-    # red = spending MORE (bad), green = spending LESS (good). Keyed on
-    # the numeric "Change" column so "new" / rounded-to-0% strings still
-    # get the right colour; the numeric columns keep their NumberColumn
-    # formatting untouched (we don't style them).
-    def _sign_style(row: pd.Series) -> list[str]:
-        delta = row["Change"]
-        css = (
+    cat_color = {c.name: c.color for c in list_categories(conn)}
+
+    def _row_style(row: pd.Series) -> list[str]:
+        # Sign colour: red = spending MORE (bad), green = LESS (good),
+        # applied to the direction arrow + the % cell.
+        delta = row["Change (€)"]
+        sign = (
             "color: #d9534f; font-weight: 600" if delta > 0
             else "color: #2e7d32; font-weight: 600" if delta < 0
             else ""
         )
-        return [css if col in ("", "%") else "" for col in display.columns]
+        out: list[str] = []
+        for col in display.columns:
+            if col == "Category":
+                bg = cat_color.get(row["Category"])
+                out.append(
+                    f"background-color: {bg}; color: {readable_text_color(bg)}"
+                    if bg else ""
+                )
+            elif col in ("", "Δ %"):
+                out.append(sign)
+            else:
+                out.append("")
+        return out
 
-    styled = display.style.apply(_sign_style, axis=1)
-    st.dataframe(
-        styled,
-        hide_index=True,
-        width="stretch",
-        column_config={
-            "Now": st.column_config.NumberColumn("Now (€)", format="%.2f"),
-            "Before": st.column_config.NumberColumn("Before (€)", format="%.2f"),
-            "Change": st.column_config.NumberColumn("Change (€)", format="%+.2f"),
-        },
-    )
+    styled = display.style.apply(_row_style, axis=1).format({
+        "Now (€)": "{:.2f}",
+        "Before (€)": "{:.2f}",
+        "Change (€)": "{:+.2f}",
+        # NaN (new category) -> "new"; otherwise a signed integer percent.
+        "Δ %": lambda v: "new" if pd.isna(v) else f"{v:+.0f}%",
+    })
+    st.dataframe(styled, hide_index=True, width="stretch")
 
 
 def _render_headline_tiles(conn, since, until, savings) -> None:
