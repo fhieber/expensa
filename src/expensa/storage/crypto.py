@@ -16,6 +16,7 @@ This module is deliberately Streamlit-free so it's exercisable in tests.
 
 from __future__ import annotations
 
+import gc
 import os
 import shutil
 import sqlite3
@@ -202,6 +203,34 @@ def _safety_copy(path: Path, tag: str) -> Path:
     return dest
 
 
+def _atomic_replace(src: Path, dst: Path) -> None:
+    """``os.replace`` with a Windows handle-lag retry.
+
+    On Windows, a just-closed SQLite/SQLCipher connection can leave the
+    OS file handle on ``dst`` briefly held even after ``conn.close()``
+    returns, so an immediate ``os.replace`` raises ``PermissionError``
+    (WinError 5 / 32). We force a GC pass (to drop any lingering
+    connection object the caller didn't explicitly free) and retry with
+    a short backoff. POSIX never hits this -- the first attempt
+    succeeds. Same lag the backup / restore paths already work around.
+    """
+    delays = (0.0, 0.05, 0.1, 0.2, 0.4)
+    last: OSError | None = None
+    for delay in delays:
+        if delay:
+            time.sleep(delay)
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError as e:  # noqa: PERF203
+            last = e
+            # GC can release a SQLCipher connection whose handle is still
+            # pinning dst; only worth doing between attempts.
+            gc.collect()
+    # Exhausted retries -- surface the original error for the caller.
+    raise last if last is not None else OSError(f"could not replace {dst}")
+
+
 def _remove_wal_sidecars(path: Path) -> None:
     """Delete stale ``-wal`` / ``-shm`` files next to ``path``.
 
@@ -267,7 +296,7 @@ def encrypt_file(
     safety: Path | None = None
     if keep_safety:
         safety = _safety_copy(plain_path, "pre-encrypt")
-    os.replace(tmp, plain_path)
+    _atomic_replace(tmp, plain_path)
     _remove_wal_sidecars(plain_path)
     return safety
 
@@ -307,7 +336,7 @@ def decrypt_file(
     safety: Path | None = None
     if keep_safety:
         safety = _safety_copy(enc_path, "pre-decrypt")
-    os.replace(tmp, enc_path)
+    _atomic_replace(tmp, enc_path)
     _remove_wal_sidecars(enc_path)
     return safety
 
