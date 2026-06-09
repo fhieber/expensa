@@ -353,6 +353,17 @@ def _render_import_expander(conn) -> None:
             errors: list[str] = []
             with st.status("Importing…", expanded=True) as status:
                 progress = st.progress(0.0, text="starting…")
+                # Force the (lazy) embedding model to load *now*, behind an
+                # explicit message. Otherwise its cost — minutes on first run
+                # while the ~1 GB model downloads/loads — is hidden inside the
+                # first encode call, leaving the bar frozen at "0/N" so the
+                # import looks hung.
+                if emb is not None:
+                    status.write("loading embedding model (first run may download it)…")
+                    try:
+                        _ = emb.dim  # triggers SentenceTransformer load
+                    except Exception as e:  # noqa: BLE001 — surface to the user
+                        status.write(f"⚠️ embedding model failed to load — {e}")
                 for f in files:
                     status.write(f"parsing {f.name}…")
                     with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tmp:
@@ -1246,6 +1257,13 @@ def _autolabel_predictions(conn, cfg, target_ids: list[int], label_text: str):
     with st.status(label_text, expanded=True) as status:
         status.write(f"loading embedding model `{cfg.embedding_model}`…")
         emb = get_embedder()
+        # get_embedder() is lazy — force the load now so its cost (minutes on
+        # first run) is attributed to this message rather than hiding inside
+        # the later "fitting"/"predicting" steps.
+        try:
+            _ = emb.dim  # triggers SentenceTransformer load
+        except Exception as e:  # noqa: BLE001 — surface to the user
+            status.write(f"⚠️ embedding model failed to load — {e}")
         cascade = CategorizationCascade(conn, cfg, emb)
         status.write("fitting cascade on the latest user labels…")
         try:
