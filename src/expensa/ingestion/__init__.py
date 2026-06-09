@@ -183,7 +183,10 @@ def ingest_csv(
         ).fetchall()
         cb("embed", 0, len(rows))
         embedded = store_embeddings(
-            conn, embedder, [(r["id"], r["combined_text"] or "") for r in rows]
+            conn,
+            embedder,
+            [(r["id"], r["combined_text"] or "") for r in rows],
+            progress_callback=lambda done, total: cb("embed", done, total),
         )
         cb("embed", len(rows), len(rows))
 

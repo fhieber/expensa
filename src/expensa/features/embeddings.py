@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 from abc import ABC, abstractmethod
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 
 import numpy as np
 
@@ -143,11 +143,19 @@ def store_embeddings(
     conn: sqlite3.Connection,
     embedder: Embedder,
     rows: Iterable[tuple[int, str]],
+    *,
+    progress_callback: Callable[[int, int], None] | None = None,
+    chunk_size: int = 64,
 ) -> int:
     """Encode and persist embeddings for the given (expense_id, text) pairs.
 
     Skips ids that already have an embedding from the same model.
     Returns the number of new rows written.
+
+    Encoding is done in chunks of ``chunk_size`` so ``progress_callback`` —
+    invoked as ``cb(done, total)`` after each chunk is persisted — can drive a
+    UI progress bar. Without chunking the first ``encode`` call blocks for the
+    entire batch (and, on first use, the model load/download) with no feedback.
     """
     rows = list(rows)
     if not rows:
@@ -161,16 +169,24 @@ def store_embeddings(
     pending = [(eid, txt) for eid, txt in rows if eid not in skip]
     if not pending:
         return 0
-    vectors = embedder.encode([t for _, t in pending])
-    payloads = [
-        (eid, embedder.model_name, embedder.dim, vec.tobytes())
-        for (eid, _), vec in zip(pending, vectors, strict=True)
-    ]
-    conn.executemany(
-        "INSERT OR REPLACE INTO embeddings(expense_id, model_name, dim, vector) VALUES (?, ?, ?, ?)",
-        payloads,
-    )
-    return len(payloads)
+    cb = progress_callback or (lambda *_: None)
+    total = len(pending)
+    written = 0
+    cb(0, total)
+    for start in range(0, total, max(1, chunk_size)):
+        chunk = pending[start : start + max(1, chunk_size)]
+        vectors = embedder.encode([t for _, t in chunk])
+        payloads = [
+            (eid, embedder.model_name, embedder.dim, vec.tobytes())
+            for (eid, _), vec in zip(chunk, vectors, strict=True)
+        ]
+        conn.executemany(
+            "INSERT OR REPLACE INTO embeddings(expense_id, model_name, dim, vector) VALUES (?, ?, ?, ?)",
+            payloads,
+        )
+        written += len(payloads)
+        cb(written, total)
+    return written
 
 
 def load_embeddings(
